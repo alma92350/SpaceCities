@@ -6,7 +6,34 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- **The Odyssey's living galaxy is now bounded to three background worlds, drawn from the seed.**
+  `createGalaxy` used to instantiate and simulate all 11 worlds from turn one; it now brings up
+  your start seat plus a pseudo-random draw of `BACKGROUND_WORLDS` (3) others
+  (`backgroundWorldIds`, keyed on the galaxy seed and the start world), so which neighbours are
+  alive is part of what a seed means rather than "all of them, always". The rest of the roster
+  stays **dormant**: still on the starmap, still jumpable, still a full skirmish map — it's
+  generated on arrival, exactly as a never-visited destination always was, and simulates from then
+  on like any world you've left. The background scheduler, the galaxy-wide sweeps and every save
+  therefore carry a handful of worlds instead of the whole roster. Same seed still replays the
+  same galaxy. The faction-spread sweep still flies claims across the *whole* starmap, and a
+  dormant world now takes the colours it was claimed under when it's finally built in.
+
 ### Fixed
+
+- **Every jump button in a Spaceport's panel read "· your colony" and showed no fuel cost.** The
+  label asked whether the destination's state existed, which the living galaxy made true for every
+  world from turn one — so worlds you had never set foot on advertised themselves as held colonies
+  and hid their real (nonzero) price. It now reads the cost `jumpCost` actually charges, which is
+  free exactly for a world you've reached before or still hold a base on.
+- **A first jump to a world with no state yet skipped the landing-site picker.** `initiateJump`
+  treated a missing destination state as "shouldn't happen" and fell straight through to the jump,
+  landing at the world's fixed generation-time anchor instead of letting the player pick a spot on
+  the blind minimap. It now previews the destination (`previewPlanet`) to draw the picker, without
+  waking the world: opening the modal — or backing out of it — leaves a dormant world dormant.
+  Observer Mode's free look at "any world, discovered or not" shows the same read-only preview for
+  a dormant world rather than silently doing nothing.
 
 - **The Competition screen's 🧬 AI Editor tab was a blank screen.** Its "Start from:" row read
   `engine/aiStrategy.js`'s `STRATEGIES` table, which `competition.js` deliberately never imports —

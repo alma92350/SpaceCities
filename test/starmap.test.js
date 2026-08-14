@@ -48,6 +48,8 @@ const { renderStarmap } = await import("../starmap.js");
 const { starmapEl } = await import("../dom.js");
 const { makeBuilding, makeUnit } = await import("../engine/state.js");
 const { getColonyPolicy } = await import("../engine/colonyPolicy.js");
+const { liveWorld } = await import("./_helpers.js");
+const { observedState } = await import("../observer.js");
 
 // The world-node button for `id`, in the exact order renderStarmap built the field (mirrors
 // galaxyStatus's own world order, so this never depends on matching by rendered text).
@@ -418,7 +420,7 @@ test("Observer Mode: clicking an unexplored world (no Spaceport, no fuel) specta
 
   renderStarmap();
   starmapEl.classList.remove("hidden");
-  const unexplored = g.worlds.find(w => w !== realActiveId);
+  const unexplored = liveWorld(g);
   worldNode(g, unexplored).click();
 
   assert.equal(game.spectateId, unexplored, "the click jumped the spectated world with no Spaceport/fuel gate");
@@ -428,6 +430,37 @@ test("Observer Mode: clicking an unexplored world (no Spaceport, no fuel) specta
   game.galaxy = null;
   game.observerMode = false;
   game.spectateId = null;
+  game.observerCamera = null;
+});
+
+// "ANY world" has to include a DORMANT one — only a seeded handful simulate from turn one
+// (engine/galaxy.js BACKGROUND_WORLDS), and the starmap offers every world as a node either way.
+// With no live state to look at, observer.js shows the pristine world the player WOULD land on
+// (previewPlanet) rather than waking it, so spectating still can't touch the sim.
+test("Observer Mode: clicking a DORMANT world spectates a read-only preview of it, without bringing it to life", () => {
+  const g = createGalaxy({ seed: 32 });
+  const realActiveId = g.activeId;
+  game.galaxy = g;
+  game.colonyAlerts = {};
+  game.observerMode = true;
+  game.spectateId = realActiveId;
+  game.observerCamera = { x: 0, y: 0, zoom: 1 };
+
+  renderStarmap();
+  starmapEl.classList.remove("hidden");
+  const dormant = g.worlds.find(w => !g.planets.has(w));
+  assert.ok(dormant, "fixture sanity: the seeded draw leaves some world dormant");
+  worldNode(g, dormant).click();
+
+  assert.equal(game.spectateId, dormant, "the click really jumped the spectated world");
+  assert.equal(observedState().planetId, dormant, "…and what gets drawn IS that world, not a fallback to the seat");
+  assert.ok(!g.planets.has(dormant), "the galaxy never woke it — spectating stays read-only");
+  assert.equal(g.activeId, realActiveId, "the real seat never moved");
+
+  game.galaxy = null;
+  game.observerMode = false;
+  game.spectateId = null;
+  game.spectatePreview = null;
   game.observerCamera = null;
 });
 

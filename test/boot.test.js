@@ -8,6 +8,7 @@ import { game } from "../session.js";
 // test/odyssey.test.js's own jumpCapital tests already use — reused below (P2 finding, near the
 // bottom of this file) so initiateJump's own tests don't re-roll it slightly differently.
 import { jumpReadyGalaxy } from "./_helpers.js";
+import { liveWorld, liveWorlds, dormantWorld } from "./_helpers.js";
 import { makeBuilding } from "../engine/state.js";
 import { installFakeDom, fakeCtx, FakeElement } from "./_dom.js";
 
@@ -502,7 +503,7 @@ test("initiateJump: a destination that already has a player Spaceport needs no p
   resetPause();
   game.input = null;
   const g = jumpReadyGalaxy(102);
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   // Stand a finished Spaceport right on the destination — the exact shape test/landing.test.js's
   // own "a Spaceport already standing at the destination" fixture uses.
@@ -540,6 +541,32 @@ test("initiateJump: a destination with no player Spaceport, origin launch-ready,
   assert.equal(g.credits, creditsBefore, "fuel isn't spent until the jump actually launches from onPick, not merely from opening the picker");
 
   resumeLoop("landing-pick");   // this test never drives the picker's own onPick/onCancel, so clear the pause it opened
+  game.galaxy = null;
+  resetPause();
+});
+
+// The common case of that same path, now that only a seeded handful of worlds simulate from turn
+// one (engine/galaxy.js BACKGROUND_WORLDS): a first jump to a world with no state yet. The picker
+// still has to open — that world is exactly the "no beacon to home in on" case it exists for —
+// and merely opening it must not add the world to the live set, or window-shopping destinations
+// would quietly wake the galaxy one modal at a time.
+test("initiateJump: a DORMANT destination still opens the landing picker, and opening it doesn't wake the world", () => {
+  resetPause();
+  game.input = null;
+  const g = jumpReadyGalaxy(104);
+  const originId = g.activeId;
+  const destId = dormantWorld(g);
+  assert.ok(destId, "fixture sanity: the seeded background draw leaves some world dormant");
+  game.galaxy = g;
+
+  const appended = withLandingPickDom(() => {
+    assert.equal(initiateJump(destId), true, "the pick applies here too — a never-simulated world has no pad to home in on");
+  });
+  assert.equal(appended.length, 1, "the picker really opened for a world with no state of its own");
+  assert.equal(g.activeId, originId, "the jump is still deferred to the picker's own onPick");
+  assert.ok(!g.planets.has(destId), "…and the destination is still dormant — a preview was drawn, not a world woken");
+
+  resumeLoop("landing-pick");
   game.galaxy = null;
   resetPause();
 });
@@ -667,13 +694,13 @@ test("a real jump (focusActivePlanet) clears only the destination world's colony
   resetToasts();
   game.input = null;
   const g = jumpReadyGalaxy(201);
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   // A Spaceport already standing at the destination -> needsPick is false -> jumps immediately,
   // same fixture shape as the "needs no pick" test above — no landing-picker DOM needed here.
   const destPad = makeBuilding("spaceport", "player", dest.map.bases.player.x + 40, dest.map.bases.player.y);
   dest.buildings.set(destPad.id, destPad);
-  const otherId = g.worlds.find(w => w !== g.activeId && w !== destId);
+  const otherId = liveWorlds(g).find(w => w !== destId);
   game.colonyAlerts = {
     [destId]: { type: "attacked", at: performance.now() },
     [otherId]: { type: "lost", at: performance.now() },

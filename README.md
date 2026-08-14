@@ -162,6 +162,12 @@ Command Center; the world you leave becomes a **background colony** that keeps w
 passive income while you're away, and can be handed standing orders (an auto-sell floor, a worker
 headcount to sustain) so it keeps developing unattended.
 
+The galaxy is alive before you visit it, but not all of it at once: alongside your seat, three
+other worlds — a pseudo-random draw from the galaxy seed, so which three is part of what that seed
+means — develop, trade and drift diplomatically in the background from turn one, and every world
+you've been to keeps running after you leave. The rest of the roster stays dormant until you jump
+there, then joins the living galaxy too.
+
 Each world's neighbour has its own **diplomacy** — a grace period, grievances if you strip-mine or
 attack, forgiveness that varies by personality, paid tribute truces, and now gifts plus occasional
 favor requests as an actual road to Allied (which also trades at a tighter market spread) — so how
