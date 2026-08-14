@@ -22,11 +22,15 @@ change: nothing in `engine/` or `tools/` is touched.
    Pacifying a world = razing its neighbour's Command Center while it has no colony ship left to
    re-found with. Pacification is **permanent and sticky** — you do **not** need to hold or garrison
    a world afterward for it to stay conquered.
-3. **But the galaxy's clock never pauses for you.** Every world simulates from galaxy creation, not
-   from when you personally arrive (`createGalaxy` seeds and starts *all 11* worlds at once;
-   `stepGalaxy` ticks every background world every frame, just at a coarser cadence that conserves
-   the same total sim-time). Time spent perfecting your capital is time every other neighbour also
-   gets to grow. Move with purpose; you just never need to panic.
+3. **But the galaxy's clock never pauses for you.** Part of it simulates from galaxy creation, not
+   from when you personally arrive: `createGalaxy` starts your seat plus a **seeded, pseudo-random
+   draw of 3 other worlds** (`BACKGROUND_WORLDS`/`backgroundWorldIds` — which three is part of what
+   the galaxy seed means), and `stepGalaxy` ticks each of those every frame at a coarser cadence
+   that conserves the same total sim-time. The rest of the roster stays **dormant** and is
+   generated the moment you jump there — pristine, exactly as if the galaxy had just been created —
+   and then simulates from that point on, like any world you've left. So time spent perfecting your
+   capital is time the *live* neighbours get to grow; an unvisited dormant world is the one place
+   patience really is free. You can't see which is which from the starmap, so plan for the worst.
 4. **Only your start world's neighbour is guaranteed Hard.** The other ten get an *independently
    randomised* difficulty and strategy per world (`neighbourAiProfile`, keyed off the galaxy seed).
    Scout before you commit fuel — Observer Mode is free and shows you exactly what you're facing.
@@ -147,9 +151,10 @@ diplomacy constants — those are flat, not scaled by map/resource settings.
 Three facts compose into one shape of play:
 
 - No clock, no permanent defeat (§1) → patience costs nothing *directly*.
-- But every world's neighbour has been developing since galaxy creation, at conserved total
-  sim-time, whether you've visited or not (§1, §8) → patience is not free *indirectly*: an ignored
-  Hard/Balanced or Hard/Economist world keeps compounding.
+- But the neighbours on the galaxy's *live* worlds — your seat plus the seeded three, plus every
+  world you've since visited — have been developing at conserved total sim-time whether you went
+  back or not (§1, §8) → patience is not free *indirectly*: an ignored Hard/Balanced or
+  Hard/Economist world keeps compounding, and you can't tell from the map which worlds those are.
 - Veterancy travels with a unit (`unit.kills`, read live by `rankMults`); doctrine does not — it's
   `state.players.player.upgrades`, freshly `{}` on every planet's own `createGameState` call, and
   `engine/combat.js` reads it off **whatever world the fight is currently happening on**, never

@@ -15,8 +15,10 @@
    Deliberately does not touch `game.state`, `game.galaxy.activeId`, or the real input camera:
    it only changes what gets DRAWN (boot.js's render callback swaps in observedState() + the
    camera below while active) and reads state that's already simulating regardless of what's
-   on screen (stepGalaxy advances every world in the galaxy every tick, active or backgrounded
-   — see engine/galaxy.js). So exiting always resumes normal play exactly where it was left,
+   on screen (stepGalaxy advances every world the galaxy is actually running, active or
+   backgrounded — see engine/galaxy.js). A world the galaxy ISN'T running yet (a dormant one:
+   only a seeded few are alive from turn one) is shown as a throwaway preview instead of being
+   woken — see spectateWorld. So exiting always resumes normal play exactly where it was left,
    and nothing here can affect the deterministic sim.
 
    input.js delegates its mouse/wheel/keydown handlers to the small helpers below while
@@ -32,6 +34,7 @@ import { canvas } from "./dom.js";
 import { archetypeFor } from "./engine/aiArchetypes.js";
 import { hostility, stanceLabel, aiDevelopment } from "./engine/diplomacy.js";
 import { supplyUsed, supplyCap } from "./engine/supply.js";
+import { previewPlanet } from "./engine/galaxy.js";
 
 const DOUBLE_PRESS_MS = 400;   // repeated Space within this window cycles bases, same feel as centerOnBase
 
@@ -49,7 +52,11 @@ const PAN_KEYS = {
 // world and no galaxy, so it falls through to game.state — which is already what this returned
 // for a galaxy-less session before Phase 5, hence no branch of its own here.
 export function observedState() {
-  if (game.observerMode && game.galaxy) return game.galaxy.planets.get(game.spectateId) || game.state;
+  if (game.observerMode && game.galaxy) {
+    // A world the galaxy is really simulating wins; a DORMANT one falls back to the pristine
+    // preview spectateWorld built for it (see there), and only then to the real active world.
+    return game.galaxy.planets.get(game.spectateId) || game.spectatePreview || game.state;
+  }
   return game.state;
 }
 
@@ -127,6 +134,7 @@ export function enterObserverMode() {
   if (game.input) game.input.cancelGesture();   // don't let a drag armed just before this resolve into a real order
   game.observerMode = true;
   game.spectateId = game.galaxy ? game.galaxy.activeId : game.state.planetId;
+  game.spectatePreview = null;   // entry always lands on a world that really is simulating (see spectateWorld)
   const real = game.input ? game.input.getCamera() : null;
   // Start exactly where normal play was looking — entering shouldn't jar the view — and only
   // recenter once actual observer navigation (Space / a starmap jump) asks for somewhere else.
@@ -138,6 +146,7 @@ export function exitObserverMode() {
   if (!game.observerMode) return;
   game.observerMode = false;
   game.spectateId = null;
+  game.spectatePreview = null;
   game.observerCamera = null;
 }
 
@@ -161,12 +170,21 @@ export function toggleObserverMode() {
 }
 
 // Free jump to any world's camera — no fuel, no canJumpTo gate, no real galaxy.activeId
-// change. A no-op unless observerMode is actually on and the galaxy really has that world.
+// change. A no-op unless observerMode is actually on and `id` is a world of this galaxy at all.
+//
+// "Any world" includes a DORMANT one (engine/galaxy.js BACKGROUND_WORLDS: only a seeded few
+// simulate from turn one). There's no live state to look at there, so previewPlanet builds the
+// pristine world the player WOULD arrive at and that's what gets shown — read-only, never ticked
+// and never registered on the galaxy, so spectating still can't wake a world or otherwise touch
+// the sim (this module's header comment). Nothing is happening on a dormant world, and a frozen,
+// untouched world is exactly how that reads.
 export function spectateWorld(id) {
-  if (!game.observerMode || !game.galaxy || !game.galaxy.planets.has(id)) return;
+  if (!game.observerMode || !game.galaxy || !game.galaxy.worlds.includes(id)) return;
   game.spectateId = id;
+  game.spectatePreview = game.galaxy.planets.has(id) ? null : previewPlanet(game.galaxy, id);
   obsBaseCycle = 0; lastObsBaseAt = -Infinity;
-  pointCameraAt(game.galaxy.planets.get(id), initialFocus(game.galaxy.planets.get(id)));
+  const state = observedState();
+  pointCameraAt(state, initialFocus(state));
 }
 
 // Space, while observing: cycle every completed Command Center on the spectated world, any

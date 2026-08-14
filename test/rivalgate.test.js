@@ -28,6 +28,7 @@ import { RIVAL_ASCENSION_STANCE_CEILING } from "../engine/galaxy.js";
 import { BUILDINGS } from "../engine/entities.js";
 import { PEACE_THRESHOLD, createDiplomacy, updateDiplomacy } from "../engine/diplomacy.js";
 import { checkDomination } from "../engine/galaxy.js";
+import { liveWorld, liveWorlds } from "./_helpers.js";
 
 // Eliminate the AI's foothold on `state` — its Command Center and its (undeployed) colony ship —
 // the same razeAiCommand idiom test/domination.test.js uses, so checkDomination will pacify it.
@@ -239,7 +240,7 @@ function seedRivalGate(galaxy, worldId, { charge = 0.3, devBuildings = 0 } = {})
 
 test("checkRivalGate tracks the single most-developed qualifying world (checkExpansion's own idiom)", () => {
   const g = createGalaxy({ seed: 21 });
-  const others = g.worlds.filter(w => w !== g.activeId);
+  const others = liveWorlds(g);
   const [lo, hi] = others;
   seedRivalGate(g, lo, { devBuildings: 1 });
   seedRivalGate(g, hi, { devBuildings: 4 });   // strictly more developed
@@ -250,7 +251,7 @@ test("checkRivalGate tracks the single most-developed qualifying world (checkExp
 
 test("checkRivalGate tie-breaks by world id, lowest wins — deterministic, no clock/RNG", () => {
   const g = createGalaxy({ seed: 22 });
-  const others = g.worlds.filter(w => w !== g.activeId).sort();
+  const others = liveWorlds(g).sort();
   const [a, b] = others;
   seedRivalGate(g, a, { devBuildings: 2 });
   seedRivalGate(g, b, { devBuildings: 2 });   // identical development
@@ -260,7 +261,7 @@ test("checkRivalGate tie-breaks by world id, lowest wins — deterministic, no c
 
 test("galaxyStatus surfaces the tracked rival Gate's world and live charge", () => {
   const g = createGalaxy({ seed: 23 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   const { gate } = seedRivalGate(g, w, { charge: 0.42 });
   checkRivalGate(g);
   const status = galaxyStatus(g);
@@ -278,7 +279,7 @@ test("galaxyStatus.rivalGate is null when nothing is charging", () => {
 
 test("razing the tracked rival Gate clears the tracking without any ascension", () => {
   const g = createGalaxy({ seed: 25 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   const { state, gate } = seedRivalGate(g, w, { charge: 0.5 });
   checkRivalGate(g);
   assert.equal(g.rivalGate.worldId, w);
@@ -290,7 +291,7 @@ test("razing the tracked rival Gate clears the tracking without any ascension", 
 
 test("completion fires the 'rival-gate' milestone, applies the ascension consequence, and never sets state.over", () => {
   const g = createGalaxy({ seed: 26 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   const { state } = seedRivalGate(g, w, { charge: 1 });   // already complete
   state.diplomacy = createDiplomacy();
   state.diplomacy.stance = 0.5;   // Cordial — the ceiling below must actually pull it down
@@ -311,7 +312,7 @@ test("completion fires the 'rival-gate' milestone, applies the ascension consequ
 
 test("the ascension's stance ceiling is REAPPLIED every scan — it doesn't erode back up over time", () => {
   const g = createGalaxy({ seed: 27 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   const { state } = seedRivalGate(g, w, { charge: 1 });
   state.diplomacy = createDiplomacy();
   checkRivalGate(g);
@@ -324,7 +325,7 @@ test("the ascension's stance ceiling is REAPPLIED every scan — it doesn't erod
 
 test("the milestone fires only once, however many times checkRivalGate re-scans a completed world", () => {
   const g = createGalaxy({ seed: 28 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   seedRivalGate(g, w, { charge: 1 });
   checkRivalGate(g);
   const milestonesAfterFirst = g.milestones.length;
@@ -343,7 +344,7 @@ test("the milestone fires only once, however many times checkRivalGate re-scans 
 // player action, so it wins.
 test("pacifying an ALREADY-ASCENDED world lets the pacified floor win — conquest overrides ascension", () => {
   const g = createGalaxy({ seed: 40 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   const { state } = seedRivalGate(g, w, { charge: 1 });
   state.diplomacy = createDiplomacy();
   checkRivalGate(g);
@@ -368,7 +369,7 @@ test("pacifying an ALREADY-ASCENDED world lets the pacified floor win — conque
 
 test("a full galaxy run: a banked, eligible neighbour raises, charges, and ascends its own Gate over time", () => {
   const g = createGalaxy({ seed: 29 });
-  const w = g.worlds.find(x => x !== g.activeId);
+  const w = liveWorld(g);
   const s = g.planets.get(w);
   s.ai.difficulty = "hard";
   s.ai.apm = null;   // unthrottled decisions — same fast decision-level idiom test/aiIndustry.test.js
@@ -403,7 +404,7 @@ test("a full galaxy run: a banked, eligible neighbour raises, charges, and ascen
 
 test("an ascension survives a save/load — the permanent stance ceiling still applies after the Gate is razed", () => {
   const g = createGalaxy({ seed: 4242 });
-  const worldId = g.worlds.find(w => w !== g.activeId);
+  const worldId = liveWorld(g);
   const st = g.planets.get(worldId);
   const gate = makeBuilding("antimatter_gate", "ai", 700, 500);
   gate.charge = 1;
@@ -427,7 +428,7 @@ test("an ascension survives a save/load — the permanent stance ceiling still a
 
 test("the ascension event does not re-fire on every reload (A5)", () => {
   const g = createGalaxy({ seed: 4243 });
-  const worldId = g.worlds.find(w => w !== g.activeId);
+  const worldId = liveWorld(g);
   const st = g.planets.get(worldId);
   const gate = makeBuilding("antimatter_gate", "ai", 700, 500);
   gate.charge = 1;

@@ -10,6 +10,7 @@ import { generateMap } from "../engine/map.js";
 // reasoning test/boot.test.js's header comment spells out for its own statically-imported engine
 // modules — so this is safe above, before the fake document/window below even exist.
 import { openLandingPicker } from "../landingPicker.js";
+import { liveWorld } from "./_helpers.js";
 
 const commandCenters = (state, owner) =>
   [...state.buildings.values()].filter(b => b.owner === owner && b.type === "command");
@@ -64,7 +65,7 @@ test("no Spaceport at the destination and no chosen point: falls back to the wor
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 2000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   assert.equal(spaceports(dest).length, 0, "a never-visited world starts with no player Spaceport");
   const res = jumpCapital(g, destId);
@@ -80,7 +81,7 @@ test("no Spaceport at the destination, WITH a chosen point: lands near the (snap
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 2000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   const farFromBase = { x: dest.map.bases.player.x + 700, y: dest.map.bases.player.y + 300 };
   const res = jumpCapital(g, destId, { landingPoint: farFromBase });
@@ -98,7 +99,7 @@ test("a Spaceport already standing at the destination wins over both the fixed a
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 2000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   const destPad = makeBuilding("spaceport", "player", dest.map.bases.player.x + 500, dest.map.bases.player.y - 200);
   dest.buildings.set(destPad.id, destPad);   // simulates a pad built on an earlier visit
@@ -115,7 +116,7 @@ test("with several never-used Spaceports at the destination, the lowest id wins 
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 2000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   const base = dest.map.bases.player;
   const padA = makeBuilding("spaceport", "player", base.x + 500, base.y);
@@ -135,7 +136,7 @@ test("a jump stamps the receiving Spaceport's lastLanding — so a LATER return 
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 4000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   const base = dest.map.bases.player;
   const padA = makeBuilding("spaceport", "player", base.x + 500, base.y);   // lower id — inserted first
@@ -166,7 +167,7 @@ test("end-to-end: settle a new world, build a Spaceport there, leave, and a LATE
   const ship = makeUnit("colonyship", "player", sp.x, sp.y);
   from.units.set(ship.id, ship);
   g.credits = 4000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   assert.ok(jumpCapital(g, destId), "first landing, no beacon here yet");
   // Place the new colony's Command Center directly (rather than deploying the ship that rode
@@ -221,7 +222,7 @@ test("a Spaceport's lastLanding survives a galaxy save/load round-trip", () => {
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 2000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   const destPad = makeBuilding("spaceport", "player", dest.map.bases.player.x + 300, dest.map.bases.player.y);
   dest.buildings.set(destPad.id, destPad);
@@ -239,7 +240,7 @@ test("a tampered (non-numeric / negative) lastLanding is sanitized to a safe fin
   const sp = addSpaceport(from);
   stage(from, sp);
   g.credits = 2000;
-  const destId = g.worlds.find(w => w !== g.activeId);
+  const destId = liveWorld(g);
   const dest = g.planets.get(destId);
   const destPad = makeBuilding("spaceport", "player", dest.map.bases.player.x + 300, dest.map.bases.player.y);
   dest.buildings.set(destPad.id, destPad);

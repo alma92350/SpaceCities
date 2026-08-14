@@ -53,7 +53,7 @@ const { commodityAvailable } = await import("../engine/market.js");
 const { mulberry32 } = await import("../engine/rng.js");
 const { panelEl } = await import("../dom.js");
 const { renderSelectionPanel, resetSelectionSignature } = await import("../hudSelection.js");
-const { jumpReadyGalaxy } = await import("./_helpers.js");
+const { jumpReadyGalaxy, liveWorld } = await import("./_helpers.js");
 const { activeState, createLane } = await import("../engine/galaxy.js");
 const { setColonyPolicy } = await import("../engine/colonyPolicy.js");
 const { queueProduction, researchUpgrade } = await import("../engine/production.js");
@@ -1082,7 +1082,7 @@ function setupOdyssey(seed = 61) {
 
 test("changing a Freight Lane's commodities rebuilds the panel (A6)", () => {
   const { g, state } = setupOdyssey();
-  const dest = g.worlds.find(w => w !== g.activeId);
+  const dest = liveWorld(g);
   const lane = createLane(g, g.activeId, dest, ["ore"]);
   assert.ok(lane, "fixture sanity: a lane was created");
 
@@ -1096,7 +1096,7 @@ test("changing a Freight Lane's commodities rebuilds the panel (A6)", () => {
 
 test("creating a new Freight Lane rebuilds the panel (A6)", () => {
   const { g } = setupOdyssey(62);
-  const dest = g.worlds.find(w => w !== g.activeId);
+  const dest = liveWorld(g);
   renderSelectionPanel();
   const before = [...panelEl.children];
   createLane(g, g.activeId, dest, []);                   // exactly what "+ New Lane" does
@@ -1151,9 +1151,9 @@ test("a specialty unit stays offered once its commodity is in the treasury, even
    family is one row, not a rediscovery. */
 
 const PANEL_MUTATIONS = [
-  ["lane commodities", g => { const l = g.lanes[0] || createLane(g, g.activeId, g.worlds.find(w => w !== g.activeId), ["ore"]); l.commodities.push("metals"); }],
-  ["lane membership", g => { const l = g.lanes[0] || createLane(g, g.activeId, g.worlds.find(w => w !== g.activeId), ["ore"]); l.shipIds.push("u-not-real"); }],
-  ["new lane", g => createLane(g, g.activeId, g.worlds.find(w => w !== g.activeId), [])],
+  ["lane commodities", g => { const l = g.lanes[0] || createLane(g, g.activeId, liveWorld(g), ["ore"]); l.commodities.push("metals"); }],
+  ["lane membership", g => { const l = g.lanes[0] || createLane(g, g.activeId, liveWorld(g), ["ore"]); l.shipIds.push("u-not-real"); }],
+  ["new lane", g => createLane(g, g.activeId, liveWorld(g), [])],
   ["colony auto-sell", (g, st) => setColonyPolicy(g, st.planetId, { autoSell: { enabled: true, floors: {} }, workerTarget: 2 })],
   ["colony worker target", (g, st) => setColonyPolicy(g, st.planetId, { autoSell: { enabled: false, floors: {} }, workerTarget: 5 })],
 ];

@@ -35,7 +35,7 @@ import { showObjectives, hideObjectives, showSeedChip, showFactionChip, showGame
 import { renderMapSelect, setup, DIFFICULTY_OPTIONS } from "./setup.js";
 import { captureCompetitionResult, spectatedGameOverBlock } from "./competition.js";
 import { setupEscort, setupRaider, setupBounty } from "./engine/scenarios.js";
-import { createGalaxy, activeState, jumpCapital, sweepColonies, stepGalaxy, surrenderGalaxy, DOMINATION_TARGET, playerSpaceports, canJump, canJumpTo, jumpCost } from "./engine/galaxy.js";
+import { createGalaxy, activeState, jumpCapital, sweepColonies, stepGalaxy, surrenderGalaxy, DOMINATION_TARGET, playerSpaceports, previewPlanet, canJump, canJumpTo, jumpCost } from "./engine/galaxy.js";
 import { openLandingPicker } from "./landingPicker.js";
 import { TECHS } from "./engine/techtree.js";
 import { planetName, COM } from "./data.js";
@@ -316,8 +316,12 @@ export function initiateJump(destId) {
   const g = game.galaxy;
   if (!g || !canJumpTo(g, destId)) return null;
   if (g.credits < jumpCost(g, destId)) return null;
-  const dest = g.planets.get(destId);
-  if (!dest) return performJump(destId);   // shouldn't happen (every world exists from turn one) — fall through unchanged
+  // The destination may still be DORMANT — only a seeded handful of worlds are alive from turn
+  // one (engine/galaxy.js BACKGROUND_WORLDS), and a first jump to an unvisited world is exactly
+  // the case this picker exists for. previewPlanet builds what the jump WOULD arrive at without
+  // adding it to the live set, so opening this modal (or backing out of it) never wakes a world;
+  // jumpCapital builds the identical state for real once the player commits.
+  const dest = previewPlanet(g, destId);
   const needsPick = canJump(activeState(g)) && playerSpaceports(dest).length === 0;
   if (!needsPick) return performJump(destId);
   // A right-click-drag (or box-select, or an armed attack-move) started on the origin's canvas

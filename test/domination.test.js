@@ -5,6 +5,7 @@ import { createGalaxy, activeState, addPlanet, checkDomination, galaxyStatus, DO
 import { serializeGalaxy, deserializeGalaxy } from "../engine/persist.js";
 import { makeBuilding } from "../engine/state.js";
 import { updateDiplomacy, atPeace, PEACE_THRESHOLD, FACTION_ECHO_PENALTY } from "../engine/diplomacy.js";
+import { liveWorld, wakeRoster } from "./_helpers.js";
 
 // Eliminate the AI's foothold on a world — its Command Center AND its (undeployed)
 // colony ship. A world isn't conquered while the neighbour still holds a colony ship it
@@ -22,12 +23,15 @@ function drainNodes(state, frac) {   // leave `frac` of every deposit — frac 0
 // Group the galaxy's worlds by their neighbour's faction (archetypeFor's assignment, read straight
 // off each world's live AI player — no claims/checkExpansion needed for this). Used so faction-memory
 // fixtures don't have to hard-code specific planet ids, which are an aiArchetypes.js/data.js
-// implementation detail these tests shouldn't need to know.
+// implementation detail these tests shouldn't need to know. Only worlds the galaxy is actually
+// simulating can carry a stance at all, so a dormant one (engine/galaxy.js BACKGROUND_WORLDS) is
+// skipped — the faction-memory fixtures below wake the whole roster first, precisely so which
+// worlds a seed drew can't decide whether there's a faction bloc to test with.
 function worldsByFaction(g) {
   const map = new Map();
   for (const id of g.worlds) {
     const s = g.planets.get(id);
-    const f = s.players.ai && s.players.ai.faction;
+    const f = s && s.players.ai && s.players.ai.faction;
     if (!f) continue;
     if (!map.has(f)) map.set(f, []);
     map.get(f).push(id);
@@ -137,7 +141,7 @@ test("a pacified world's stance can never reach war again, however scarce its de
 
 test("an unpacified world is unaffected: identical scarcity still turns it hostile, and a different world's flag stays unset", () => {
   const g = createGalaxy({ seed: 42 });
-  const other = g.planets.get(g.worlds.find(w => w !== g.activeId));
+  const other = g.planets.get(liveWorld(g));
   const s = activeState(g);
   razeAiCommand(s);
   checkDomination(g);   // pacifies the active seat only
@@ -154,7 +158,7 @@ test("an unpacified world is unaffected: identical scarcity still turns it hosti
    ============================================================ */
 
 test("pacifying one faction world echoes a bounded, clamped stance penalty onto its unpacified faction-mates, never onto an already-pacified one or a different faction", () => {
-  const g = createGalaxy({ seed: 43 });
+  const g = wakeRoster(createGalaxy({ seed: 43 }));   // faction blocs need the whole roster simulating
   const picked = factionWithAtLeast(g, 3);
   assert.ok(picked, "sanity: the roster has a faction with at least 3 non-active worlds");
   const [aId, bId, cId] = picked.ids;
@@ -185,8 +189,8 @@ test("pacifying one faction world echoes a bounded, clamped stance penalty onto 
 });
 
 test("an Allied world lifts its faction-mates' diplomacy target a little (updateFactionWarmth)", () => {
-  const g = createGalaxy({ seed: 44 });
-  const g2 = createGalaxy({ seed: 44 });   // an identical twin that never gets updateFactionWarmth called on it
+  const g = wakeRoster(createGalaxy({ seed: 44 }));
+  const g2 = wakeRoster(createGalaxy({ seed: 44 }));   // an identical twin that never gets updateFactionWarmth called on it
   const picked = factionWithAtLeast(g, 2);
   assert.ok(picked, "sanity: a faction with 2+ non-active worlds exists");
   const [allyId, mateId] = picked.ids;
@@ -207,7 +211,7 @@ test("an Allied world lifts its faction-mates' diplomacy target a little (update
 });
 
 test("composition: pacifying A echoes onto B, then pacifying B later still lets the floor win despite the lingering echo, and A never gets a second echo", () => {
-  const g = createGalaxy({ seed: 45 });
+  const g = wakeRoster(createGalaxy({ seed: 45 }));
   const picked = factionWithAtLeast(g, 2);
   assert.ok(picked, "sanity: a faction with 2+ non-active worlds exists");
   const [aId, bId] = picked.ids;
@@ -259,7 +263,7 @@ test("composition: pacifying A echoes onto B, then pacifying B later still lets 
 
 test("a pacified world pays a small occupation dividend, even with no player buildings there", () => {
   const g = createGalaxy({ seed: 46 });
-  const otherId = g.worlds.find(w => w !== g.activeId);
+  const otherId = liveWorld(g);
   const other = g.planets.get(otherId);
   razeAiCommand(other);   // pacify it — the player never founds a colony here
   checkDomination(g);
@@ -275,7 +279,7 @@ test("a pacified world pays a small occupation dividend, even with no player bui
 
 test("an unpacified background world pays no occupation dividend", () => {
   const g = createGalaxy({ seed: 47 });
-  const otherId = g.worlds.find(w => w !== g.activeId);   // fresh, background, AI foothold intact — not pacified
+  const otherId = liveWorld(g);   // fresh, background, AI foothold intact — not pacified
   g.credits = 1000;
   const before = g.credits;
   sweepColonies(g, 10);

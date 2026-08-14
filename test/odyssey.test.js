@@ -4,13 +4,13 @@ import { createGalaxy, activeState, addPlanet, jumpCapital, galaxyStatus, stepGa
          upgradeToCapital, jumpVessel, canJump, canJumpTo, jumpCost, checkGalaxyRescue, surrenderGalaxy, RELIEF_COOLDOWN, JUMP_COST,
          CAPITAL_UPGRADE_COST, CAPITAL_HP_MULT,
          jumpManifest, jumpCapacity, spaceportTier, upgradeSpaceport, checkGalaxyProgress,
-         SPACEPORT_MAX_TIER, SPACEPORT_CAPACITY } from "../engine/galaxy.js";
+         SPACEPORT_MAX_TIER, SPACEPORT_CAPACITY, BACKGROUND_WORLDS } from "../engine/galaxy.js";
 import { checkEndlessLoss } from "../engine/victory.js";
 import { serializeGalaxy, deserializeGalaxy } from "../engine/persist.js";
 import { createGameState, makeBuilding, makeUnit } from "../engine/state.js";
 import { deployColonyShip, hasColonyShip } from "../engine/colony.js";
 import { tick } from "../engine/sim.js";
-import { jumpReadyGalaxy } from "./_helpers.js";
+import { jumpReadyGalaxy, liveWorld } from "./_helpers.js";
 
 const commandCenters = (state, owner) =>
   [...state.buildings.values()].filter(b => b.owner === owner && b.type === "command");
@@ -36,7 +36,7 @@ test("createGalaxy lands the player on one world with a colony ship (no CC yet)"
   const g = createGalaxy({ seed: 7, difficulty: "medium" });
   assert.ok(ODYSSEY_WORLDS.includes(g.activeId), "the start world is one of the roster");
   assert.equal(g.discovered.size, 1, "the player has REACHED exactly one world (the start seat)");
-  assert.equal(g.planets.size, ODYSSEY_WORLDS.length, "…but the living galaxy simulates every world in the background from the start");
+  assert.equal(g.planets.size, BACKGROUND_WORLDS + 1, "…but the living galaxy simulates the seat plus a seeded few worlds in the background from the start");
   assert.ok(g.credits > 0, "you start with a credit stipend to fund the first jump");
   const s = activeState(g);
   assert.equal(s.endless, true, "the active planet is an endless (Odyssey) state");
@@ -75,7 +75,12 @@ test("choosing a start world still consumes the seed's random draw, so every OTH
   // world that's a BACKGROUND world in both galaxies must generate byte-identically either way:
   // proof that resolving an explicit startId doesn't perturb any other world's RNG stream.
   const common = ODYSSEY_WORLDS.find(w => w !== g1.activeId && w !== g2.activeId);
-  assert.deepEqual(g2.planets.get(common).map.nodes, g1.planets.get(common).map.nodes,
+  // Built in explicitly where the seeded background draw (which is keyed on the start world) didn't
+  // happen to bring it up: the point here is that the per-planet SEED is start-world-independent,
+  // not which handful of worlds each galaxy chose to simulate.
+  const inG1 = g1.planets.get(common) || addPlanet(g1, common, { unsettled: true });
+  const inG2 = g2.planets.get(common) || addPlanet(g2, common, { unsettled: true });
+  assert.deepEqual(inG2.map.nodes, inG1.map.nodes,
     "a world untouched by the start-world choice generates identically either way");
 });
 
@@ -401,7 +406,7 @@ test("jumpCapital refuses a real jump when credits fall short of the actual cost
   const g = jumpReadyGalaxy(9);                              // a real jump-ready galaxy: pad, staged ship, funded
   const from = activeState(g);
   const activeIdBefore = g.activeId;
-  const destId = g.worlds.find(w => w !== g.activeId);       // a never-visited world — a real, non-zero fuel cost
+  const destId = liveWorld(g);                               // a never-visited world — a real, non-zero fuel cost
   const dest = g.planets.get(destId);
   const cost = jumpCost(g, destId);
   assert.ok(cost > 0, "reaching a fresh world costs real fuel");

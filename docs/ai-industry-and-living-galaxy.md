@@ -8,9 +8,13 @@ factions develop on their own worlds and **expand to other planets** over time.
 
 Chosen scope (confirmed with the user):
 - **AI economy:** *full industrial AI* (not just electrify) — it techs the whole chain.
-- **Factions across planets:** *living-galaxy meta-layer* — every world simulates its
+- **Factions across planets:** *living-galaxy meta-layer* — worlds simulate their
   own AI faction; strong factions spread across the starmap. Each world you land on
-  stays a **two-sided** fight (no N-side per-world rewrite).
+  stays a **two-sided** fight (no N-side per-world rewrite). *(Shipped as the whole
+  roster simulating at once; later bounded to the start seat plus a seeded draw of
+  `BACKGROUND_WORLDS` — see `engine/galaxy.js` `backgroundWorldIds`. The claims sweep
+  still spreads across the whole starmap, and a dormant world takes the colours it was
+  claimed under when you finally jump there.)*
 
 ---
 

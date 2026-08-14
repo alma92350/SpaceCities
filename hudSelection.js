@@ -1409,8 +1409,12 @@ function renderSpaceport(state, spaceport) {
   if (sectionToggle("spaceport:jump", "Jump", jumpWorlds.length)) {
     for (const w of jumpWorlds) {
       const name = planetName(w);
-      const owned = game.galaxy.planets.has(w);   // a world you already hold → free to return
+      // Free EXACTLY when engine/galaxy.js's jumpCost says so — a world you've reached before or
+      // still hold a base on. Read off the cost itself rather than "does this world's state
+      // exist": a world's state existing means only that it's one of the seeded few simulating in
+      // the background (BACKGROUND_WORLDS), which is not somewhere you've ever been.
       const cost = jumpCost(game.galaxy, w);
+      const owned = cost === 0;
       const afford = game.galaxy.credits >= cost;
       panelEl.appendChild(makeButton(`Jump ▸ ${name}${owned ? " · your colony" : ` · ◈${cost}`}`,
         () => initiateJump(w),

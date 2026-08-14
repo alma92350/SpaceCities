@@ -50,6 +50,42 @@ function planetSeed(seed, planetId) {
   return h >>> 0;
 }
 
+// LIVING GALAXY, BOUNDED. The galaxy is alive before you ever visit it — but not ALL of it at
+// once: only this many of the OTHER worlds actually exist and simulate from turn one. The whole
+// roster stays on the starmap and stays jumpable; an undrawn world is simply DORMANT until the
+// player arrives, at which point jumpCapital instantiates it exactly as it always did for a
+// never-visited destination. Bounding the live set keeps the per-frame background scheduler's
+// work (and a save's size) proportional to a handful of worlds instead of the whole roster,
+// while the galaxy still develops, spreads factions and races its Gate behind your back.
+export const BACKGROUND_WORLDS = 3;
+
+// WHICH worlds those are: a seeded, pseudo-random draw from the roster minus the start seat, so
+// two runs from the same seed bring up the same neighbours (the determinism guarantee in this
+// file's header) while two different seeds explore different pockets of the galaxy — the live set
+// is part of what a seed means, not a fixed prefix of ODYSSEY_WORLDS.
+//
+// Drawn from its OWN distinctly-keyed stream (planetSeed with a ":backgroundWorlds" suffix, the
+// same idiom neighbourAiProfile uses below) rather than createGalaxy's `pick`, so adding or
+// changing this draw can never shift the start-world roll or any other seeded stream.
+//
+// Returned in fixed ROSTER order, not draw order: the background scheduler (stepGalaxy) keys on
+// each world's roster index and every galaxy-wide scan walks `galaxy.worlds`, so keeping the
+// creation order roster-ordered leaves those paths reading exactly as they did when every world
+// was instantiated.
+export function backgroundWorldIds(seed, startId, count = BACKGROUND_WORLDS) {
+  const pool = ODYSSEY_WORLDS.filter(id => id !== startId);
+  const n = Math.max(0, Math.min(count | 0, pool.length));
+  const pick = mulberry32(planetSeed(seed >>> 0, ":backgroundWorlds"));
+  // Partial Fisher-Yates: draw n distinct worlds without the retry loop a naive
+  // "roll until it's new" pick would need (and without its unbounded worst case).
+  for (let i = 0; i < n; i++) {
+    const j = i + Math.floor(pick() * (pool.length - i));
+    const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+  }
+  const drawn = new Set(pool.slice(0, n));
+  return ODYSSEY_WORLDS.filter(id => drawn.has(id));
+}
+
 // VARIED NEIGHBOURS: every world but the player's start seat carries its OWN difficulty and AI
 // Strategy (personality) — a distribution across the galaxy, some easier, some harder — instead
 // of mirroring the player's own splash-screen pick everywhere. Pure function of the galaxy seed +
@@ -106,14 +142,15 @@ export function createGalaxy({ seed = 1, difficulty = "medium", sizeMult = 1,
     laneSeq: 0,                 // fresh lane-id counter (createLane)
   };
   addPlanet(galaxy, startId);
-  // LIVING GALAXY: every other world already exists and simulates in the background from turn one —
-  // each with its own AI faction founding a base and developing (engine/ai.js aiIndustry), its
-  // economy growing and its diplomacy drifting — so the galaxy is alive before you ever visit, and
-  // (checkExpansion) factions spread across it over time. Added `unsettled` (no player presence until
-  // you jump in). The BG scheduler (stepGalaxy) already spreads their ticks round-robin, and a probe
-  // puts the whole 11-world galaxy at well under 1 ms/frame. Deterministic: ODYSSEY_WORLDS is a fixed
-  // order and each world seeds from its own planetSeed, so two same-seed galaxies are byte-identical.
-  for (const id of ODYSSEY_WORLDS) if (id !== startId) addPlanet(galaxy, id, { unsettled: true });
+  // LIVING GALAXY: a seeded handful of the other worlds (backgroundWorldIds, above) already exist and
+  // simulate in the background from turn one — each with its own AI faction founding a base and
+  // developing (engine/ai.js aiIndustry), its economy growing and its diplomacy drifting — so the
+  // galaxy is alive before you ever visit, and (checkExpansion) factions spread across it over time.
+  // Added `unsettled` (no player presence until you jump in). The rest of the roster stays DORMANT
+  // and is built in on arrival (jumpCapital), so every world remains a destination. The BG scheduler
+  // (stepGalaxy) spreads the live ones' ticks round-robin. Deterministic: the draw and each world's
+  // map both come from the galaxy seed, so two same-seed galaxies are byte-identical.
+  for (const id of backgroundWorldIds(seed, startId)) addPlanet(galaxy, id, { unsettled: true });
   return galaxy;
 }
 
@@ -172,9 +209,41 @@ const incomeBuildingCount = state => {
 // createGalaxy calls this). Every other world resolves its own varied profile instead
 // (neighbourAiProfile, above) — a distribution across the galaxy, not one setting everywhere.
 export function addPlanet(galaxy, planetId, { unsettled = false } = {}) {
+  const state = buildPlanetState(galaxy, planetId, unsettled);
+  galaxy.planets.set(planetId, state);
+  bumpEntityCounterPastGalaxy(galaxy);         // keep future live-built ids galaxy-unique (see below)
+  return state;
+}
+
+// A DORMANT world's state, built to LOOK at without waking it. The landing picker
+// (landingPicker.js) has to draw the destination's map before the player commits to the jump, and
+// only a seeded handful of worlds are alive from turn one (BACKGROUND_WORLDS) — so merely opening
+// that modal, or backing out of it, must not add a world to the live set. Built from the same
+// (galaxy seed, planetId) inputs addPlanet uses and never ticked, so the state the jump really
+// creates on arrival is identical to the one previewed. A world that's already up IS its own
+// preview and is returned as-is.
+export function previewPlanet(galaxy, planetId) {
+  const live = galaxy.planets.get(planetId);
+  if (live) return live;
+  const state = buildPlanetState(galaxy, planetId, true);
+  // Even a throwaway world moves the GLOBAL entity-id counter (createGameState re-seeds it from 1
+  // per world — see bumpEntityCounterPastGalaxy below), so the same bump the registering path does
+  // is mandatory here too: without it the next thing built anywhere could reuse a live id.
+  bumpEntityCounterPastGalaxy(galaxy);
+  return state;
+}
+
+// The shared core of both: a planet's engine state, built but not registered.
+function buildPlanetState(galaxy, planetId, unsettled) {
   const s = galaxy.settings;
   const seed = planetSeed(galaxy.seed, planetId);
-  const aiFaction = archetypeFor(planetId).faction || "neutral";
+  // A DORMANT world (one the background draw didn't bring up) can be CLAIMED by a spreading faction
+  // before it ever exists — checkExpansion's sweep walks the whole roster, and the starmap flies the
+  // claim on it. So a world built in later takes the claimed colours over its own archetype's, exactly
+  // as checkExpansion flips an already-instantiated world's AI faction on the spot: the flag the
+  // player has been looking at is the one they meet on landing.
+  const claimed = galaxy.claims && galaxy.claims.get(planetId);
+  const aiFaction = claimed || archetypeFor(planetId).faction || "neutral";
   const profile = planetId === galaxy.activeId
     ? { difficulty: s.difficulty, aiApm: s.aiApm, aiMicro: s.aiMicro, aiStrategy: s.aiStrategy }
     : neighbourAiProfile(galaxy.seed, planetId);
@@ -194,8 +263,6 @@ export function addPlanet(galaxy, planetId, { unsettled = false } = {}) {
   state.diplomacy = createDiplomacy();        // and its own neighbour's stance toward you
   state.inGalaxy = true;                       // part of a galaxy → the per-world defeat check is off (engine/victory.js);
                                                // the galaxy never loses (checkGalaxyRescue), it only ends by surrender
-  galaxy.planets.set(planetId, state);
-  bumpEntityCounterPastGalaxy(galaxy);         // keep future live-built ids galaxy-unique (see below)
   return state;
 }
 

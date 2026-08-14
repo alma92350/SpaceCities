@@ -41,11 +41,12 @@ import { LANDING_PICK_GRID } from "./engine/galaxy.js";
 
 const PICKER_MAX_W = 480;
 
-// Open the picker for `dest` (the destination's engine state — always exists; the galaxy
-// creates every world's state up front, see engine/galaxy.js createGalaxy). `worldLabel` is
-// the display name shown in the heading. `onPick(point)` fires once, with the RAW world-space
-// point the player clicked (engine/galaxy.js does the snapping/clamping) — the caller is
-// expected to launch the jump with it. `onCancel()` fires instead if the player backs out.
+// Open the picker for `dest` (the destination's engine state — its live one when the galaxy is
+// already simulating that world, else the throwaway previewPlanet build boot.js's initiateJump
+// passes in for a world still dormant; either way it's the world the jump will land on).
+// `worldLabel` is the display name shown in the heading. `onPick(point)` fires once, with the
+// RAW world-space point the player clicked (engine/galaxy.js does the snapping/clamping) — the
+// caller is expected to launch the jump with it. `onCancel()` fires instead if the player backs out.
 // Exactly one of the two ever fires, and the modal is always removed either way.
 export function openLandingPicker(dest, worldLabel, { onPick, onCancel }) {
   const map = dest.map;

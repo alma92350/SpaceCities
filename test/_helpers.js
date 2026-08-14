@@ -15,7 +15,7 @@
 
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { createGalaxy, activeState } from "../engine/galaxy.js";
+import { createGalaxy, activeState, addPlanet } from "../engine/galaxy.js";
 import { makeBuilding, makeUnit } from "../engine/state.js";
 import { deployColonyShip } from "../engine/colony.js";
 import { THINK_INTERVAL } from "../engine/ai.js";
@@ -154,6 +154,31 @@ export function jumpReadyGalaxy(seed = 1) {
   const ship = makeUnit("colonyship", "player", sp.x, sp.y);
   from.units.set(ship.id, ship);
   g.credits = 2000;
+  return g;
+}
+
+/* ---------- which worlds a fresh galaxy is actually SIMULATING ----------
+
+   createGalaxy brings up the start seat plus a seeded, pseudo-random handful of background
+   worlds (engine/galaxy.js BACKGROUND_WORLDS / backgroundWorldIds); the rest of the roster stays
+   DORMANT until the player jumps there. So a fixture that needs "some other world's state" has to
+   ask for one that's actually alive, a fixture that needs an unbuilt destination asks for a
+   dormant one, and a fixture whose subject is a galaxy-WIDE sweep (faction memory, expansion)
+   wakes the whole roster up front rather than depending on which three the seed happened to draw. */
+
+// Every world the galaxy is simulating apart from the active seat, in creation (roster) order.
+export const liveWorlds = g => [...g.planets.keys()].filter(id => id !== g.activeId);
+
+// The first of those — the plain "a background world" fixture.
+export const liveWorld = g => liveWorlds(g)[0];
+
+// A roster world the seed's draw did NOT bring up: on the starmap, jumpable, no state yet.
+export const dormantWorld = g => g.worlds.find(id => !g.planets.has(id));
+
+// Bring the WHOLE roster up as background worlds — the pre-bounded-draw shape, for fixtures that
+// reason about the galaxy as a whole. Mirrors test/odyssey-meta.js's own inline idiom.
+export function wakeRoster(g) {
+  for (const id of g.worlds) if (!g.planets.has(id)) addPlanet(g, id, { unsettled: true });
   return g;
 }
 

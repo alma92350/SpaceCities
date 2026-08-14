@@ -90,6 +90,13 @@ export const game = {
   // Which world is currently being spectated while observerMode is on — a planetId, or null
   // when observerMode is off. Defaults to the real active world on entry.
   spectateId: null,
+  // The throwaway state observer.js is showing for a DORMANT world (engine/galaxy.js
+  // previewPlanet), or null whenever the spectated world is one the galaxy is really simulating.
+  // Only a seeded handful of worlds are alive from turn one (BACKGROUND_WORLDS), but Observer
+  // Mode's promise is a free look at ANY world — so a dormant one is shown as the pristine world
+  // it would be on arrival, WITHOUT waking it. Never ticked, never registered on the galaxy,
+  // never saved: the read-only guarantee above holds.
+  spectatePreview: null,
   // The observer's own camera (camera.js createCamera shape), separate from the real
   // game.input camera so panning/zooming while spectating never disturbs normal play's view —
   // and so clamping uses whichever world's map is actually being looked at, not the active one's.
