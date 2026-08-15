@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createGalaxy, activeState, jumpCapital, snapLandingPoint, LANDING_PICK_GRID } from "../engine/galaxy.js";
+import { createGalaxy, activeState, jumpCapital, snapLandingPoint, landingSites, LANDING_PICK_GRID } from "../engine/galaxy.js";
 import { serializeGalaxy, deserializeGalaxy } from "../engine/persist.js";
 import { makeBuilding, makeUnit } from "../engine/state.js";
 import { deployColonyShip } from "../engine/colony.js";
@@ -55,6 +55,64 @@ test("snapLandingPoint tolerates non-numeric/garbage input instead of propagatin
   const map = { width: 1600, height: 1000 };
   const p = snapLandingPoint(map, NaN, undefined);
   assert.ok(Number.isFinite(p.x) && Number.isFinite(p.y));
+});
+
+// The picker's output has to be a legal picker INPUT. The obvious way to build a landing UI is
+// "snap to show the player where they'll land, then send that point" — so if snapping twice moved
+// the point, every such caller would land somewhere other than the ring it drew, and the bug would
+// look like a rendering offset. It used to: rounding onto the 160 grid and THEN clamping to a
+// margin of 100 (not a multiple of it) collapsed the whole edge band onto an off-lattice 100 that
+// re-snapped to 160 — 161 of the 1601 x-values on a 1600-wide map.
+
+test("snapLandingPoint is idempotent — snapping its own output changes nothing", () => {
+  for (const map of [{ width: 1600, height: 1000 }, { width: 1200, height: 1200 }, { width: 900, height: 760 }]) {
+    for (let x = 0; x <= map.width; x++) {
+      const a = snapLandingPoint(map, x, x % map.height);
+      const b = snapLandingPoint(map, a.x, a.y);
+      assert.deepEqual(b, a, `${map.width}x${map.height}: re-snapping (${a.x},${a.y}) moved it`);
+    }
+  }
+});
+
+test("every landing site is itself a fixed point, and clear of the widest rider-spawn ring", () => {
+  const map = { width: 1600, height: 1000 };
+  const { xs, ys } = landingSites(map);
+  for (const x of xs) for (const y of [ys[0], ys[ys.length - 1]]) {
+    assert.deepEqual(snapLandingPoint(map, x, y), { x, y }, `site (${x},${y}) is not a fixed point`);
+  }
+  assert.ok(xs.every(x => x >= 82 && x <= map.width - 82), "no x site can spawn a rider off the map");
+  assert.ok(ys.every(y => y >= 82 && y <= map.height - 82), "no y site can spawn a rider off the map");
+});
+
+test("a click resolves to the NEAREST landing site — never one skipped past it", () => {
+  const map = { width: 1600, height: 1000 };
+  const { xs } = landingSites(map);
+  for (let x = 0; x <= map.width; x++) {
+    const got = snapLandingPoint(map, x, 500).x;
+    const nearest = Math.min(...xs.map(s => Math.abs(s - x)));
+    assert.equal(Math.abs(got - x), nearest, `click at ${x} landed at ${got}, past a closer site`);
+  }
+  // The specific trap this rules out: 100 is a reachable site, so a click at 90 belongs to it —
+  // the old round-then-clamp skipped out to 160, 60 units the wrong way.
+  assert.equal(snapLandingPoint(map, 90, 500).x, 100);
+});
+
+test("the landing sites are still exactly the grid plus the margin ring — no landing area gained or lost", () => {
+  const map = { width: 1600, height: 1000 };
+  // What round-then-clamp could produce, enumerated the old way. The fix changes which click maps
+  // to which site, NOT which sites exist — so no balance question rides on it.
+  const reachableTheOldWay = span => {
+    const out = new Set();
+    for (let v = 0; v <= span; v++)
+      out.add(Math.min(Math.max(Math.round(v / LANDING_PICK_GRID) * LANDING_PICK_GRID, 100), span - 100));
+    return [...out].sort((a, b) => a - b);
+  };
+  const { xs, ys } = landingSites(map);
+  assert.deepEqual(xs, reachableTheOldWay(map.width), "the same x sites as before");
+  assert.deepEqual(ys, reachableTheOldWay(map.height), "the same y sites as before");
+  const actuallyProduced = new Set();
+  for (let x = 0; x <= map.width; x++) actuallyProduced.add(snapLandingPoint(map, x, 500).x);
+  assert.deepEqual([...actuallyProduced].sort((a, b) => a - b), xs, "…and every one of them is still reachable");
 });
 
 // --- landing zone selection --------------------------------------------------

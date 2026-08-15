@@ -92,7 +92,24 @@ const PRODUCED = new Set(TRADEABLE.filter(c => COM[c].tier !== "Raw"));
 
 export function createMarket(state) {
   const total = {}; let sum = 0;
-  for (const n of state.map.nodes) { total[n.com] = (total[n.com] || 0) + n.max; sum += n.max; }
+  // SEED DEPOSITS ONLY — battlefield debris is not part of a world's price book. Wreck
+  // (engine/wreckage.js) and crater (engine/bomb.js) nodes are pushed onto state.map.nodes
+  // DURING play, and this function runs exactly twice in a world's life: once at creation
+  // (engine/galaxy.js buildPlanetState, when no debris exists yet) and once on load
+  // (engine/persist.js, AFTER rehydratePlanet has restored that debris). Counting it would
+  // therefore derive `base` from a strictly larger node set on load than at creation, and
+  // since `sum` moves, EVERY raw commodity's share moves with it — a saved world came back
+  // quoting a different price book than the one it was played on, drifting further the more
+  // wreckage accumulated (measured: radioactives 27 -> 34 with two wreck nodes).
+  // Skipping them makes load reproduce creation exactly, and matches what the game already
+  // does during play: wreckage does NOT move prices while you play, because createMarket is
+  // not called again. Same `!n.wreck && !n.crater` exclusion engine/wreckage.js's own
+  // worldHasCommodity gate uses, and for the same reason — synthesized debris must not be
+  // mistaken for what the world actually deposits.
+  for (const n of state.map.nodes) {
+    if (n.wreck || n.crater) continue;
+    total[n.com] = (total[n.com] || 0) + n.max; sum += n.max;
+  }
   const industry = PLANETS.find(p => p.id === state.planetId)?.industry ?? 5;
   const base = {}, pressure = {}, glut = {};
   for (const com of TRADEABLE) {

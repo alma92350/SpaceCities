@@ -819,16 +819,25 @@ export function galaxyStatus(galaxy) {
       const s = seen ? galaxy.planets.get(id) : null;
       let status = "unexplored", income = 0;
       const pacified = !!(galaxy.pacified && galaxy.pacified.has(id));
+      // LABEL AND INCOME ARE DECIDED INDEPENDENTLY. "pacified" outranks colony/contested as a
+      // label, but it is NOT a reason to report no income: sweepColonies pays a conquered world
+      // BOTH halves (its buildings' passive income AND the occupation dividend, additively), so
+      // a `pacified` arm that short-circuited before the income line made the player's best-paying
+      // world read 0 on the starmap. What's reported here mirrors what sweepColonies actually
+      // banks, dividend included and background-only — the seat earns nothing there
+      // (`if (!state.background) continue;`) and so must report nothing here.
       if (id === galaxy.activeId) status = "seat";
-      else if (pacified) status = "pacified";   // conquered — its neighbour's capital is razed
       else if (s) {
         const buildings = playerBuildingCount(s);
         // A world you've been to is a "colony" only while you still hold a
         // building there; once razed it's "contested" — visited but no longer
         // yours (so the map doesn't keep calling a lost world your colony).
-        status = buildings > 0 ? "colony" : "contested";
-        income = Math.round(incomeBuildingCount(s) * COLONY_INCOME_PER_BUILDING * 60);   // credits/min (capped, turret-excluded)
+        status = pacified ? "pacified" : (buildings > 0 ? "colony" : "contested");
+        income = s.background                                                     // credits/min (capped, turret-excluded)
+          ? Math.round((incomeBuildingCount(s) * COLONY_INCOME_PER_BUILDING + (pacified ? PACIFIED_INCOME : 0)) * 60)
+          : 0;
       }
+      else if (pacified) status = "pacified";   // conquered but not in `discovered` (so `s` is null) — still label it
       // Industry/Tech ratings (data.js) drive factory speed + research speed and
       // finished-good prices — surfaced so "where to settle/jump" is an informed call.
       const p = PLANETS.find(pl => pl.id === id);
@@ -1269,17 +1278,64 @@ function loadCargo(from, dest, riders) {
 }
 
 // A minimap pick is necessarily coarse — that's the whole point of it (a blind landing on a
-// world with no beacon should feel like one, not a precise coordinate entry). Rounds the raw
-// clicked point onto a fixed grid, THEN clamps it away from the map edge — in that order, so
-// the clamp is the last word and the final point can never drift back outside the margin the
-// rounding might otherwise have pushed it past. The margin comfortably exceeds the widest
-// rider-spawn ring jumpCapital uses below (46 + 2*18 = 82), so a picked corner can never spawn
-// a unit off the map.
+// world with no beacon should feel like one, not a precise coordinate entry). So a pick resolves
+// to the NEAREST ALLOWED LANDING SITE: a fixed grid of them across the world's middle, plus the
+// margin ring itself at each edge. The margin comfortably exceeds the widest rider-spawn ring
+// jumpCapital uses below (46 + 2*18 = 82), so a picked corner can never spawn a unit off the map.
+//
+// NEAREST-SITE, NOT ROUND-THEN-CLAMP. This used to round onto the grid and then clamp into the
+// margin, which made it NOT IDEMPOTENT: the clamp bound (100) is not a multiple of the grid (160),
+// so the whole edge band collapsed onto an off-lattice 100 that re-snapped to 160. Feeding the
+// function its own output moved the point again — 161 of the 1601 x-values on a 1600-wide map.
+// That is a live trap for callers, because the obvious way to build a picker is "snap to show the
+// player where they'll land, then send THAT point": the confirmed point got snapped a second time
+// and the colony touched down 60 units from the ring the player was looking at, with nothing on
+// screen to say so. (landingPicker.js dodges it by forwarding the RAW point and snapping once —
+// which is no longer something a caller has to know.)
+//
+// Choosing the nearest site instead fixes that WITHOUT changing where anyone can land: the set of
+// reachable outputs is exactly what round-then-clamp already produced — {margin, ...grid...,
+// span-margin} — so no landing area is lost or gained, and no balance changes. All that changes is
+// which clicks map to which site, and only inside the edge bands, where a click now resolves to
+// the site actually closest to it (x=90 lands at 100, where it used to skip out to 160). Every
+// output is a fixed point, so snap(snap(p)) === snap(p) everywhere.
 export const LANDING_PICK_GRID = 160;
 const LANDING_PICK_MARGIN = 100;
+
+// Every landing site along one axis of length `span`, ascending: the near margin, the grid points
+// strictly inside it, and the far margin. Exported through landingSites below so a picker can OFFER
+// these rather than guess at them — "the grid" alone is not the answer (a click at 90 belongs to
+// the margin site at 100, not to the grid point at 160), which is exactly the kind of 60-unit-wrong
+// lattice a caller would otherwise build for itself.
+function axisLandingSites(span) {
+  const lo = LANDING_PICK_MARGIN, hi = span - LANDING_PICK_MARGIN;
+  // A world narrower than its own two margins has no valid band at all. Nothing generates one
+  // (engine/map.js maps are far wider), but this is reachable from any caller's map object, and a
+  // single fixed site keeps the "every output is a fixed point" promise true even there.
+  if (hi <= lo) return [Math.round(span / 2)];
+  const sites = [lo];
+  for (let v = Math.ceil(lo / LANDING_PICK_GRID) * LANDING_PICK_GRID; v < hi; v += LANDING_PICK_GRID)
+    if (v > lo) sites.push(v);
+  sites.push(hi);
+  return sites;
+}
+
+// The allowed landing sites for `map`, as the two axes' independent site lists (any xs × ys pair is
+// a valid landing point). Purely derived — no clock, no RNG, no state.
+export function landingSites(map) {
+  return { xs: axisLandingSites(num(map.width)), ys: axisLandingSites(num(map.height)) };
+}
+
 export function snapLandingPoint(map, x, y) {
-  const snap = (v, span) => Math.min(Math.max(Math.round(v / LANDING_PICK_GRID) * LANDING_PICK_GRID, LANDING_PICK_MARGIN), span - LANDING_PICK_MARGIN);
-  return { x: snap(num(x), map.width), y: snap(num(y), map.height) };
+  // Nearest site wins; a tie goes to the FARTHER-OUT one, matching the way the old Math.round
+  // broke its own half-way ties upward (a click exactly between two sites is arbitrary either way).
+  const snap = (v, sites) => {
+    let best = sites[0];
+    for (const s of sites) if (Math.abs(v - s) <= Math.abs(v - best)) best = s;
+    return best;
+  };
+  const { xs, ys } = landingSites(map);
+  return { x: snap(num(x), xs), y: snap(num(y), ys) };
 }
 function num(v) { const n = Number(v); return Number.isFinite(n) ? n : 0; }
 

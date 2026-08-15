@@ -44,6 +44,42 @@ All notable changes to this project are documented here. The format follows
   unchanged. `npm run smoke` now clicks through all six Competition tabs and fails on any tab that
   raises, naming the tab that broke.
 
+- **A world you had fought over came back from a save quoting different prices.** `createMarket`
+  derives each raw commodity's equilibrium price from its share of *every* node on the map, and
+  runs exactly twice in a world's life: at creation, and again on load. Wreck (`engine/wreckage.js`)
+  and crater (`engine/bomb.js`) nodes are pushed onto the map *during play*, and the loader restores
+  them before recomputing — so the reload derived the book from a strictly larger node set than the
+  live one was built from. Because the share is a fraction of the total, this moved **every** raw
+  commodity's price, not just the debris's own, and drifted further the more wreckage a world had
+  accumulated (measured: radioactives 27 → 34). `createMarket` now skips wreck and crater nodes, the
+  same exclusion `worldHasCommodity` already applies for the same reason. No live behaviour changes
+  — there is no debris at world creation — and no save-format change: it simply makes load reproduce
+  creation, and reload agree with what play already did (wreckage does not move prices mid-game).
+
+- **A conquered colony reported `income: 0` on the starmap while it was paying you every second.**
+  `galaxyStatus` decided a world's label and its income in one `if` chain, and the `pacified` arm
+  short-circuited before the income line — so a world you had conquered *and* colonised showed
+  nothing, which for a well-built world could be your best earner. `sweepColonies` pays such a world
+  both halves additively (its buildings' passive income **and** the occupation dividend), and the
+  reported figure now mirrors that ledger exactly, dividend included — which also surfaces
+  `PACIFIED_INCOME`, previously invisible in the reported income of *any* world. "Pacified" still
+  outranks colony/contested as the label; the active seat still reports nothing, because
+  `sweepColonies` skips it.
+
+- **`snapLandingPoint` was not idempotent: snapping its own output moved the point.** It rounded a
+  click onto the 160-unit grid and *then* clamped it to a 100-unit margin — not a multiple of the
+  grid — so the whole edge band collapsed onto an off-lattice 100 that re-snapped to 160: 161 of the
+  1601 x-values on a 1600-wide map. The natural way to build a landing UI ("snap to show where
+  you'll land, then send that point") therefore landed 60 units from the ring the player was looking
+  at, with nothing on screen to say so. A click now resolves to the **nearest allowed landing site**
+  instead, which makes every output a fixed point. The set of reachable sites is unchanged — the
+  margin ring, the grid points between, and the far margin, exactly what round-then-clamp already
+  produced — so **no landing area is gained or lost and no balance changes**; only which click maps
+  to which site moves, and only inside the edge bands, where a click now resolves to the site
+  genuinely closest to it (x = 90 lands at 100, where it used to skip out to 160). The site list is
+  exported as `landingSites(map)` so a picker can offer the real sites rather than assume the bare
+  grid — which near an edge would be 60 units wrong.
+
 ## [1.1.0] — 2026-08-08
 
 Everything below shipped since 1.0.0. Save formats are unchanged (`SAVE_VERSION` 1,
