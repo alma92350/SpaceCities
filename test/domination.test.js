@@ -277,6 +277,49 @@ test("a pacified world pays a small occupation dividend, even with no player bui
   assert.ok(g.credits > before, "a pacified world contributes a small occupation dividend even without a player colony");
 });
 
+// The starmap's number and the ledger's number are the same number. galaxyStatus used to decide
+// the LABEL and then stop — its `pacified` arm short-circuited before income was computed at all —
+// so a conquered world you had also colonised reported 0 while sweepColonies paid it every second.
+// The occupation dividend was missing from the reported figure for every world besides.
+
+test("galaxyStatus reports what sweepColonies actually banks for a conquered colony, dividend included", () => {
+  const g = createGalaxy({ seed: 48 });
+  const otherId = liveWorld(g);
+  const other = g.planets.get(otherId);
+  g.discovered.add(otherId);            // a world you conquered is one you have been to
+  for (let i = 0; i < 3; i++) {         // …and then built on
+    const b = makeBuilding("habitat", "player", 400 + i * 60, 400);
+    b.constructing = false;
+    other.buildings.set(b.id, b);
+  }
+  razeAiCommand(other);
+  checkDomination(g);
+  assert.ok(g.pacified.has(otherId), "sanity: the world is conquered");
+
+  const w = galaxyStatus(g).worlds.find(x => x.id === otherId);
+  assert.equal(w.status, "pacified", "conquest still outranks 'colony' as the LABEL");
+  assert.ok(w.income > 0, "…but a conquered world that is earning must not report nothing");
+
+  const before = g.credits;
+  sweepColonies(g, 60);                 // one minute — the unit galaxyStatus reports in
+  assert.equal(w.income, Math.round(g.credits - before),
+    "the reported credits/min is exactly what a minute of sweepColonies banks");
+});
+
+test("the active seat reports no income — it isn't a background world and sweepColonies never pays it", () => {
+  const g = createGalaxy({ seed: 49 });
+  const seat = activeState(g);
+  razeAiCommand(seat);                  // conquer the world you're standing on
+  checkDomination(g);
+  assert.ok(g.pacified.has(g.activeId), "sanity: the seat is pacified");
+  const w = galaxyStatus(g).worlds.find(x => x.id === g.activeId);
+  assert.equal(w.status, "seat", "you're standing on it — that's what it reads as");
+  const before = g.credits;
+  sweepColonies(g, 60);
+  assert.equal(w.income, 0, "the seat reports nothing…");
+  assert.equal(Math.round(g.credits - before), 0, "…because it banks nothing");
+});
+
 test("an unpacified background world pays no occupation dividend", () => {
   const g = createGalaxy({ seed: 47 });
   const otherId = liveWorld(g);   // fresh, background, AI foothold intact — not pacified

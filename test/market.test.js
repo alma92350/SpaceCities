@@ -99,6 +99,50 @@ test("TRADE_LOT is a sane positive lot size", () => {
   assert.ok(Number.isInteger(TRADE_LOT) && TRADE_LOT > 0);
 });
 
+// ---- battlefield debris is not a deposit -------------------------------------
+// createMarket runs exactly twice per world: at creation (no debris exists yet) and on load
+// (engine/persist.js, AFTER the saved wreck/crater nodes are back). If it counted those, the
+// two runs would see different node sets, and since the abundance share is a fraction of the
+// TOTAL, every raw commodity's price would move — not just the debris's own. So a played-in
+// world came back from a save quoting a different price book than it was played on.
+
+test("wreck and crater nodes never move a world's price book — they aren't what the world deposits", () => {
+  const nodes = [{ com: "ore", max: 600 }, { com: "crystals", max: 400 }, { com: "radioactives", max: 300 }];
+  const clean = createMarket({ planetId: "helix", map: { nodes } });
+  const fought = createMarket({ planetId: "helix", map: { nodes: [...nodes,
+    { com: "metals", max: 220, wreck: true },        // battle wreckage (engine/wreckage.js)
+    { com: "ore", max: 180, crater: true },          // a Helium Bomb crater (engine/bomb.js)
+  ] } });
+  assert.deepEqual(fought.base, clean.base,
+    "a world fought over prices identically to the same world untouched — for EVERY commodity, not just the debris's own");
+});
+
+test("a battle-scarred world round-trips its price book through a save", async () => {
+  const { serializeGalaxy, deserializeGalaxy } = await import("../engine/persist.js");
+  const g = createGalaxy({ seed: 91 });
+  const s = activeState(g);
+  const before = { ...s.market.base };
+  // What a long war actually leaves: a wreck field of many small sites (engine/wreckage.js
+  // returns WRECK_RETURN_FRAC of each dead thing's cost) plus a few Helium Bomb craters
+  // (CRATER_NODE_AMOUNT, 400 each). It's the ACCUMULATION that moves prices, not one site.
+  for (let i = 0; i < 20; i++)
+    s.map.nodes.push({ id: `wreck-u${i}-metals`, com: "metals", amount: 120, max: 120, x: 500 + i, y: 500, wreck: true });
+  for (let i = 0; i < 10; i++)
+    s.map.nodes.push({ id: `wreck-u${i}-electronics`, com: "electronics", amount: 40, max: 40, x: 520 + i, y: 505, wreck: true });
+  for (let i = 0; i < 3; i++)
+    s.map.nodes.push({ id: `crater-b${i}`, com: "ore", amount: 400, max: 400, x: 700 + i * 30, y: 300, crater: true });
+
+  // Fixture check: this much debris is genuinely enough to move the book, so the assertion
+  // below can't pass merely because the drift rounded away.
+  const naive = createMarket({ planetId: s.planetId, map: { nodes: s.map.nodes.map(n => ({ com: n.com, max: n.max })) } });
+  assert.notDeepEqual(naive.base, before, "fixture: counting the debris WOULD price this world differently");
+
+  const g2 = deserializeGalaxy(serializeGalaxy(g));
+  const s2 = g2.planets.get(s.planetId);
+  assert.equal(s2.map.nodes.filter(n => n.wreck || n.crater).length, 33, "sanity: the debris itself round-tripped");
+  assert.deepEqual(s2.market.base, before, "…and the price book came back exactly as it was played on");
+});
+
 test("finished goods are dearer on a low-industry world than a high-industry one", () => {
   const forge = createMarket({ planetId: "forge", map: { nodes: [] } });   // industry 10 — floods its own market
   const oort = createMarket({ planetId: "oort", map: { nodes: [] } });      // industry 2 — can't make them

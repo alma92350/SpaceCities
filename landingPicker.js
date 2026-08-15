@@ -12,9 +12,13 @@
    on a world you've never set foot on (the overwhelmingly common case this
    fires for) really is unknown until you land. The pick itself is necessarily
    coarse (a minimap click, not a coordinate field), and engine/galaxy.js's
-   snapLandingPoint further snaps it onto a fixed grid — so the dashed ring
-   drawn around the marker previews that same imprecision rather than
-   promising a precision the landing won't actually have.
+   snapLandingPoint further resolves it to the nearest of a fixed set of
+   landing sites — so the dashed ring drawn around the marker previews that
+   same imprecision rather than promising a precision the landing won't
+   actually have. (That snap is idempotent, so forwarding the RAW point below
+   and forwarding an already-snapped one land in the same place; this file
+   forwards the raw one because the engine owns the rule, not because the
+   caller has to snap exactly once.)
 
    This picker isn't ONLY reached for total unknowns, though: `needsPick`
    (boot.js's initiateJump) fires whenever no COMPLETED player Spaceport
@@ -158,9 +162,11 @@ export function openLandingPicker(dest, worldLabel, { onPick, onCancel }) {
     }
 
     if (!picked) return;
-    // The dashed ring previews the picker's built-in imprecision (LANDING_PICK_GRID, the same
-    // grid engine/galaxy.js's snapLandingPoint rounds onto) — "you'll land roughly here", not a
-    // promise of the exact pixel clicked.
+    // The dashed ring previews the picker's built-in imprecision (LANDING_PICK_GRID, the spacing
+    // of the landing sites engine/galaxy.js's snapLandingPoint resolves a click to) — "you'll land
+    // roughly here", not a promise of the exact pixel clicked. Half the grid bounds the error:
+    // every click is resolved to its NEAREST site, and the extra sites on the margin ring only
+    // ever sit closer than a grid step.
     const ringR = (LANDING_PICK_GRID / 2) * (mmW / map.width);
     ctx.strokeStyle = "rgba(255, 209, 102, 0.55)";
     ctx.setLineDash([4, 4]);

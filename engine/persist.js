@@ -935,7 +935,12 @@ export function deserializeGalaxy(input) {
   for (const P of save.planets) {
     if (!known.has(P.planetId)) continue;                    // skip a planet payload with an unrecognised id
     const state = rehydratePlanet(P);
-    state.market = createMarket(state);                    // base recomputed from the (regenerated) nodes...
+    // ...base recomputed from the SEED-generated nodes. `rehydratePlanet` above has already
+    // re-added this world's wreck/crater nodes, which did NOT exist when the live book was
+    // built at creation — createMarket skips exactly those (see its own comment), so this
+    // reproduces the creation-time book rather than deriving a drifted one from a bigger
+    // node set. That is why `base` needs no save slot of its own.
+    state.market = createMarket(state);
     coerceBand(state.market.pressure, P.market.pressure, PRESSURE_FLOOR, PRESSURE_CEIL);   // ...then overlay the saved running pressure...
     if (P.market.glut) coerceBand(state.market.glut, P.market.glut, 0, GLUT_CEIL);          // ...and the slow produced-goods glut
     state.diplomacy = cleanDiplomacy(P.diplomacy);
