@@ -202,7 +202,7 @@ Requirements are `FR-n`, and every delivery task in [`TASKS.md`](../TASKS.md) tr
 |---|---|---|
 | NFR-1 | Simulation rate | 20 Hz fixed timestep, unchanged from upstream (`engine/loop.js`) |
 | NFR-2 | Server tick budget | < 25 ms per tick for a 4-seat Gigantic-map late game on HF free-tier CPU |
-| NFR-3 | Bandwidth per client | < 32 KB/s steady-state at 4 seats |
+| NFR-3 | Bandwidth per client | < 32 KB/s steady-state at 4 seats. **Provisional** — measured full-state serialization at 800v800 is 404 KB/snapshot, fog-filtered 55 KB. Filtering is what makes replication affordable, but the pathological end still exceeds this target, so T-015 either meets it via snapshot rate and delta-encoding or restates it deliberately. |
 | NFR-4 | Concurrent matches | ≥ 4 on free-tier hardware, degrading gracefully |
 | NFR-5 | Runtime dependencies | **Zero.** No npm packages in the shipped image |
 | NFR-6 | Build step | **None.** The browser loads the repo as-is |

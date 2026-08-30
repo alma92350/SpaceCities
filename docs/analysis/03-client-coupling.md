@@ -1,626 +1,641 @@
 # 03 — Client coupling: what must change to become a networked client
 
-**Status:** analysis, input to ADRs and `TASKS.md`. Not a specification.
-**Source audited:** `/home/user/alma92350/spaceexploration-rts` @ working tree (read-only clone).
-**Assumed decision (upstream):** server-authoritative headless Node sim; the browser renders a
-state it is given and sends commands instead of mutating locally.
-
-All `file.js:line` citations are against the SOURCE tree. Line numbers are exact at the time of
-writing; they are cited so a reader can confirm each claim, not as a patch plan.
+**Status:** analysis, decisive. Input to `docs/adr/` and `TASKS.md`; not a specification.
+**Tree audited:** `/home/user/SpaceCities` @ working tree (the imported-verbatim upstream, ADR-0002).
+All `file.js:line` citations are against that tree and are exact at time of writing — cited so a
+reader can confirm a claim, not as a patch plan.
+**Peers:** [`01-engine-nplayer-seams.md`](01-engine-nplayer-seams.md) owns everything inside
+`engine/`; [`02-command-wire-protocol.md`](02-command-wire-protocol.md) owns the envelope, codec and
+anti-cheat. This dossier stays on the **client** side of that line: the ~17.9k JS + 1.7k CSS lines
+outside `engine/`.
+**Architecture assumed (decided):** server-authoritative headless Node sim (ADR-0003); single-player
+runs the same path through an in-process loopback transport (ADR-0004).
 
 ---
 
 ## 0. Headline findings
 
-Five facts shape everything below. They are the reason this port is a re-seaming job and not a
-rewrite.
-
-1. **The client barely mutates the sim.** Outside `engine/`, sim mutation happens at exactly
-   **56 call sites** across **6 files** — and *all but 10 of them* go through named engine
-   functions (`issue*`, `queueProduction`, `sell`/`buy`, …) that already take an explicit
-   `(state, entityId, args)` shape. Those 46 sites are already command envelopes; they just
-   aren't serialized. The other 10 are `state.selection = …`, which isn't sim state at all
-   (`engine/persist.js:777` resets it to `[]` on load).
-2. **No client file writes `resources` or `credits` directly.** Verified by grep — zero hits.
-   Every economic mutation is an engine call. The trust boundary is therefore already drawn in
-   the right place; it is simply not enforced.
-3. **The engine is already owner-generic in its bones.** `state.owners` is the canonical side
-   list, `state.players` and `state.fogs` are keyed by owner id, and `state.fog`/`state.fogAI`
-   are documented *aliases* into `state.fogs` (`engine/state.js:167-189, 227-234`), pinned by
-   `test/ownerScaffold.test.js`. Victory already iterates `state.owners`
-   (`engine/victory.js:11, 30, 165`). "Seat 3 of 5" is a change to `ownerDefs`
-   (`engine/state.js:174-181`), not a sweep.
-4. **The renderers are already owner-generic for colour and already fog-gate every entity.**
-   Team colour is read as `state.players[owner].color` at all four draw sites
-   (`renderUnits.js:66`, `renderBuildings.js:75`, `minimap.js:95`, `minimap.js:100`); the
-   fog rule is factored into one named predicate, `renderShared.js:253 hiddenByFog`. Nothing
-   hardcodes `#4fd1ff`/`#f87171` for entities — those literals live in `engine/state.js:179-180`
-   as *data*.
-5. **The sim is cheap.** Measured on this machine: a full skirmish with **both** seats
-   AI-driven costs **0.096–0.142 ms/tick** (27,000 ticks, 15 sim-minutes, small and 2× maps).
-   At 20 Hz that is ~0.2–0.3 % of one core per match. A single Node process can host dozens of
-   concurrent matches without breaking a sweat. Headless authority is not a performance risk.
-
-The real work is concentrated in three places: `boot.js` (the lifecycle), `input.js` +
-`inputCommands.js` + `hudSelection.js` (the ~46 synchronous engine calls), and the ~110
-hardcoded `"player"`/`"ai"` owner literals scattered across the HUD and renderers.
+1. **The client mutates the simulation in exactly 64 places, in 6 files.** 26 `issue*` calls,
+   38 non-`issue*` engine mutators. Every one already takes an explicit `(state, id, args)`-ish
+   shape — they are command envelopes that were never serialized. Dossier 02's D1 ("wrap, do not
+   rewrite") is what makes this a re-seaming job.
+2. **Only two client lines write a simulation field directly, bypassing `engine/` entirely** —
+   `hudSelection.js:1045` (`e.homeCC = null`) and `hudSelection.js:1722` (`e.electrified = v`).
+   Dossier 02's command table has no envelope for either. **They need two new engine commands**
+   (`issueClearHomeBase`, `issueSetElectrified`) or they become the first two holes in the trust
+   boundary. This is the single most actionable finding in this document.
+3. **No client file writes `resources` or `credits`.** Verified by grep: every economic mutation
+   goes through an engine function. The trust boundary is already drawn in the right place; it is
+   simply not enforced. What the client *does* do is **read** `state.players.player.resources`
+   at 12 sites in `hudSelection.js` alone — a read that filtering will have to keep serving.
+4. **The renderers are already owner-generic where it counts.** Team colour is read as
+   `state.players[owner].color` at all four draw sites (`renderUnits.js:66`, `renderBuildings.js:75`,
+   `minimap.js:95`, `minimap.js:100`); `#4fd1ff`/`#f87171` live in `engine/state.js:179-180` as
+   *data*, and every client occurrence of those literals is unrelated UI chrome. The fog rule is
+   factored into one named predicate, `renderShared.js:253 hiddenByFog`. "Seat 3 of 5" does not
+   break rendering.
+5. **What "seat 3 of 5" actually breaks is the 80 owner literals outside `engine/`**, concentrated
+   in `inputCommands.js` (16), `hudSelection.js` (7), `renderBuildings.js` (6), `hud.js` (6),
+   `boot.js` (6), `input.js` (5). Nearly all are the *same* assertion — "`player` means me" — and
+   collapse to one `state.localOwner` seam. Roughly **9** are the harder assertion, "the enemy is
+   `ai`", and those are genuine 1v1 semantics that must be redesigned or scoped out.
+6. **Broadcasting full state is not affordable, and the numbers are not close.** Measured on this
+   machine with `engine/persist.js`: a 4× map with 800-vs-800 units serializes to **404 KB in
+   4.45 ms**; at 20 Hz × 4 seats that is 32 MB/s and 18 ms of a 50 ms tick budget spent on
+   `JSON.stringify` alone. A per-seat fog-filtered delta of the same state is **55 KB in 0.69 ms**.
+   Dossier 00's "the sim runs ~500× faster than real time" is confirmed from the other side:
+   **serialization is the server cost, and filtering is what makes it affordable, not what makes it
+   expensive.** Recommendation: **fog-filtered per client, from day one.** §4.
+7. **The map never has to cross the wire.** `serializeGame` does not include `state.map` at all
+   (measured: `map` is absent from the payload's top-level keys) — terrain, node positions and base
+   positions are regenerated from `seed` + `planetId` on load (`engine/persist.js` `rehydratePlanet`).
+   A client that is told `{planetId, seed, sizeMult, resourceMult}` at join reconstructs the entire
+   static world locally. That is the largest single replication saving available and it is already
+   built.
+8. **~45% of the client is verbatim or a one-line-per-site substitution.** Counting the modules that
+   ship in multiplayer v1, **68% of the in-scope 12,856 LOC needs zero or near-zero change**. The
+   real work is concentrated in four files totalling 3,662 LOC — `boot.js`, `hudSelection.js`,
+   `input.js`, `inputCommands.js` — and inside three of those four the touched lines are under 15%
+   of the file. §5.
 
 ---
 
 ## 1. The local-authority inventory
 
-### 1.1 `engine/commands.js` `issue*` — direct order issuance
+Every place outside `engine/` that mutates simulation state, or assumes it owns the simulation.
 
-`engine/commands.js` exports 22 `issue*` functions (lines 231–531). Four client files import
-them. **Every one of these becomes `submitCommand(envelope)`.**
+### 1.1 `engine/commands.js` `issue*` — direct order issuance (26 sites, 4 files)
 
-| Site | Call | Notes |
+Imports: `inputCommands.js:27`, `hudSelection.js:21`, `main.js:21`, `input.js:12`.
+
+| # | Site | Call | Notes for the codec |
+|---|---|---|---|
+| 1 | `inputCommands.js:94` | `issueAttackMove(combatants, x, y, queue, formation)` | right-click; split from :95 by role |
+| 2 | `inputCommands.js:95` | `issueMove(others, x, y, queue, formation)` | same click, second envelope — see §1.6 |
+| 3 | `inputCommands.js:199` | `issueSetRally(building, p.x, p.y, node?.id)` | **the one engine signature change** (02 D2): bare `Building` ref, no `state` |
+| 4 | `inputCommands.js:212` | `issueAssistBuild(workers, target.id, target.type, queue)` | `target.type` is client-supplied — 02 flags it |
+| 5 | `inputCommands.js:226` | `issueServiceBuilding(workers, target.id, queue)` | |
+| 6 | `inputCommands.js:235` | `issueRepair(workers, target.id, queue)` | building target |
+| 7 | `inputCommands.js:245` | `issueSetHomeBase(eligible, target.id)` | |
+| 8 | `inputCommands.js:249` | `issueAttack(attackers, target.id, queue)` | |
+| 9 | `inputCommands.js:259` | `issueFerryFreighter(workers, target.id, queue)` | |
+| 10 | `inputCommands.js:266` | `issueRepair(workers, target.id, queue)` | unit target |
+| 11 | `inputCommands.js:273` | `issueEscort(escorts, target.id, queue)` | **array order is the ring slot** (02 D4) |
+| 12 | `inputCommands.js:278` | `issueGather(workers, node.id, queue)` | |
+| 13 | `inputCommands.js:282` | `issueMove(selected, p.x, p.y, false, formation)` | |
+| 14 | `hudSelection.js:518` | `issueSetAILogistics([f], !on, state)` | reads `state` for the tech gate |
+| 15 | `hudSelection.js:542` | `issueSetCollectPoint([f], !on)` | |
+| 16 | `hudSelection.js:600` | `issueSetLogiPriority(state, b.id, …)` | already id-based |
+| 17 | `hudSelection.js:1821` | `issueCancelRecycle(recyclingNow)` | |
+| 18 | `hudSelection.js:1835` | `issueRecycle(recyclable)` | banks resources later (02 #17) |
+| 19 | `main.js:149` | `issueAttackMove(combatants, world.x, world.y)` | minimap right-click |
+| 20 | `main.js:150` | `issueMove(others, world.x, world.y)` | same click |
+| 21 | `input.js:346` | `issueStop(selectedUnits())` | |
+| 22 | `input.js:351` | `issueScout(selectedUnits())` | |
+| 23 | `input.js:355` | `issueHold(selectedUnits())` | |
+| 24 | `input.js:372` | `issuePatrol([u], points)` | **unbounded `points`** (02 #20) |
+| 25 | `input.js:379` | `issueHoldFormation(selectedUnits(), shape, leaderPos)` | anchor is the live centroid |
+| 26 | `input.js:521` | `issueBuild(state, worker.id, type, p.x, p.y)` | **return value consumed** — §1.6 |
+
+### 1.2 Non-`issue*` engine mutators called from the client (38 sites, 3 files)
+
+Dossier 02's scope correction is confirmed and this is where the money is: **every cost-bearing
+action** (production, research, market, diplomacy, colony, galaxy) goes through this group, not
+through `commands.js`.
+
+| Family | Sites | Engine module |
 |---|---|---|
-| `main.js:21` | *import* `issueMove, issueAttackMove` | minimap right-click |
-| `main.js:149` | `issueAttackMove(combatants, world.x, world.y)` | minimap command |
-| `main.js:150` | `issueMove(others, world.x, world.y)` | minimap command |
-| `input.js:12` | *import* `issueBuild, issueStop, issueScout, issueHold, issueHoldFormation, issuePatrol` | |
-| `input.js:346` | `issueStop(selectedUnits())` | S key |
-| `input.js:351` | `issueScout(selectedUnits())` | scout toggle |
-| `input.js:355` | `issueHold(selectedUnits())` | H key |
-| `input.js:372` | `issuePatrol([u], points)` | per-unit patrol loop |
-| `input.js:379` | `issueHoldFormation(selectedUnits(), game.formation.shape, game.formation.leaderPos)` | reads client-only `game.formation` (`session.js:75`) |
-| `input.js:521` | `issueBuild(state, worker.id, buildingType, p.x, p.y)` | **returns a value the client uses** — see §1.6 |
-| `inputCommands.js:27` | *import* 11 `issue*` | the right-click router |
-| `inputCommands.js:94` | `issueAttackMove(combatants, x, y, queue, formation)` | |
-| `inputCommands.js:95` | `issueMove(others, x, y, queue, formation)` | |
-| `inputCommands.js:199` | `issueSetRally(building, p.x, p.y, node?.id)` | passes a **live building object**, not an id |
-| `inputCommands.js:212` | `issueAssistBuild(workers, target.id, target.type, queue)` | |
-| `inputCommands.js:226` | `issueServiceBuilding(workers, target.id, queue)` | |
-| `inputCommands.js:235` | `issueRepair(workers, target.id, queue)` | |
-| `inputCommands.js:245` | `issueSetHomeBase(eligible, target.id)` | |
-| `inputCommands.js:249` | `issueAttack(attackers, target.id, queue)` | |
-| `inputCommands.js:259` | `issueFerryFreighter(workers, target.id, queue)` | |
-| `inputCommands.js:266` | `issueRepair(workers, target.id, queue)` | |
-| `inputCommands.js:273` | `issueEscort(escorts, target.id, queue)` | |
-| `inputCommands.js:278` | `issueGather(workers, node.id, queue)` | |
-| `inputCommands.js:282` | `issueMove(selected, p.x, p.y, false, currentFormation(heading))` | |
-| `hudSelection.js:21` | *import* `issueSetAILogistics, issueSetCollectPoint, issueSetLogiPriority, issueRecycle, issueCancelRecycle` | |
-| `hudSelection.js:518` | `issueSetAILogistics([f], !on, state)` | |
-| `hudSelection.js:542` | `issueSetCollectPoint([f], !on)` | |
-| `hudSelection.js:600` | `issueSetLogiPriority(state, b.id, LOGI_PRIORITY_NEXT[cur])` | |
-| `hudSelection.js:1821` | `issueCancelRecycle(recyclingNow)` | passes **live entity objects** |
-| `hudSelection.js:1835` | `issueRecycle(recyclable)` | passes **live entity objects** |
-| `tools/ailab.js:78,82,168-320` | `issueAttackMove`, `issueBuild` | headless bench, not shipped client |
+| Production / research | `hudSelection.js:197` `cancelProduction`, `:235` `cancelResearch`, `:1098`, `:1104`, `:1198`, `:1629` `queueProduction`, `:1149` `researchUpgrade`, `:1179` `researchTech` | `production.js`, `techtree.js` |
+| Market (spends credits) | `hudSelection.js:381`, `:395`, `:405` `sell`, `:414` `buy` | `market.js` |
+| Freight | `hudSelection.js:449`, `:485` `loadFreighter`; `:459`, `:494` `unloadFreighter` | `galaxy.js` |
+| Diplomacy | `hudSelection.js:630` `offerTribute`, `:661` `fulfillRequest`, `:705` `offerGift` | `diplomacy.js` |
+| Lanes | `hudSelection.js:766` `unassignShipFromLane`, `:777` `assignShipToLane`, `:781` `deleteLane`, `:793` `createLane` | `galaxy.js` |
+| Colony policy | `hudSelection.js:831`, `:837`, `:850`, `:870`, `:876`; `starmap.js:229`, `:239`, `:244` `setColonyPolicy` | `colonyPolicy.js` |
+| Colony / capital | `hudSelection.js:900` `upgradeToCapital`, `:905` `packCommandCenter`, `:1750` `deployColonyShip` | `galaxy.js`, `colony.js` |
+| Spaceport | `hudSelection.js:1386` `upgradeSpaceport` | `galaxy.js` |
+| Bomb | `hudSelection.js:1455` `lightFuse(state, bomb)` | `bomb.js` — takes a live object |
+| Scenario | `hud.js:37` `repairConvoy(game.state)`, `hud.js:38` `departNow(game.state)` | `scenarios.js` |
 
-**Shape problem to fix once:** most `issue*` take **arrays of live unit objects**, and three take
-live building/entity objects (`inputCommands.js:199`, `hudSelection.js:1821`, `:1835`). A wire
-envelope must carry **ids**. Recommended: add one dispatcher,
-`applyCommand(state, seat, {verb, ids, args})`, in `engine/commands.js` that resolves ids →
-entities, **filters to entities owned by `seat`** (this is the anti-cheat gate, and it does not
-exist anywhere today), then calls the existing `issue*` unchanged. Every existing
-`test/commands.test.js` assertion (503 LOC) keeps passing against the raw `issue*`.
+**Two of these are Odyssey/galaxy-only** (lanes, colony policy, freight, spaceport, capital) and
+therefore out of multiplayer v1 by §7 — which removes 22 of the 38 from the v1 codec surface.
 
-### 1.2 Non-`issue*` engine mutators called from the client
+### 1.3 Direct `state.*` writes from the client
 
-These are just as authoritative and are easy to miss because they don't share a prefix.
+There are exactly four kinds, and they are not all the same severity.
 
-| Site | Call | Subsystem |
+| Kind | Sites | Verdict |
 |---|---|---|
-| `hudSelection.js:1098, 1104, 1198, 1629` | `queueProduction(state, b.id, t[, true])` | production |
-| `hudSelection.js:197` | `cancelProduction(state, building.id, i)` | production |
-| `hudSelection.js:1149` | `researchUpgrade(state, refinery.id, u.id)` | tech |
-| `hudSelection.js:1179` | `researchTech(state, datacenter.id, t.id)` | tech (Odyssey) |
-| `hudSelection.js:235` | `cancelResearch(state, building.id, i)` | tech |
-| `hudSelection.js:381, 395, 405` | `sell(game.galaxy, state, com, qty)` | market (Odyssey) |
-| `hudSelection.js:414` | `buy(game.galaxy, state, com, TRADE_LOT)` | market (Odyssey) |
-| `hudSelection.js:449, 485` | `loadFreighter(state, f.id, com, qty)` | freight (Odyssey) |
-| `hudSelection.js:459, 494` | `unloadFreighter(state, f.id, com, qty)` | freight (Odyssey) |
-| `hudSelection.js:630` | `offerTribute(game.galaxy, state)` | diplomacy (Odyssey) |
-| `hudSelection.js:661` | `fulfillRequest(game.galaxy, state)` | diplomacy (Odyssey) |
-| `hudSelection.js:705` | `offerGift(state, com, TRADE_LOT)` | diplomacy (Odyssey) |
-| `hudSelection.js:766, 777, 781, 793` | `unassignShipFromLane / assignShipToLane / deleteLane / createLane` | lanes (Odyssey) |
-| `hudSelection.js:831, 837, 850, 870, 876` | `setColonyPolicy(g, planetId, …)` | colony policy (Odyssey) |
-| `hudSelection.js:900` | `upgradeToCapital(state, cc)` | Odyssey |
-| `hudSelection.js:905` | `packCommandCenter(state, cc.id)` | Odyssey |
-| `hudSelection.js:1386` | `upgradeSpaceport(state, spaceport)` | Odyssey |
-| `hudSelection.js:1455` | `lightFuse(state, bomb)` | bombs — **skirmish, must be a command** |
-| `hudSelection.js:1750` | `deployColonyShip(state, colonyShip.id)` | Odyssey |
-| `hud.js:37` | `repairConvoy(game.state)` | scenario |
-| `hud.js:38` | `departNow(game.state)` | scenario |
-| `starmap.js:229, 239, 244` | `setColonyPolicy(g, w.id, …)` | Odyssey |
+| `state.selection = …` | `inputCommands.js:147`, `:152`, `:154`, `:157`, `:177`; `input.js:318`, `:337`, `:382`, `:395`, `:411`, `:543` (**11**) | **Not sim state.** `engine/persist.js` resets it to `[]` on load and dossier 02 D6 moves it to the client session. Zero wire cost. |
+| `state.events.length = 0` | `boot.js:766` | **The client drains the sim's event queue.** In multiplayer, events must be produced server-side, fog-filtered per seat (`boot.js:675` already applies the fog rule), replicated, and drained *client-locally*. See §4.2. |
+| Galaxy notification drains | `boot.js:511` `pacifyNotes.length = 0`, `:517` `milestones.length = 0`, `:522` `reliefNote = false` | Odyssey-only ⇒ out of v1 (§7). Same pattern as the event drain. |
+| **Raw entity-field writes** | `hudSelection.js:1045` `e.homeCC = null`; `hudSelection.js:1722` `e.electrified = v` | **The only true trust-boundary holes.** Neither has an `engine/commands.js` envelope. Fix before the codec ships. |
 
-For **v1 skirmish MP**, the mandatory set is small: `queueProduction`, `cancelProduction`,
-`researchUpgrade`, `cancelResearch`, `lightFuse`, plus the `issue*` family. Everything marked
-Odyssey is out of scope (§7) and stays reachable only on the offline path (§8).
+`hudSelection.js:1722` is the worse of the two: it writes `electrified` on **every** building in the
+current selection, with only a client-side `e.owner === "player"` filter standing between it and
+electrifying an opponent's Habitat. Under server authority that filter disappears with the client.
 
-### 1.3 Direct `state.*` writes
+### 1.4 `state.players.player.…` — direct owner-keyed reads (26 sites)
 
-Only two kinds exist in the whole non-engine tree.
+No writes; all reads. They matter because each is a place that must be re-pointed at the local seat
+*and* must survive fog filtering (the local seat's own economy is always fully visible, so filtering
+never strips these — but they hard-code the key).
 
-| Site | Write | Verdict |
+- **`state.players.player.resources`** — `hudSelection.js:272`, `:363`, `:432`, `:522`, `:651`,
+  `:680`, `:1955`; `hudPanelSignature.js:146`, `:227`, `:228`, `:264`, `:272`, `:344`;
+  `hud.js:99`, `:174`
+- **`.upgrades`** — `hudSelection.js:508`, `:1122`, `:1157`; `hudPanelSignature.js:180`
+- **`.color`** — `hudSelection.js:1941`; `landingPicker.js:149`
+- **`.faction`** — `overlays.js:34` (`st.players.player.faction` **and** `st.players.ai.faction` in
+  one line — a 1v1 assumption, not just a local-seat one)
+- **Already owner-generic** — `techChart.js:138`, `:153`, `:196` via `const OWNER = "player"`
+  (`techChart.js:36`); `hudPanelSignature.js:373` via `state.players[b.owner]`;
+  `minimap.js:95`, `:100`, `renderUnits.js:66`, `renderBuildings.js:75` via `state.players[e.owner]`
+- **Enemy-keyed** — `observer.js:276` `state.players.ai`
+
+> **Trap.** `data.js:124` defines a commodity whose id is literally `"ai"`
+> (`{ id: "aifab", out: "ai", … }` — AI cores). `hudPanelSignature.js:272` reads
+> `state.players.player.resources.ai`. **A blind rename of the owner id `"ai"` will corrupt the
+> economy.** Any owner-literal sweep must be site-by-site.
+
+### 1.5 `createGameState` / `tick` / `createLoop` — the sim ownership itself
+
+All in `boot.js`. This is the part that genuinely moves to the server.
+
+| Site | Call | Moves to |
 |---|---|---|
-| `input.js:318, 337, 382, 395, 411, 543` | `state.selection = …` | **Not sim state.** Move to the client session. |
-| `inputCommands.js:147, 152, 154, 157, 177` | `state.selection = …` | same |
-| `boot.js:766` | `state.events.length = 0` | The client *drains* the sim's event queue. On the server path, events arrive per-snapshot and are consumed the same way. |
+| `boot.js:119` | `createGameState({planetId, seed, rng, aiApm, …})` (skirmish) | server, from the lobby's agreed config |
+| `boot.js:169` | `createGameState(…)` (competition fixture) | out of v1 (§7) |
+| `boot.js:207` | `createSelfPlayState(…)` (watched duel) | out of v1 / server-side spectate |
+| `boot.js:236`, `:244`, `:252` | `setupEscort` / `setupRaider` / `setupBounty` | server (single-player scenarios via loopback) |
+| `boot.js:262` | `createGalaxy(…)` | out of v1 (§7) |
+| `boot.js:287` | `jumpCapital(game.galaxy, destId, …)` | out of v1 |
+| `boot.js:344` | `surrenderGalaxy(game.galaxy)` | out of v1 |
+| `boot.js:485` | `createLoop({hz, speed, update, render})` | **splits.** The *sim* half (`update`) moves to the server; the *render* half (`render`) stays and becomes a plain `requestAnimationFrame` interpolator |
+| `boot.js:503-504` | `stepGalaxy` / `sweepColonies` | out of v1 |
+| `boot.js:530` | `tickSelfPlay(game.state, dt)` | out of v1 |
+| `boot.js:531` | `tick(game.state, dt)` | **server** |
 
-`state.selection` also has **2 engine references** (`engine/state.js:346` prunes dead ids;
-`engine/galaxy.js:1422` clears both sides on a jump), **32 client references** and **124 test
-references**. It is single-seat by construction and *must* move out of the shared sim state — it
-is the single largest mechanical edit in the port. `engine/persist.js:777` already proves it is
-disposable (it saves as `[]`).
+`engine/loop.js` is a fixed-timestep accumulator with a render callback and an `alpha` interpolation
+fraction. Server-side it keeps the accumulator and drops the render callback; client-side the render
+callback survives essentially unchanged because `render.js` already interpolates between two
+positions per entity (`snapshotPositions`, `boot.js:501`) — the exact mechanism a networked client
+needs for snapshot interpolation. **That is a significant unplanned gift.**
 
-### 1.4 `state.players.player.resources` and friends — direct owner-keyed reads
+### 1.6 Return values the client consumes — the optimistic-update hazards
 
-There are **no writes**. Reads (all of which become "read *my* seat"):
+Server authority makes every mutation asynchronous. These sites read a synchronous answer *now*:
 
-| Site | Read |
-|---|---|
-| `hud.js:99` | `{ ...state.players.player.resources }` (flow history sample) |
-| `hud.js:174` | `state.players.player.resources` (topbar readout) |
-| `hudSelection.js:272, 363, 432, 522, 680` | `state.players.player.resources` |
-| `hudSelection.js:651` | `state.players.player.resources[req.com]` |
-| `hudSelection.js:508, 1122, 1157` | `state.players.player.upgrades` |
-| `hudSelection.js:1941` | `state.players.player.color` (button sprite tint) |
-| `hudSelection.js:1955` | `canAfford(state.players.player.resources, cost)` |
-| `hudPanelSignature.js:146, 264, 344` | `state.players.player.resources` |
-| `hudPanelSignature.js:180` | `state.players.player.upgrades` |
-| `hudPanelSignature.js:227, 228` | `state.players.player.resources[…]` |
-| `overlays.js:34` | `st.players.player.faction` **and `st.players.ai.faction`** |
-| `observer.js:276` | `state.players.ai` (spectator stats) |
-| `techChart.js:36` | `const OWNER = "player"` — the whole module's owner, used at `:138, :153, :196` |
+| Site | Pattern | Why it breaks |
+|---|---|---|
+| `input.js:521-523` | `const built = worker && issueBuild(...); if (built) buildMode = null; else sound.playProductionBlocked();` | Build mode exits (and the ghost clears) **only on a successful placement**. The client must either predict the placement locally and roll back on a server NACK, or keep the ghost up until an ack — a visible latency change either way. This is the highest-visibility UX consequence in the whole port. |
+| `hudSelection.js:449`, `:459`, `:485`, `:494` | `if (loadFreighter(...) > 0) any = true` | Loop over commodities, branching on how much actually moved. Out of v1 with Odyssey, but the pattern recurs. |
+| `hud.js:37` | `if (repairConvoy(game.state)) renderHUD()` | Repaints only if the repair took. |
+| `boot.js:287-290` | `const result = jumpCapital(...); if (!result) return null; focusActivePlanet();` | Out of v1. |
+| `inputCommands.js` (throughout) | each handler `return`s `true`/`false` to mean "this click was consumed" | **Benign.** The consumption decision is a *client-side hit test*, not a sim answer; it can stay synchronous. |
 
-**Fix:** one accessor. `me(state)` → `state.players[session.seat]`. 20 sites, purely mechanical.
-`overlays.js:34` and `observer.js:276` are the two that read *someone else's* player record and
-therefore need a public-facts channel under filtering (§4).
-
-### 1.5 `createGameState` / `tick()` / `createLoop` — the sim ownership itself
-
-All in `boot.js`. This is the file that becomes the transport.
-
-| Site | Call |
-|---|---|
-| `boot.js:14` | *import* `createGameState` |
-| `boot.js:16` | *import* `createLoop` |
-| `boot.js:17` | *import* `tick` |
-| `boot.js:22` | *import* `createSelfPlayState, tickSelfPlay, SELFPLAY_HZ` |
-| `boot.js:119` | `createGameState({ planetId, seed, rng: mulberry32(seed), … })` — skirmish |
-| `boot.js:169` | `createGameState({ … })` — competition fixture |
-| `boot.js:207` | `createSelfPlayState({ … })` — watched AI-vs-AI |
-| `boot.js:236, 244, 252` | `setupEscort / setupRaider / setupBounty` — scenarios |
-| `boot.js:262` | `createGalaxy({ … })` — Odyssey |
-| `boot.js:287` | `jumpCapital(game.galaxy, destId, …)` |
-| `boot.js:344` | `surrenderGalaxy(game.galaxy)` |
-| `boot.js:485` | `loop = createLoop({ hz, speed, update, render })` |
-| `boot.js:503` | `stepGalaxy(game.galaxy, dt)` |
-| `boot.js:504` | `sweepColonies(game.galaxy, dt)` |
-| `boot.js:530` | `tickSelfPlay(game.state, dt)` |
-| `boot.js:531` | `tick(game.state, dt)` — **the single skirmish tick** |
-
-Note `engine/loop.js:34` `createLoop` is a *render* loop with an embedded fixed-step accumulator.
-On the server, the accumulator half is reusable verbatim; the `requestAnimationFrame` half
-(`engine/loop.js:69, 77, 81`, each marked `browser-exempt`) needs a `setInterval`/timer driver.
-Recommendation: extract the accumulator into a `stepper` and give it two drivers, rather than
-forking the file — the fixed-step semantics documented at `engine/loop.js:18-26` are what make
-replay determinism hold, and they must not diverge.
-
-### 1.6 Return values the client consumes — the "optimistic" hazards
-
-Three call sites use the *return value* of a mutation, which a fire-and-forget command envelope
-cannot provide:
-
-- `input.js:521` — `issueBuild(...)` returns the new building id or `null`; the client uses the
-  falsy result to keep build mode armed and play a rejection sound. Under server authority this
-  becomes a *rejection message* or an optimistic ghost that clears on the next snapshot.
-- `hudSelection.js:449, 459, 485, 494` — `loadFreighter`/`unloadFreighter` return the quantity
-  actually moved and drive the UI feedback (`sound.playProductionBlocked()` on 0). Odyssey-only.
-- `boot.js:287` — `jumpCapital` returns a result object or `null`. Odyssey-only.
-
-Only the first matters for v1.
+Everything else fires and forgets, followed by `renderHUD()` — which under authority just becomes
+"repaint on the next snapshot", i.e. strictly simpler.
 
 ---
 
 ## 2. `session.js` / `boot.js` — the lifecycle, and how it re-shapes
 
-### 2.1 `session.js` today (120 LOC)
+### 2.1 `session.js` today (120 LOC, zero imports)
 
-A single exported mutable object, `game`, that every UI module reads **at call time** (never
-destructured at module scope) so a restart is picked up automatically. Its 17 fields are exactly
-three kinds of thing:
+A single exported mutable object, `game`, holding 16 fields. It has **no imports at all** and
+contains no logic — it exists so `hud`/`boot`/`save`/`input` all see the same current game across a
+restart, and everything reads it *at call time* rather than destructuring at module scope
+(`session.js:8-10`). That discipline is why a networked rewire is cheap: swapping what `game.state`
+points at is already the supported operation.
 
-| Kind | Fields | MP fate |
+Fields, grouped by what happens to them:
+
+| Group | Fields | Fate |
 |---|---|---|
-| **The sim handles** | `state` (`session.js:16`), `galaxy` (`:22`) | Become *received* state; `galaxy` out of v1 |
-| **The input controller** | `input` (`:17`) | Stays; becomes command-emitting rather than state-mutating |
-| **Per-viewer UI state** | `supplyBlockedUntil` (`:34`), `lastAttackAt` (`:40`), `lastGateCharge` (`:52`), `colonyAlerts` (`:64`), `groups` (`:69`), `formation` (`:75`), `collapsedSections` (`:84`), `observerMode` (`:89`), `spectateId` (`:92`), `spectatePreview` (`:99`), `observerCamera` (`:103`), `spectateSpeed` (`:119`) | **Stays exactly as-is.** None of it is sim state; all of it is per-client. |
-| **Match-provenance flags** | `competition` (`:30`), `spectateMatch` (`:114`) | Replaced by `match` (server-issued match descriptor) |
+| **The sim handles** | `state` (`:16`), `galaxy` (`:21`) | `state` becomes a **replicated view**, not the authority. `galaxy` out of v1. |
+| **Local input/UI** | `input` (`:17`), `formation` (`:75`), `collapsedSections` (`:84`), `groups` (`:69`) | **Verbatim.** All already documented as "never part of the deterministic sim". |
+| **Cross-module UI bookkeeping** | `supplyBlockedUntil` (`:34`), `lastAttackAt` (`:40`), `lastGateCharge` (`:52`), `colonyAlerts` (`:64`) | Verbatim; driven by replicated events instead of local ones. |
+| **Mode flags** | `competition` (`:30`), `spectateMatch` (`:114`), `spectateSpeed` (`:119`) | Out of v1 (§7). |
+| **Observer** | `observerMode` (`:89`), `spectateId` (`:92`), `spectatePreview` (`:99`), `observerCamera` (`:103`) | **Kept and repurposed** (§7). |
 
-**This object is the right shape already.** The port adds fields, it does not restructure:
-`seat` (my owner id), `seats` (public roster: id, name, colour, faction, isAI/isAgent),
-`transport`, `connection` (connecting/live/desynced/dropped), `serverTick`, `selection`
-(moved off `state`), and `role` (`"player" | "spectator"`).
+**The re-shape is additive.** `session.js` gains a small, well-defined set of new fields and loses
+nothing that v1 ships:
 
-### 2.2 `boot.js` today — the lifecycle in one line each
-
-```
-main.js:165  renderMapSelect()                      splash / map-select screen (setup.js:306)
-             └ user picks world + dials → setup     (setup.js:104, the shared config object)
-boot.js:109  startGame(planetId)                    resolveSeed → difficultyDials → createGameState
-boot.js:443  bootState(newState, {intro})           THE single boot path — 5 other entry points funnel here
-   :444-446    stop old loop, destroy old input, exitObserverMode
-   :447-451    hide mapSelect / gameOver / underAttack overlays
-   :453-457    clear galaxy / competition / spectateMatch / groups / colonyAlerts
-   :458        game.state = newState
-   :463-465    seed chip, faction chip, objectives strip
-   :466        game.input = attachInput(canvas, state, () => renderHUD())
-   :471-475    open camera on state.map.bases.player, clamp
-   :476-482    resetEffects / resetFacing / resetPanelSignature / resetWorldUiBookkeeping / clearPause
-   :485        loop = createLoop({ hz: PLAY_HZ(20) | SELFPLAY_HZ, speed, update, render })
-   :499-532      update(dt): pause gate → snapshotPositions → (stepGalaxy | tickSelfPlay | tick)
-   :533-579      render(alpha): tickCamera → drawFrame → drawMinimap → processFrameEvents
-                                → throttled renderHUD/renderObserverPanel (150 ms)
-                                → **over-poll**: if (state.over && !announced) → showGameOver
-   :581        loop.start(); :582 renderHUD()
-boot.js:400  restartToMapSelect()                   loop.stop, input.destroy, null state/galaxy,
-                                                    clearPause, renderMapSelect, unhide mapSelect
+```js
+// new in session.js
+transport: null,   // LoopbackTransport | WebSocketTransport (ADR-0004)
+match:     null,   // { matchId, seats:[{owner,name,kind,color}], mapCfg, hostSeat }
+localOwner: null,  // MY seat id — the single seam §3 collapses into
+serverTick: 0,     // last applied authoritative tick
+lobby:     null,   // pre-match lobby model (setup.js renders it)
+netStatus: "offline",  // offline | connecting | live | lagging | resyncing | dropped
 ```
 
-Five other entry points reuse `bootState` verbatim: `startCompetitionMatch` (`:159`),
-`startSpectatedMatch` (`:204`), `startScenario`/`startRaider`/`startBounty` (`:234/:242/:250`),
-`startOdyssey`→`bootGalaxy` (`:259`/`:273`), and `saveload.js`'s load path.
+`localOwner` is the load-bearing one. `state.localOwner` (or `game.localOwner`) is what turns 71 of
+the 80 owner literals into one substitution.
 
-Three structural properties matter for the port:
+### 2.2 `boot.js` today — the lifecycle, one line each
 
-- **End of match is a *poll*, not an event** (`boot.js:551`: `if (game.state.over && !announced)`).
-  There is no callback, no state machine. The client discovers the match ended by looking.
-- **`bootState` is idempotent teardown-then-setup.** Every "leaving" concern is already
-  centralised — the comment block at `boot.js:390-399` documents exactly why nulling the session
-  matters (stale hotkeys, the autosave timer writing after "Exit without Saving").
-- **The loop reads `game.state` live** (`boot.js:501, 503, 530, 531, 545`), never a captured
-  binding. Swapping the state under it is already a supported operation (that is how the Odyssey
-  jump works, `boot.js:365 focusActivePlanet`).
+- **Splash → map select.** `main.js:165` calls `renderMapSelect()` at module-eval time. `setup.js`
+  owns the screen; card click → `startGame(planetId)` (or a scenario / Odyssey / Continue variant).
+- **`startGame(planetId)`** — `boot.js:109`. Draws a seed (`resolveSeed`, `:64`), resolves difficulty
+  dials (`:54`), picks the AI's faction from the world archetype (`:118`), calls
+  `createGameState` (`:119`), hands off to `bootState(fresh, {intro:true})` (`:124`).
+- **`bootState(newState, {intro, selfPlay})`** — `boot.js:443`. **The single funnel every start path
+  uses.** In order: stop the old loop (`:444`), destroy old input (`:445`), exit observer mode
+  (`:446`), hide map-select / game-over / under-attack (`:447-450`), clear mode flags and per-game UI
+  (`:453-457`), **assign `game.state`** (`:458`), toggle the scenario body class (`:462`), show
+  seed + faction chips (`:463-464`), objectives strip (`:465`), `attachInput` (`:466`), park the
+  camera on the player's base (`:471-475`), reset effects/facing/panel-signature/world bookkeeping
+  (`:476-481`), clear pause (`:482`), **`createLoop`** (`:485`), `loop.start()` (`:581`),
+  `renderHUD()` (`:582`).
+- **The loop's `update`** — `boot.js:499-532`. Skip if paused (`:500`); `snapshotPositions` (`:501`);
+  then one of three branches: galaxy (`:502-524`), spectated self-play (`:525-530`), or plain
+  `tick(game.state, dt)` (`:531`).
+- **The loop's `render`** — `boot.js:533-579`. `tickCamera`; pin `alpha` to 1 while paused (`:540`);
+  choose `viewState`/`viewCamera` (observer or live, `:545-546`); `drawFrame` (`:547`);
+  `drawMinimap` (`:548`); `processFrameEvents()` (`:549`); throttled `renderHUD` every 150 ms
+  (`:550`); **then the over-poll** (`:551`).
+- **Win / lose.** `boot.js:551`: `if (game.state.over && !announced)` → `announced = true`,
+  `loop.stop()` (`:553`), then `showScenarioEnd` or `showGameOver(winner, seed, restartToMapSelect,
+  {…})` (`:560-577`). The client **polls a boolean the sim set** — it does not decide.
+- **Restart.** `restartToMapSelect()` — `boot.js:400`. Stop loop, destroy input, exit observer,
+  null `state`/`galaxy`/`competition`/`spectateMatch`, repaint observer UI, clear pause, hide the
+  pause button, `renderMapSelect()`, unhide map-select. Documented as idempotent (`:399`).
+- **Pause.** Refcounted reasons (`boot.js:94-107`) — Help, the Home-confirm modal, the landing
+  picker, and a manual `P`. **Gates `update()` only; render keeps drawing.**
 
-### 2.3 The multiplayer re-shape
+### 2.3 The multiplayer re-shape, precisely
 
-The lifecycle gains one screen and loses ownership of two transitions. Concretely:
+The shape of `bootState` is exactly right and should be preserved. What changes is **who calls it,
+with what, and who decides it is over**.
 
-```
-SPLASH  →  LOBBY  →  (host: configure | join: wait)  →  server: MATCH_START
-        →  bootState(receivedSnapshot, {seat})  →  loop(render-only) + command submit
-        →  server: MATCH_END  →  post-match screen  →  LOBBY
-```
+| Today | Networked |
+|---|---|
+| `renderMapSelect()` at `main.js:165` | unchanged — the splash is still local |
+| Card click → `startGame(planetId)` | Card click → `createMatch(cfg)` / `joinMatch(code)` → **lobby screen** |
+| — | **`renderLobby()`** (new, in `setup.js`): seat list, per-seat ready flags, kind (human / AI / MCP agent), colour, faction, host-only map dials. Driven by a replicated `lobby` snapshot; the host's dial changes are commands like any other. |
+| `resolveSeed(setup)` at `boot.js:114` — client draws the seed with `Math.random` | **server draws the seed** and announces it in the match-start message. The client's `resolveSeed` survives for single-player-over-loopback only. |
+| `createGameState(…)` at `boot.js:119` | **server** constructs it from the lobby config; the client receives `{matchId, seats, planetId, seed, sizeMult, resourceMult, matchTimeLimit, popCap, swapAsym}` and rebuilds the *static* world locally (§0.7) |
+| `bootState(fresh, {intro:true})` | `bootState(view, {intro, seats, localOwner})` — **same function**, called from the transport's `match-start` handler instead of from a click handler. Everything from `:444` to `:482` is unchanged. |
+| `loop = createLoop({update: dt => tick(state,dt), render})` | `createLoop({update: **applyPendingSnapshot + advanceInterpolation**, render})`. The render half at `:533-579` is untouched. `hz` becomes the snapshot cadence, not the sim rate. |
+| `snapshotPositions(game.state)` at `:501` | **unchanged and now load-bearing** — it is already the interpolation baseline; it becomes the previous *authoritative* snapshot. |
+| `processFrameEvents()` at `:549`, draining `state.events` | drains the **replicated, per-seat-filtered** event list the snapshot carried |
+| `if (game.state.over && !announced)` at `:551` | **replaced by a server `match-end` message.** Polling a local boolean is wrong under authority: a client whose connection dropped would poll a stale `over:false` forever, and a modified client could set `over` to skip the screen. The `showGameOver(...)` call at `:561` keeps its exact argument shape — `winner`, `seed`, `winReason`, `state` all arrive in the message. |
+| `restartToMapSelect()` at `:400` | keeps its whole teardown, **plus** `transport.leave(matchId)` and `game.match = game.localOwner = null`. Its idempotence (`:399`) is exactly what a "server ended the match while you were in the Home dialog" race needs. |
+| Refcounted pause (`:94-107`) | **local pause is gone in multiplayer** — one player cannot stop four others' clocks. `pauseLoop`/`resumeLoop` survive as *render-side* modal gating (Help, Home-confirm keep working), but must no longer gate `update`. Add a `pauseReasons` guard: in a networked match the sim never pauses; the overlay just goes up. Server-side pause (host-initiated, all-seat) is a v2 feature. |
+| `game.spectateSpeed` / `speed:` at `:495` | ignored in multiplayer — the server owns the clock. |
 
-**`setup.js` splits in two.** `setup.js:104`'s `setup` object is *match configuration* — world,
-seed, difficulty, sizeMult, resourceMult, matchTimeLimit, popCap, faction. In MP that object is
-the **host's lobby form**, sent to the server once, and echoed back to every client as part of
-the match descriptor. The battlefield cards (`setup.js:306 renderMapSelect`) stay verbatim for
-the host; joiners see the same cards read-only. `setup.js` keeps its exported option tables
-(`MAP_CHOICES:29`, `MATCH_LENGTH_OPTIONS:59`, `POP_CAP_OPTIONS:77`, `STRATEGY_OPTIONS:98`,
-`DIFFICULTY_OPTIONS` re-export at `:18`) unchanged — they are pure data and the server needs
-the same lists to validate a lobby form.
+**Four new lifecycle states** that do not exist today, each needing a screen or a banner:
 
-**`startGame` inverts.** `boot.js:109-125` currently *constructs* the state. It becomes:
+1. **Lobby** — between map-select and `bootState`. New; ~150–250 LOC in `setup.js`.
+2. **Waiting for seats / countdown** — trivial, lives in the lobby screen.
+3. **Reconnect** — the transport drops; the client must show a banner and either resync from a full
+   snapshot or fall out to map-select. `game.netStatus` drives a CSS class, exactly like
+   `document.body.classList.toggle("paused", …)` at `boot.js:97`.
+4. **Someone else left / was eliminated** — an in-match event with no analogue today (`state.over`
+   is binary). Needs a toast (`showGalaxyToast` already exists, `overlays.js`) and a seat-list
+   update.
 
-```
-startGame(planetId)  →  transport.requestMatch(setup)   // returns nothing; server decides
-server MATCH_START   →  onMatchStart({ config, seat, seats, snapshot })
-                     →  bootState(hydrate(config, snapshot), { intro: true, seat })
-```
+### 2.4 What must not move
 
-`hydrate` is cheap because the save format already does it: `engine/persist.js:496 serPlanet`
-persists only `(seed, planetId, sizeMult, resourceMult, swapAsym)` plus dynamic entities, and
-`rehydratePlanet` regenerates the whole map deterministically. **The client can regenerate
-terrain and node geometry itself from the config**; only `node.amount` and the entity tables
-need to arrive (`engine/persist.js:549-551` already ships exactly `{id, amount}` per node).
-
-**`bootState` keeps its body almost exactly.** Changes:
-- `:485` `createLoop` keeps `render` and *drops* the sim from `update`. The `update` callback
-  becomes `applySnapshot`/`interpolate`. `snapshotPositions(game.state)` at `:501` must still run
-  immediately **before** each applied snapshot (it is the interpolation baseline,
-  `renderShared.js:45`); this is the one ordering constraint that must not be lost.
-- `:471` `state.map.bases.player` → `state.map.bases[seat]`.
-- `:466` `attachInput(canvas, state, onChange)` gains a `seat` and a `submit` collaborator.
-- `:551` the over-poll is replaced by an explicit `MATCH_END` message from the server carrying
-  `winner`, `winReason`, and per-seat scores (§4 explains why scores must be server-computed).
-  Keep the poll as the loopback path's implementation of the same callback (§8).
-
-**`restartToMapSelect` (`boot.js:400`) becomes `leaveMatch`.** Its existing teardown is exactly
-right and should be preserved verbatim (it is the file's most carefully-reasoned function). It
-gains: close/park the transport, clear `seat`/`seats`, and — the new hazard — handle *the server
-ending the match while the client is mid-teardown*.
-
-**New states with no analogue today:** `LOBBY` (roster, ready-up, seat/faction/colour pick),
-`CONNECTING`, `RECONNECTING`, `DESYNCED`, and `OPPONENT_DROPPED`. `pauseReasons`
-(`boot.js:94-106`) is a refcounted set and is the right primitive for "the server paused us" —
-but note that **`pauseLoop` currently gates only the local `update`** (`boot.js:500`). In MP,
-pause must come *from* the server; a client-side pause becomes a render-freeze only, and
-`togglePause` (`boot.js:103`) must be disabled or converted to a vote. `landingPicker`,
-`starmap`, and `techchart` all currently call `pauseLoop` to freeze the world behind a modal
-(`boot.js:332`, `starmap.js` tail, `techChart.js` tail) — **all three must stop pausing in MP**;
-they become non-blocking overlays.
+- **`main.js`'s side-effect imports** (`main.js:26-28`: `starmap.js`, `techChart.js`, `update.js`)
+  self-wire buttons and hotkeys at module-load time. Dropping one silently disables a feature. If
+  `starmap.js` is scoped out of v1 (§7), the *import must stay* with the module stubbed, or the
+  `M` key handler and the galaxy button go missing without an error.
+- **`session.js`'s read-at-call-time discipline** (`session.js:8-10`). Every networked rewire depends
+  on being able to swap `game.state` under running consumers.
+- **`bootState` as the single funnel.** Adding a second boot path for multiplayer is the exact
+  mistake ADR-0004 rejects at the transport layer, one level up.
 
 ---
 
-## 3. Hardcoded "you are the player" assumptions
+## 3. "You are the player" assumptions
 
-~110 literal `"player"`/`"ai"` occurrences outside `engine/`. They fall into five classes.
+80 owner-literal comparisons outside `engine/` (`grep -rEc '(===|!==|==|!=)\s*"(player|ai)"'`),
+distributed: `inputCommands.js` 16, `tools/ailab.js` 9, `hudSelection.js` 7, `renderBuildings.js` 6,
+`hud.js` 6, `boot.js` 6, `input.js` 5, `renderEffects.js` 4, `landingPicker.js` 4,
+`hudPanelSignature.js` 4, `starmap.js` 2, `renderShared.js` 2, `overlays.js` 2, `minimap.js` 2,
+`competition.js` 2, `renderUnits.js` 1, `observerPanel.js` 1.
 
-### 3.1 "Is this entity mine?" — the largest class, and the easiest
+They are **three different assertions** with three different costs.
 
-Every one of these is `owner === "player"` / `owner !== "player"` and becomes
-`owner === session.seat`.
+### 3.1 "Is this entity mine?" — the large, easy class
 
-| File | Lines |
+The dominant pattern. Mechanical substitution: `"player"` → `state.localOwner`.
+
+| File | Sites |
 |---|---|
-| `input.js` | `317` (click-select own), `383` (select-all-army), `391` (idle worker), `407` (idle producer), `423` (CC cycle) |
-| `inputCommands.js` | `58`, `62` (fog gate on hit-test), `99` (`alivePlayerUnitIds`), `131`, `136`, `170`, `178`, `197`, `210`, `223`, `232`, `242`, `247`, `257`, `264`, `271` — the entire right-click router |
-| `hud.js` | `47` (gate chip), `137`, `194`, `336` (idle workers), `352` (idle production), `429` (freighter count) |
-| `hudPanelSignature.js` | `149`, `234`, `290`, `312` |
-| `renderBuildings.js` | `84` (enemy pip), `120`, `147`, `165`, `181`, `233` |
-| `renderEffects.js` | `413`, `563` (rally point), `600` (waypoints), `637` (escort links) |
-| `renderUnits.js` | `91` (enemy pip) |
-| `renderShared.js` | `254` — `hiddenByFog`, the one fog predicate; **fix here fixes four draw passes at once** |
-| `minimap.js` | `94`, `99` |
-| `boot.js` | `370` (`focusActivePlanet` finds own CC), `675` (event fog gate), `684`, `704`, `712` (under-attack trigger), `737` (own supply block) |
-| `starmap.js` | `56`, `58` |
-| `landingPicker.js` | `60`, `61`, `151`, `160` |
-| `techChart.js` | `36` — `const OWNER = "player"`, then used at `138`, `153`, `196` |
-| `overlays.js` | `68-81` (the eight opening-objective predicates, each `countUnits(state,"player",…)` / `hasCompletedBuilding(state,"player",…)`) |
+| `inputCommands.js` | `:58`, `:62` (fog gate on hit-test), `:99` (`selectedUnits`), `:131`, `:136` (box select), `:170`, `:178` (double-click type select), `:197`, `:210`, `:223`, `:232`, `:242`, `:247`, `:257`, `:264`, `:271` (right-click target dispatch) |
+| `input.js` | `:317` (click select), `:383` (select-all-army), `:391` (idle worker), `:407` (idle producer), `:423` (CC cycle) |
+| `hudSelection.js` | `:773`, `:789`, `:898`, `:1076`, `:1696`, `:1713`, `:1722` |
+| `hudPanelSignature.js` | `:149`, `:234`, `:290`, `:312` |
+| `hud.js` | `:47`, `:137`, `:194`, `:336`, `:352`, `:429` |
+| `renderBuildings.js` | `:84` (enemy pip), `:120`, `:147`, `:165`, `:181`, `:233` (own-only overlays: rally lines, storage bars, jump staging, power grid) |
+| `renderEffects.js` | `:413`, `:419`, `:563`, `:600`, `:637` |
+| `renderUnits.js` | `:91` (enemy pip) |
+| `renderShared.js` | `:254` (`hiddenByFog` — **the single fog predicate**) |
+| `minimap.js` | `:94`, `:99` |
+| `overlays.js` | `:68`, `:69`, `:71`, `:72`, `:73`, `:74`, `:78`, `:79`, `:80`, `:81` (tutorial objectives, via `countUnits(state,"player",…)` / `hasCompletedBuilding(state,"player",…)`) |
+| `boot.js` | `:370` (camera to my CC), `:675` (event fog gate), `:737` (my supply block) |
+| `starmap.js` | `:56`, `:58` |
+| `landingPicker.js` | `:60`, `:61`, `:151`, `:160` |
+| `techChart.js` | `:36` (`const OWNER = "player"` — **already one seam**) |
 
-**Recommendation:** introduce `isMine(e)` in `session.js` and a `SEAT` accessor, then sweep.
-This is ~70 one-line edits with excellent test coverage already in place
-(`test/input.test.js` 57 tests, `test/renderShared.test.js` 34 tests, `test/hud.test.js` 33).
+**Cost: one line each, plus one place to set `state.localOwner`.** `techChart.js:36` is the pattern
+to copy everywhere: name the seam once per module, then read the name.
 
-### 3.2 "The enemy is `"ai"`" — the class that genuinely breaks at N seats
+### 3.2 "The enemy is `ai`" — the class that genuinely breaks at N seats
 
-These assume **exactly one opponent**, not merely that it is named `"ai"`:
+Nine sites. These do not have a mechanical fix; each needs a design answer.
 
-| Site | Assumption |
-|---|---|
-| `boot.js:684, 704, 712` | `if (ev.owner === "ai") triggerUnderAttack(...)` — the comment at `boot.js:669-671` states it outright: *"an attackHit whose attacker is the AI necessarily means the target is the player's (only two sides exist)"*. At 5 seats this fires the under-attack alarm for every fight on the map. **Must become `ev.targetOwner === seat`, which means `engine/combat.js` must start emitting the target owner on `attackHit`.** This is the one place a *sim* change is forced by multiplayer. |
-| `hud.js:314` | `playerScore(state, "ai")` — the topbar score bar shows "you vs them" |
-| `overlays.js:407` | `playerScore(opts.state, "ai")` — the game-over breakdown |
-| `overlays.js:34` | `FACTIONS[st.players.ai.faction]` — the faction chip is a two-sided "you vs them" |
-| `overlays.js:376, 392` | `winner === "player" ? victory : defeat` |
-| `overlays.js:393-394` | *"Victory — the enemy's last Command Center is destroyed"* / *"Defeat — your last Command Center was destroyed."* — singular "the enemy" |
-| `observer.js:290, 291` | `supplyUsed(state,"ai")` / `supplyCap(state,"ai")` |
-| `observerPanel.js:89` | `owner => (owner === "player" ? watch.aName : watch.bName)` — hard two-entrant |
-| `observer.js:116` | `state.map.bases.player \|\| state.map.bases.ai` |
-| `hudPanelSignature.js:225-228` | diplomacy signature reads `state.diplomacy` as a single relationship |
-
-The score bar, the faction chip and the game-over copy are all **"two columns" UI**. At N seats
-they need to become a small roster table. That is a real (if modest) UI design job, not a rename.
+| Site | Code | What breaks at 5 seats |
+|---|---|---|
+| `hud.js:314` | `const you = playerScore(state,"player"), foe = playerScore(state,"ai")` | The score chip shows **one** opponent. Needs a leaderboard, or "you vs. best rival". |
+| `overlays.js:34` | `FACTIONS[st.players.player.faction]`, `FACTIONS[st.players.ai.faction]` | The faction chip is a two-sided "you vs them" line. |
+| `overlays.js:376` | `winner === "player" ? playVictory() : playDefeat()` | Every non-winner hears defeat, including seats that placed 2nd of 5 — arguably fine, but it is a decision. |
+| `overlays.js:392-394` | `winner === "player" ? "Victory — the enemy's last Command Center is destroyed." : "Defeat — your last Command Center was destroyed."` | "**the** enemy" is false with 4 opponents. Needs `winner === state.localOwner` plus a named-winner string. |
+| `overlays.js:406-407` | `scoreBreakdown(opts.state,"player")`, `playerScore(opts.state,"ai")` | "Your score / Enemy score" — needs N rows. |
+| `boot.js:684`, `:704`, `:712` | `if (ev.owner === "ai") triggerUnderAttack(ev.x, ev.y)` | **A live defect at N seats.** The header comment at `boot.js:669-671` states the assumption outright: *"An attackHit whose attacker is the AI necessarily means the target is the player's (only two sides exist)."* With 5 seats, seat 2 shelling seat 4 in your line of sight fires **your** under-attack alarm. Correct predicate: `ev.targetOwner === state.localOwner`. This requires the engine event to carry the target's owner — a change on the **engine** side (dossier 01's surface), flagged here because the client is where the bug is visible. |
+| `observer.js:290-291` | `supplyUsed(state,"ai")`, `supplyCap(state,"ai")` | The observer's "what the neighbour has" panel is single-opponent by construction. |
+| `observerPanel.js:89` | `owner === "player" ? watch.aName : watch.bName` | Two-entrant naming; out of v1 with competitions (§7). |
+| `observer.js:116` | `state.map.bases.player \|\| state.map.bases.ai` | Free-camera home point; see §3.5. |
 
 ### 3.3 Colours
 
-**Not a problem.** `#4fd1ff` / `#f87171` appear as *entity* colours only in
-`engine/state.js:179-180`, as `ownerDefs[].color`. Every renderer reads
-`state.players[owner].color` (`renderUnits.js:66`, `renderBuildings.js:75`, `minimap.js:95, 100`),
-and `hudSelection.js:1941` / `techChart.js:196` / `landingPicker.js:149` do the same for icons.
-The remaining literals in `renderEffects.js:111-113, 315, 326, 447, 511, 542, 584, 616, 680`,
-`minimap.js:114`, `renderUnits.js:126`, `renderShared.js:195`, `renderBuildings.js:109, 154, 197`
-are **semantic** colours (valid/invalid placement, health tiers, power tiers, tracer types) that
-happen to reuse the same hexes. Leave them.
+**Not a problem.** `#4fd1ff` and `#f87171` are owner colours **only** in `engine/state.js:179-180`,
+as `ownerDefs` data. Every client occurrence of those hex strings is unrelated chrome:
 
-**Action:** extend `ownerDefs` to N entries with a colour ramp; add colours to `style.css`
-(3 hits) for the HUD chrome. Nothing else.
+- `style.css:13` `--accent: #4fd1ff`, `style.css:16` `--bad: #f87171` — UI theme tokens
+- `renderEffects.js:111`, `:113` — per-unit-type weapon tracer colours (`lancer` beam,
+  `dreadnought` bolt), not team colours
+- `renderEffects.js:58`, `:315`, `:326`, `:447`, `:511`, `:542`, `:584`, `:616`, `:680` — ghost
+  validity, waypoint lines, rally lines, escort rings
+- `renderShared.js:195`, `renderBuildings.js:109`, `:154`, `:197`, `minimap.js:114`,
+  `renderUnits.js:126` — health-bar / power-tier / concern-badge palettes
+- `landingPicker.js:149` — `dest.players?.player?.color || "#4fd1ff"` — **the one real coupling**:
+  a hardcoded fallback plus a hardcoded owner key. Odyssey-only, out of v1.
+
+Every actual entity draw reads `state.players[owner].color`: `renderUnits.js:66`,
+`renderBuildings.js:75`, `minimap.js:95`, `minimap.js:100`. **Adding seats 3–8 needs new entries in
+`engine/state.js`'s `ownerDefs` and nothing in the renderers.** Two caveats: pick a palette that is
+distinguishable at minimap-dot size (4–5 px) and colour-blind-safe, and decide whether colour is
+per-seat (absolute) or per-viewer (you are always blue) — the latter is friendlier and costs one
+remap at `bootState`, but breaks screenshots and spectating.
 
 ### 3.4 `state.fog` vs `state.fogAI`
 
-Already an alias pair over `state.fogs` (`engine/state.js:232-234`, pinned by
-`test/ownerScaffold.test.js`). Client reads:
+The client reads `state.fog` at **9 sites** and never `state.fogAI`:
 
-| Site | Read |
-|---|---|
-| `render.js:202` | `drawFogBase` — the charted-space wash |
-| `minimap.js:36, 83` | minimap fog underlay + entity gate |
-| `renderShared.js:254` | `hiddenByFog` |
-| `renderNodes.js:26` | `isNodeDiscovered(state.fog, n)` |
-| `renderEffects.js:466` | node picking overlay |
-| `inputCommands.js:58, 62, 69` | hit-test + node-pick gating |
-| `boot.js:675` | event audibility |
+`inputCommands.js:58`, `:62`, `:69`; `renderEffects.js:466`; `boot.js:675`; `render.js:202`;
+`minimap.js:36`, `:83`; `renderShared.js:254`; `renderNodes.js:26`.
 
-**All nine become `state.fogs[seat]`.** The remaining hazard is *inside the engine*:
-`engine/sim.js:70-71` hardcodes `updateFog(state, state.fog, "player")` and
-`updateFog(state, state.fogAI, "ai")` even though `state.fogs` exists. That must become
-`for (const id of state.owners) updateFog(state, state.fogs[id], id)` — which is exactly what
-`engine/state.js:270` already does at construction time.
+`engine/state.js:232-233` makes `state.fog`/`state.fogAI` **aliases** into `state.fogs`. So the
+obvious client fix — "point `state.fog` at *my* seat's fog and every reader keeps working" — is a
+one-line change that makes all 9 sites correct at once.
+
+> ⚠️ **Do not do this before dossier 01's finding #6 is fixed.** `engine/gather.js:64` and
+> `engine/scout.js:42` read `unit.owner === "player" ? state.fog : state.fogAI`. Rebinding the alias
+> client-side is harmless *on a client that no longer simulates* — but the same client code path runs
+> the loopback single-player server (ADR-0004), where it would silently resolve the wrong fog and
+> desync. **Sequence: fix the engine, then rebind.**
+
+Under the recommended fog-filtered replication (§4), the client is only ever *sent* one fog grid —
+its own — so `state.fog` naturally is the local seat's fog and `state.fogAI` should not exist on a
+client state at all. Assert that in a test.
 
 ### 3.5 `state.map.bases.player`
 
-`boot.js:371`, `boot.js:471`, `input.js:430`, `observer.js:116`, and inside the engine
-`engine/galaxy.js:421, 1365`, `engine/map.js:177, 179, 207`. `engine/aiMilitary.js:554, 574, 589,
-694` already indexes generically (`state.map.bases[owner]`). Map generation must produce N start
-positions — this is a **map-generation change** (`engine/map.js`) and is the single largest
-*engine* task implied by N-seat multiplayer. It is out of the client's scope but gates it.
+`boot.js:371` and `boot.js:471` open the camera at `state.map.bases.player`; `input.js:430` uses it
+as the fallback for the CC-cycle key; `observer.js:116` falls back to `bases.player || bases.ai`.
+`engine/map.js` builds `bases` as a 2-entry left/right mirror (dossier 01 finding #3). N-seat start
+positions are an **engine/map** change; the client needs `state.map.bases[state.localOwner]` and
+nothing more.
+
+### 3.6 The "seat 3 of 5" test, summarized
+
+| Layer | Verdict |
+|---|---|
+| Renderers, minimap, colours | **Already works.** Owner-generic reads throughout. |
+| Selection, hit-testing, HUD panels, objectives | **Works after one substitution per site** (~71 sites). |
+| Fog | **Works after one alias rebind**, once the engine's two `=== "player"` fog reads are fixed. |
+| Under-attack alarm | **Broken** — fires on any `owner === "ai"` hit. Needs a target-owner field on the event. |
+| Score chip, faction chip, victory copy, score breakdown | **Broken** — hardcoded two-sided copy. ~6 sites, all in `hud.js`/`overlays.js`, all cosmetic-but-visible. |
+| Start positions | **Engine change** (`map.bases`), then one client substitution. |
 
 ---
 
 ## 4. Rendering under authoritative fog
 
-### 4.1 How hard is per-client filtering?
+### 4.1 How hard is per-client filtering, given `engine/fog.js`?
 
-**Much easier than it looks, because the client already renders as if it were filtered.**
+**Easy — the primitive already exists and is already the right shape.** `engine/fog.js` is 144 lines.
+Fog is a coarse grid (`FOG_CELL_SIZE = 40`, `fog.js:23`) of two `Uint8Array`s per owner —
+`visible` (recomputed from scratch every tick, `fog.js:125`) and `explored` (permanent). Every owner
+has their own, keyed in `state.fogs` and recomputed by the same `updateFog(state, fog, owner)`
+(`fog.js:124`). The whole filter predicate is one existing exported function:
 
-`engine/fog.js` is 144 LOC, pure, and already per-owner: `createFog(map)` (`:34`),
-`isVisibleAt(fog,x,y)` (`:49`), `isExploredAt` (`:55`), `isNodeDiscovered` (`:66`),
-`updateFog(state, fog, owner)` (`:124`). `state.fogs[owner]` exists. There is **no remembered
-snapshot of enemy positions** (`engine/fog.js:14-15` says so explicitly) — an out-of-vision enemy
-simply stops rendering. That is precisely the semantics a filtered projection provides.
-
-So `projectFor(state, seat)` is a ~60-line pure function:
-
-```
-units      → own ∪ { u : isVisibleAt(fogs[seat], u.x, u.y) }, enemy entries stripped
-             of order/orderQueue/homeCC/target internals (intel leak)
-buildings  → same rule
-nodes      → { id, amount } for every charted node; hidden nodes only where
-             isNodeDiscovered(fogs[seat], n)          (engine/fog.js:66)
-players    → { [seat]: full record } + public facts for the rest
-             (id, name, colour, faction, score, supply, isAI)
-fogs       → { [seat]: fogs[seat] }, with `fog` aliased for the legacy readers
-owners     → unchanged (public)
-selection  → this seat's own (once it moves off state)
-events     → the rule already at boot.js:675: own events, plus any event
-             at a currently-visible point
-map        → NOT sent; client regenerates from (planetId, seed, sizeMult,
-             resourceMult, swapAsym) — engine/map.js generateMap is deterministic
+```js
+isVisibleAt(state.fogs[seat], e.x, e.y)     // engine/fog.js:49 — two divides, one array index
 ```
 
-The renderer **needs no changes to consume this**, because every per-entity fog gate
-(`renderShared.js:254`, `minimap.js:94, 99`, `renderNodes.js:26`, `inputCommands.js:58, 62`)
-simply becomes tautologically true rather than wrong.
+Measured cost of filtering both entity collections for one seat: **0.24–0.69 ms** at 400–1,600 units
+(§4.3). The server already pays `updateFog` per owner every tick regardless — filtering adds one
+O(1) lookup per entity per seat, which is noise next to the `JSON.stringify` it *saves*.
 
-### 4.2 What filtering would strip that the client currently needs
+The engine also documents the exact semantics we need: *"There's no 'remembered snapshot' of enemy
+positions once they leave vision — they simply stop rendering"* (`fog.js:14-15`). So the shipped
+game has **no last-known-position ghosts today**. Filtering therefore strips nothing the current
+renderer draws for enemies.
 
-Six real dependencies. Five are trivially fixable; one is a genuine visual regression.
+### 4.2 What filtering would strip that the renderer legitimately needs
 
-1. **`playerScore(state, "ai")`** — `hud.js:314` (score bar), `overlays.js:407` (game-over
-   breakdown). Reads *all* of the enemy's bank/army/structures. → Server computes per-seat scores
-   and ships them as public facts. `engine/victory.js:158-165` already iterates `ownersOf(state)`.
-2. **Enemy faction** — `overlays.js:34` reads `st.players.ai.faction` for the "you vs them" chip.
-   → Public lobby fact; ship in the match descriptor.
-3. **Enemy supply** — `observer.js:290-291`. Spectator-only; the spectator seat receives an
-   unfiltered projection.
-4. **Enemy CC existence for victory** — client never checks this; `engine/victory.js` does, on the
-   server. No client change.
-5. **Hidden-node discovery** — `isNodeDiscovered` gates *right-click targetability*
-   (`inputCommands.js:69`), not just drawing. If the client recomputes fog locally (see below), a
-   snapshot-rate mismatch could make client and server disagree about whether a cache is
-   targetable. → Ship an authoritative `discoveredNodeIds` set per seat. It is tiny (caches are
-   a handful per map, `engine/map.js:266-267`).
-6. **Interpolation continuity — the real regression.** `renderShared.js:39 prevPos` keys
-   interpolation baselines by unit id; `renderShared.js:69 pruneFacing` deletes the baseline the
-   moment a unit is absent from `state.units`. Today an enemy unit that ducks behind fog stays in
-   the Map (only its *draw* is gated), so it keeps a continuous baseline. Under filtering it
-   *leaves the map*, loses its baseline and its `facing` entry, and on re-entry snaps rather than
-   slides. → Give `pruneFacing` a grace window (drop after N frames absent, not immediately).
-   ~5 lines in a file with 34 existing tests.
+Six things. Five are already solved by how the codebase is built; one is a real decision.
 
-Everything else the renderer touches is either the client's own entities, immutable map data it
-can regenerate, or already fog-gated.
+1. **The static map — already free.** `serializeGame` does not include `state.map`; terrain, node
+   positions and base positions are regenerated from `seed` + `planetId` by `rehydratePlanet`
+   (`engine/persist.js`). The client is told the map config once at match start and builds the world
+   itself. **Nothing per-tick.**
+2. **Resource nodes — must NOT be filtered by `visible`.** `renderNodes.js:26` and
+   `inputCommands.js:69` gate nodes on `isNodeDiscovered(state.fog, n)`, which reads **`explored`**,
+   not `visible` (`fog.js:66-67`) — deliberately: charted deposits are "map knowledge, not
+   battlefield intel" (`fog.js:10-13`), and only `hidden` caches need scouting. A filter that used
+   `visible` would make every deposit blink out the moment a worker walks away. **Filter nodes on
+   `explored`, not `visible`** — and note that `n.amount` changes as *anyone* mines: sending live
+   amounts for a node in enemy territory is an intel leak. Send `amount` only for nodes currently
+   `visible`; send last-seen `amount` otherwise.
+3. **Craters and wrecks — survive filtering for free.** `engine/wreckage.js` and `engine/bomb.js`
+   turn into *resource nodes* with `crater: true` / `wreck: true`
+   (`engine/persist.js:549`, `:682-708`), drawn by `renderNodes.js:28` / `:114-150`. They are map
+   knowledge under rule 2, not entities. Pending (not-yet-matured) craters and wrecks are separate
+   top-level arrays (`persist.js:554`, `:562`) and are small — 0.0 KB and 0.8 KB measured.
+   **Send both unfiltered; they are terrain, and the deposit's existence is not secret intel.**
+4. **The fog grid itself — send one, not two.** `serializeGame` ships `fog` **and** `fogAI`
+   (`persist.js:566-567`): **31 KB each on a 4× map**. Broadcasting both to every client literally
+   hands each player their opponent's vision map. The client needs exactly one grid — its own — and
+   only `explored` (which is what `drawFogBase`, `render.js:201-244`, paints from, plus
+   `isNodeDiscovered`). `visible` can be recomputed client-side from the entities the client can
+   see, or sent as a delta; `explored` is monotone and compresses to a run-length or a bitset
+   trivially (16,000 cells → 2 KB as a bitset, vs 31 KB as a JSON array of 0/1).
+5. **Events — must be filtered, and the rule already exists.** `boot.js:675` reads
+   `if (ev.owner !== "player" && !isVisibleAt(state.fog, ev.x, ev.y)) continue;` — the client already
+   applies exactly the per-seat event filter the server needs. **Move that line to the server, per
+   seat, verbatim.** The under-attack trigger (`boot.js:684`, `:704`, `:712`) and the supply-block
+   beep (`:737`) then need the target-owner field from §3.2.
+6. **Interpolation continuity — the one real hazard.** `render.js` interpolates between
+   `snapshotPositions(game.state)` (`boot.js:501`) and live positions. Under filtering an entity can
+   *legitimately vanish* between snapshots (it walked into fog) or *appear mid-motion*. The renderer
+   must treat "absent this snapshot" as "stop drawing" rather than "interpolate to nowhere", and a
+   newly-appearing entity must be snapped, not lerped from a stale position. This is a real change to
+   `snapshotPositions`/`resetFacing` bookkeeping — small (tens of lines) but it is the one place
+   where filtering costs the renderer something.
 
-### 4.3 Measured payload (this machine, `engine/persist.js` format)
+### 4.3 Measured payloads (this machine, `engine/persist.js` format)
 
-Full `serializeGameString` snapshot, 15 sim-minutes, both seats AI-driven:
+`serializeGame` is the *save* format, not a wire format, so treat these as an upper bound with the
+right shape. Node v22, same container as dossier 00.
 
-| Map | units / bldgs | full | fog (both) | units | buildings | nodes |
-|---|---|---|---|---|---|---|
-| Small (1600×1000) | 16 / 16 | 18.9 KB | 3.9 KB | 4.5 KB | 3.7 KB | 4.4 KB |
-| Standard 2× (3200×2000) | 27 / 16 | 30.1 KB | 15.6 KB | 6.7 KB | 3.7 KB | 2.4 KB |
-| Gigantic 4× (6400×4000) | — | 69.6 KB | **62.5 KB** | 3.5 KB | 1.1 KB | 1.3 KB |
+| Scenario | Units | Full snapshot | `stringify` | Fog arrays | Fog-filtered per seat |
+|---|---|---|---|---|---|
+| Standard map, natural 20-min self-play match | 21 | 19.2 KB | 0.23 ms | 2 KB × 2 | 2.6 KB / 0.04 ms |
+| Standard map, 200 v 200 | 406 | **96 KB** | 0.82 ms | 2 KB × 2 | 14 KB / 0.25 ms |
+| 4× map, 200 v 200 | 406 | **154 KB** | 2.56 ms | **31 KB × 2** | 14 KB / 0.24 ms |
+| 4× map, 400 v 400 | 806 | **236 KB** | 3.21 ms | 31 KB × 2 | 28 KB / 0.35 ms |
+| 4× map, 800 v 800 | 1,606 | **404 KB** | 4.45 ms | 31 KB × 2 | 55 KB / 0.69 ms |
 
-**Fog dominates on large maps and entities are tiny.** That single fact drives the recommendation.
+At 20 Hz with 4 seats:
+
+- **Full broadcast**, 4× / 800v800: 404 KB × 20 × 4 = **32 MB/s egress**, and 4.45 ms × 4 =
+  **17.8 ms of a 50 ms tick** in `JSON.stringify` alone (the sim itself costs 22 ms p99 at this
+  size per dossier 00 — together they blow NFR-2).
+- **Fog-filtered**, same scenario: 55 KB × 20 × 4 = 4.4 MB/s, 2.8 ms total. Still too much for
+  20 Hz snapshots without deltas, which is why §4.4's migration path exists — but it is the
+  difference between "needs delta encoding" and "architecturally impossible".
+- **Realistic band** (4× map, 200v200, the near-supply-cap case dossier 00 calls normal): full
+  154 KB → 12 MB/s; filtered 14 KB → 1.1 MB/s.
+
+Dossier 00's conclusion is confirmed from the other side. The sim runs ~500× real time; the server
+spends its wall clock waiting. **Serialization is the cost centre, and it scales with what you send,
+not with what you simulate.**
 
 ### 4.4 Recommendation
 
-> **Ship fog-filtered-per-client, and ship *no fog grid at all*.**
+**Fog-filtered per client. From day one. Not as an optimization — as the architecture.**
 
-Three parts:
+Four reasons, in order of weight:
 
-1. **Filter entities server-side** with `projectFor(state, seat)`. This is the anti-cheat
-   boundary and it must exist before any public or agent-played match. It is ~60 LOC of pure
-   engine code, directly unit-testable against the existing `test/fog.test.js` fixtures.
-2. **Do not transmit the fog grid.** The client already has everything needed to recompute it:
-   its own units and buildings, and a deterministically regenerated map.
-   `updateFog(state, myFog, seat)` (`engine/fog.js:124`) is pure, allocation-free, and is exactly
-   what `engine/sim.js:70` already calls each tick. `explored` accumulates client-side across
-   snapshots (it is monotonic). This deletes 3.9–62.5 KB from every snapshot and makes payload
-   scale with *army size* rather than *map size*. The only thing that must remain
-   server-authoritative is hidden-node discovery (see §4.2 item 5), which is a tiny id set.
-3. **Keep full-state broadcast as a named, flagged mode** — `spectator` and `replay` — not as
-   the default. `observer.js` (§7) is already exactly this client, and
-   `saveShape.js:28 resumableMode` already encodes "a spectated match is not the player's game".
+1. **ADR-0003 chose server authority specifically so fog could not be map-hacked** (its Context §1
+   and §2). Full-state broadcast reinstates the exact property lockstep was rejected for: every
+   client holds the whole map, and fog becomes a client-side rendering courtesy. It would make the
+   central architectural decision decorative.
+2. **PRD G2 makes agents first-class players.** The MCP server (dossier 05) has to hand an agent a
+   legitimate, seat-scoped view. That filter has to exist regardless. Building it once and using it
+   for browsers too is strictly less work than building it for agents and a bypass for browsers.
+3. **The numbers say full-broadcast does not fit** (§4.3), and the cost is in the *format*, not the
+   *filter*: `fog`+`fogAI` alone are 62 KB of the 154 KB at 4×, and both are per-seat secrets.
+4. **Retrofitting is worse than starting there.** Every client module written against "I hold
+   everything" acquires a quiet dependency on data it should not have. `renderShared.js:253`'s
+   comment already names the failure mode: *"an inverted or dropped test doesn't crash or look wrong,
+   it quietly paints the enemy's army through the fog."*
 
-**Trade-off, stated plainly.** Full-state broadcast is ~2 days of work and lets every existing
-client module run untouched; it is also trivially cheatable by anyone who opens devtools, and it
-is *especially* wrong for this project because MCP agents receive state programmatically — an
-agent handed the full state is not playing the same game as a human. Filtering costs perhaps a
-week (the projection function, per-seat score/faction public facts, the `pruneFacing` grace
-window, and the discovered-node channel) and is the only version that survives contact with
-public play.
+**Trade-offs accepted, stated plainly:**
 
-**Migration path.** These are additive and independently shippable:
+| Cost of filtering | Mitigation |
+|---|---|
+| Server does N filter passes per tick instead of 1 serialize | Measured 0.24–0.69 ms per seat; the sim it accompanies is 0.2–22 ms. Noise. |
+| Interpolation must handle entities appearing/vanishing | §4.2 item 6 — tens of lines in `render.js`, done once. |
+| Spectator/replay wants full state | Give the **spectator** a synthetic all-seeing seat (`observerMode` already bypasses `hiddenByFog`, `renderShared.js:254`). One extra filter config, not an extra path. |
+| Harder to debug ("why is the client missing X?") | A dev-only `--no-fog-filter` server flag, and a test that asserts a filtered snapshot contains no entity the seat cannot see. |
 
-- **M0** — `projectFor(state, seat)` written and tested, but the server still broadcasts full
-  state. Test: `projectFor(s,"player")` renders pixel-identically to `s` under the existing
-  render tests. This proves the renderer tolerates a filtered state before anything depends on it.
-- **M1** — server switches to `projectFor`; fog grid still shipped. Add per-seat public scores
-  (`hud.js:314`, `overlays.js:407`) and the faction roster (`overlays.js:34`).
-- **M2** — stop shipping fog; client calls `updateFog` locally on each snapshot. Add the
-  `discoveredNodeIds` channel. Add the `pruneFacing` grace window.
-- **M3** — delta-encode entities against the previous acknowledged snapshot. At 16–27 entities,
-  this is optional until army sizes grow.
+**Migration path** (each step independently shippable and testable):
+
+1. **Send the map config, not the map.** Client rebuilds terrain/nodes from `{planetId, seed,
+   sizeMult, resourceMult}`. Removes the largest static payload before any filtering exists.
+2. **Send one fog grid, not two**, and only `explored`, as a bitset. −60 KB/tick at 4× and closes
+   the vision leak immediately.
+3. **Ship a full-snapshot loopback first** (ADR-0004). No filter, no socket: proves the
+   client-renders-a-given-state seam with the inherited tests still running.
+4. **Insert the filter in the loopback.** `filterFor(state, seat)` → the same `View` shape. Single-
+   player now pays for and therefore *tests* the filter (ADR-0004's explicit intent). Assert
+   `filterFor(state,"player")` contains no entity outside `state.fogs.player`.
+5. **Delta-encode.** Only entities whose fields changed since the client's last acked snapshot, plus
+   an id list for removals. This is where 55 KB becomes a few KB; do it after correctness.
+6. **Then and only then, the socket.**
 
 ---
 
-## 5. What is reusable VERBATIM
+## 5. What is reusable verbatim
 
-The tree is 90,762 LOC total (`.js/.css/.html/.json/.md`); 81,257 LOC of `.js/.css/.html`, of
-which **43,101 is tests**. Shipped application code is ~35,400 LOC (`engine` 15,659 + top-level
-client 17,903 + css/html 1,815).
+Client tree: **19,635 LOC** (17,903 JS + 1,732 CSS) across 38 files.
 
-### 5.1 Zero change — pure, import-free or engine-data-only leaves
+### 5.1 Zero change — 2,850 LOC (14.5%)
 
-| Module | LOC | Why it is untouched |
+| Module | LOC | Why |
 |---|---|---|
-| `sound.js` | 181 | **No imports at all.** Pure WebAudio. Nothing about it is single-player. |
-| `effects.js` | 183 | **No imports at all.** Tracers, death flashes, pings, fireworks — pure render-side particle bookkeeping. |
-| `camera.js` | 105 | **No imports at all.** `createCamera/zoomAt/panCamera/pinchZoomPan/screenToWorld/clampCamera`. |
-| `data.js` | 242 | Static tables (planets, commodities, recipes). Pure data. |
-| `dom.js` | 68 | Element handles + `MINIMAP_W/H` + `isTouchMode()`. Already Node-import-safe by design (`dom.js:11-18`). |
-| `style.css` | 1,732 | 3 hits on the team hexes; add N-seat colour variables. Otherwise verbatim. |
-| `saveShape.js` | 31 | Two pure predicates. Gains one term (§6). |
-| `renderShared.js` | 255 | One line (`:254`). Geometry/colour helpers, interpolation, health bars — all generic. |
-| `renderNodes.js` | 171 | One line (`:26`). |
-| `renderUnits.js` | 699 | Two lines (`:91` enemy pip, `:126` a semantic red). Colour already comes from `players[owner].color` (`:66`). |
-| `minimap.js` | 138 | Two lines (`:94, :99`). |
-| `render.js` | 277 | `drawFrame` orchestration + `spriteIcon` cache + `drawFogBase`. Only `state.fog` → `state.fogs[seat]` at `:202`. |
-| `renderBuildings.js` | 807 | Six `owner !== "player"` lines. Everything else — hull art, power tiers, storage bars, jump staging — is generic. |
-| `renderEffects.js` | 683 | Five `owner !== "player"` lines. |
-| `techChart.js` | 366 | One line: `const OWNER = "player"` (`:36`). Plus: stop calling `pauseLoop` in MP. |
-| `landingPicker.js` | 211 | Four owner lines. Odyssey-only anyway (§7). |
-| `elo.js` | 147 | Pure rating math, zero engine/DOM. **Lift to the server verbatim** when MP ranking lands. |
-| `pairing.js` | 518 | Pure Swiss/round-robin scheduling; its own header (`pairing.js:15`) notes the single import is `hashStr`. **Lift to the server verbatim.** |
-| `version.js` | 60 | Version/save-impact reporting. |
-| **Subtotal** | **~6,874** | |
+| `style.css` | 1,732 | No owner concept. Gains additive rules for the lobby and `netStatus`. |
+| `data.js` | 242 | Pure display data (planet names, commodity table). One incidental `"ai"` — a **commodity** id (`:124`), not an owner. |
+| `effects.js` | 183 | Particle/decal bookkeeping over `{x,y,type}`. Fed by replicated events instead of local ones — no signature change. |
+| `sound.js` | 181 | Zero references to `state`, `player` or `ai`. |
+| `renderNodes.js` | 171 | Owner-free; its one coupling is `state.fog` (`:26`), which the alias rebind (§3.4) handles. |
+| `update.js` | 108 | Version-chip / auto-update. Untouched. |
+| `camera.js` | 105 | Pure math. Zero references to `state`, `player`, `ai`. |
+| `dom.js` | 68 | Element handles. |
+| `version.js` | 60 | Version + save-impact display. |
 
-### 5.2 Near-zero change — a rename sweep, no restructuring
+### 5.2 Near-zero change — 5,942 LOC (30.3%)
 
-| Module | LOC | Change |
+A `localOwner` substitution, one predicate, or an added parameter. **No restructuring.**
+
+| Module | LOC | Touch points |
 |---|---|---|
-| `overlays.js` | 585 | Owner literals at `:34, :68-81, :376, :392-394, :406-407`; game-over copy becomes N-seat. Toasts/hints/help/objectives verbatim. |
-| `hud.js` | 452 | 9 owner literals; score bar becomes a roster; two scenario buttons (`:37, :38`) become commands. |
-| `hudPanelSignature.js` | 380 | 4 owner literals + the `players.player` reads. It is a pure signature/diff function — the mechanism is untouched. |
-| `session.js` | 120 | Additive fields only. |
-| `observer.js` + `observerPanel.js` | 550 | Repurposed as the spectator client (§7). `enterObserverMode` (`observer.js:128`) gains a third permitted condition. |
-| `main.js` | 168 | `:145-151` (minimap right-click) becomes a command submit. Everything else is canvas/DPR/toggles. |
-| `starmap.js` | 318 | Odyssey-only; unchanged on the offline path. |
-| `update.js` | 108 | Version chip / auto-update. Verbatim. |
-| **Subtotal** | **~2,681** | |
+| `renderBuildings.js` | 807 | 6 owner literals (`:84`, `:120`, `:147`, `:165`, `:181`, `:233`) |
+| `renderUnits.js` | 699 | 1 (`:91`) |
+| `renderEffects.js` | 683 | 5 (`:413`, `:419`, `:563`, `:600`, `:637`) |
+| `overlays.js` | 585 | 10 objectives (`:68-81`) + 4 victory-copy sites (`:376`, `:392`, `:406`, `:407`) + 1 faction chip (`:34`) |
+| `setup.js` | 462 | Option model and map cards verbatim; card click re-targets to the lobby. New lobby screen is *additive*. |
+| `hud.js` | 452 | 6 owner literals + 2 `players.player.resources` reads + the 1v1 score chip (`:314`) |
+| `hudPanelSignature.js` | 380 | 4 owner literals + 6 `players.player` reads. The signature *mechanism* — repaint only when the panel's meaningful inputs change — is exactly right for a snapshot-driven client and should be kept. |
+| `techChart.js` | 366 | 1 line: `const OWNER = "player"` (`:36`) → `state.localOwner`. |
+| `observer.js` | 304 | Repurposed as the spectator client (§7); 3 sites |
+| `render.js` | 277 | `state.fog` (`:202`) + interpolation continuity (§4.2 item 6) |
+| `renderShared.js` | 255 | 1 predicate: `hiddenByFog` (`:253-255`) |
+| `observerPanel.js` | 246 | 1 site (`:89`) |
+| `main.js` | 168 | 2 `issue*` (`:149-150`) → transport sends. Everything else (canvas resize, DPR, panel folds, mute) verbatim. |
+| `minimap.js` | 138 | 2 (`:94`, `:99`) |
+| `session.js` | 120 | Additive fields only (§2.1) |
 
-### 5.3 Real work
+### 5.3 Real work — 3,662 LOC (18.6%)
 
-| Module | LOC | Nature |
+| Module | LOC | Touch points | Nature |
+|---|---|---|---|
+| `hudSelection.js` | 1,998 | **59** (7 literals + 12 `players.player` + 5 `issue*` + 33 mutators + 2 raw writes) | Every panel's *layout* is verbatim; only the click handlers change from "call the engine" to "send a command", and the affordability reads re-point at the local seat. **3% of the file.** Mechanical but wide. |
+| `boot.js` | 788 | The lifecycle itself | §2.3. The genuinely architectural file. |
+| `input.js` | 588 | **17** (5 literals + 6 `issue*` + 6 selection writes) + `placeBuildingAt` (`:517-525`) going async | Gesture handling, camera, hotkeys, control groups all verbatim. |
+| `inputCommands.js` | 288 | **37** (16 literals + 13 `issue*` + 5 selection writes + 3 `state.fog`) — **13% of the file** | The densest coupling in the tree, and the most important to get right: it is the whole right-click dispatch. |
+
+### 5.4 Out of multiplayer v1 — 6,779 LOC (34.5%)
+
+`competition.js` 3,773 · `competitionLedger.js` 1,290 · `pairing.js` 518 · `competitionWorker.js` 355
+· `starmap.js` 318 · `landingPicker.js` 211 · `playerFingerprint.js` 167 · `elo.js` 147. See §7.
+
+### 5.5 Repurposed — 402 LOC (2.0%)
+
+`saveload.js` 371 · `saveShape.js` 31. See §6.
+
+### 5.6 The number that matters
+
+Excluding the modules that do not ship in v1, the **in-scope client is 12,856 LOC**:
+
+| Verdict | LOC | Share of in-scope |
 |---|---|---|
-| `boot.js` | 788 | Lifecycle inversion (§2). The single heaviest file. |
-| `input.js` | 588 | 6 `state.selection` writes, 6 `issue*` calls, 5 owner literals; becomes command-emitting. Gesture/camera/touch code untouched. |
-| `inputCommands.js` | 288 | 5 selection writes, 13 `issue*` calls, 16 owner literals. Its own header (`inputCommands.js:15-17`) notes `commandAt` is *already* the "what does this click mean" decision, callable directly — **this file is the natural home of client-side command construction.** |
-| `hudSelection.js` | 1,998 | ~30 mutator calls + `players.player` reads. But ~900–1,000 LOC of it is Odyssey panels (`renderMarket:346`, `renderFreight:430`, `renderDiplomacy:612`, `renderLanes:717`, `renderColonyPolicy:809`, `renderCapital:890`, `renderSpaceport:1328`, `renderDatacenter:1156`) that are **out of v1 scope and need no change at all**. |
-| `setup.js` | 462 | Splits into lobby form + option tables (§2.3). |
-| `saveload.js` | 371 | §6. |
-| **Subtotal** | **~4,495** | |
+| Verbatim | 2,850 | **22%** |
+| Near-zero | 5,942 | **46%** |
+| **Verbatim + near-zero** | **8,792** | **68%** |
+| Real work | 3,662 | 28% |
+| Repurposed | 402 | 3% |
 
-### 5.4 Quantified
-
-Of the **~17,900 LOC of shipped client JS**:
-
-- **~6,900 LOC (≈39 %) verbatim or one-line-per-file** (§5.1)
-- **~2,700 LOC (≈15 %) a mechanical owner-literal sweep** (§5.2)
-- **~4,500 LOC (≈25 %) genuine rework** (§5.3), of which roughly a fifth is Odyssey panels that
-  are simply not touched in v1
-- **~3,800 LOC (≈21 %) out of v1 scope entirely** — the competition cluster (§7)
-
-Plus **1,732 LOC of CSS effectively verbatim** and **15,659 LOC of engine** that keeps running
-unchanged — on the server instead of in the tab. The 5 renderer files alone
-(`render` + `renderBuildings` + `renderEffects` + `renderNodes` + `renderUnits` +
-`renderShared` = **2,892 LOC**) survive with **17 changed lines between them**. That is the
-single strongest argument for server-authoritative-with-thin-client over any rewrite.
+**Roughly two-thirds of the shipping client is reusable as-is or with per-site substitutions.** That
+is the strongest argument in this dossier for the port being a re-seaming job.
 
 ---
 
@@ -628,278 +643,280 @@ single strongest argument for server-authoritative-with-thin-client over any rew
 
 ### 6.1 What exists
 
-- Two channels (`saveload.js:1-18`): **file** (topbar Save/Load, an explicit `.json`) and
-  **localStorage autosave** every 12 s (`saveload.js:39`) plus on tab-hide/unload, feeding the
-  map-select "Continue" buttons.
-- Two generations per key (`saveload.js:33-38, 84-98`) so one corrupt write cannot lose a run.
-- Keys: `stellarfrontier.save.v1` (`:31`), `stellarfrontier.odyssey.v1` (`:32`).
-- The decision of *what is resumable* is a 3-line pure function,
-  `saveShape.js:28 resumableMode({state, galaxy, spectateMatch})` — already unit-tested
-  (`test/save-shape.test.js`) and already refuses to checkpoint a scenario, a finished match, or
-  **a spectated match whose player seat isn't really the player's**.
-- Other `localStorage` users: `overlays.js:104-108` (objectives-strip dismissed, per mode),
-  `update.js:23-24` (version-banner dismissed), `competitionLedger.js:1238-1286` (the Elo ledger,
-  two generations, sanitized on read).
+`saveload.js` (371 LOC) runs two channels over `localStorage`:
+
+- **Autosave** — a 12 s timer (`AUTOSAVE_INTERVAL_MS`, `:39`) plus `beforeunload` (`:370`),
+  writing `serializeGameString(game.state)` to `stellarfrontier.save.v1` (`:31`) or
+  `serializeGalaxyString(game.galaxy)` to `stellarfrontier.odyssey.v1` (`:32`), with a
+  rotated previous generation (`KEY + '.prev'`, `:33`, `writeGeneration` `:84-95`).
+- **File export/import** — `saveToFile` (`:166`), `loadFromFile` (`:185`).
+- **Resume** — `loadGame` (`:138`) / `loadOdyssey` (`:127`) feed `bootState`/`bootGalaxy`; the
+  setup screen's "Continue" button (`setup.js:347`, `:372`).
+- **Failure surfacing** — `recordAutoSaveOutcome` (`:338`) toasts after 3 consecutive failures.
+- `saveShape.js:29` `resumableMode` already refuses to checkpoint a state that is `over`, a
+  scenario, or a spectated match.
+
+Other `localStorage` users: `update.js:23-24` (dismissed-update flag), `overlays.js:97-100`
+(help-strip seen flag), `competitionLedger.js:1238-1290` (the ratings ledger).
 
 ### 6.2 Recommendation
 
-> **Drop client saves for multiplayer entirely. Persist matches server-side using the existing
-> format. Record replays as command logs, not snapshots.**
+**Client-side autosave of match state is deleted in multiplayer. Not disabled — deleted from the
+multiplayer path.**
 
-1. **Client autosave off in MP — a one-term change.** `saveShape.js:28` already reads
-   `{ state, galaxy, spectateMatch }`. Add `netMatch`:
-   `if (!state || state.over || state.scenario || spectateMatch || netMatch) return null;`
-   That single edit disables autosave, "Save & Exit", and the "Continue" buttons for a networked
-   match, in a pure function with existing tests. Resuming a *shared* match from one participant's
-   private browser copy is incoherent, and the localStorage payload is attacker-editable — the
-   file's own header (`competitionLedger.js:11`) already says so.
-2. **Server-side match persistence reuses `engine/persist.js` unchanged.** `serializeGameString`
-   (`:808`) / `deserializeGame` (`:811`) already produce and consume the exact snapshot the server
-   needs, and `deserializeGame` already treats its input as hostile
-   (`sanitizeSave`, `engine/persist.js:48-49`, plus `test/save-hardening.test.js` at 836 LOC).
-   The server checkpoints on the same 12 s cadence; a crash resumes the match. **Zero new format.**
-3. **Replays are command logs, not snapshot streams.** The sim is deterministic from
-   `(config, seed)` and the loop is fixed-step (`engine/loop.js:18-26` explains why the timestep
-   is the simulation and not a tuning knob). There is already determinism coverage
-   (`test/determinism.test.js`, `test/determinism-roster.test.js`) and a replay concept
-   (`boot.js:215-219`'s `recorded`, which lets the game-over screen state honestly whether the
-   determinism claim held). A `(config, [{tick, seat, envelope}])` log is orders of magnitude
-   smaller than snapshots, doubles as the anti-cheat audit trail, and is the natural artefact for
-   an MCP agent to review its own play. **Recording the command log should be built in from day
-   one** — it is nearly free once commands are envelopes, and retrofitting it is not.
-4. **Keep client `localStorage` for per-viewer preferences only** — `overlays.js:104-108`,
-   `update.js:23-24`, volume/mute. These are correct as-is.
-5. **File Save/Load stays, single-player only.** Hide `saveBtn`/`loadBtn` (`dom.js:42-43`) in a
-   networked match, exactly as `starmapBtn` is already conditionally hidden.
-6. **`competitionLedger.js`'s localStorage Elo ledger is single-player only** and stays that way.
-   Any MP ladder must be server-side or it is forged by editing a string.
+Reasoning:
 
----
+1. **The client no longer holds the authoritative state.** `serializeGameString(game.state)` on a
+   fog-filtered view produces a save of a *partial world*. Loading it would resume a game with the
+   enemy's army missing. There is no correct thing for it to write.
+2. **A single seat cannot resume a 4-seat match.** Resumption is a *match-level* operation: it needs
+   every seat's consent and every seat's presence. That makes it a server feature or nothing.
+3. **"Continue" would be a lie.** The setup screen's Continue button restores *your* game. In
+   multiplayer there is no such thing.
 
-## 7. Odyssey / galaxy / competition / observer — in or out for v1
+**What replaces it:**
 
-| Subsystem | LOC (client + engine) | v1 verdict |
-|---|---|---|
-| **Skirmish** (the base game) | — | **IN** — this *is* v1 |
-| **Odyssey / galaxy** | `engine/galaxy.js` 1,431 + `colony` 93 + `colonyPolicy` 160 + `diplomacy` 501 + `market` 309 + `wonder` 93 + `starmap.js` 318 + `landingPicker.js` 211 + ~950 of `hudSelection.js` = **≈4,066** | **OUT** |
-| **Competition / Elo / ladder** | `competition.js` 3,773 + `competitionLedger.js` 1,290 + `competitionWorker.js` 355 + `pairing.js` 518 + `elo.js` 147 + `playerFingerprint.js` 167 + `tools/duelCore.js` 119 + `tools/genome.js` 680 = **7,049** | **OUT as shipped; mine it** |
-| **Observer / spectator** | `observer.js` 304 + `observerPanel.js` 246 = **550** | **IN — repurposed** |
-| **Scenarios** (Escort / Raider / Bounty) | `engine/scenarios.js` 720 | **OUT** (offline path only) |
+| Concern | Multiplayer answer |
+|---|---|
+| Crash / refresh mid-match | **Server-side match persistence + rejoin by `matchId`.** The server holds the state anyway; snapshot it to disk on a slow cadence (30–60 s) as a host-crash guard. The client keeps `{matchId, seat, token}` in `localStorage` — a few dozen bytes — and offers "Rejoin match" on the splash. This is the *right* use of `localStorage` here. |
+| Replay / post-match analysis | **Server-side command log**, not a client save. Dossier 02 D7: a match replays from `{engineCommit, createGameStateOpts, dt, aiSeatConfigs, orderedCommandLog}`. That is a few KB for a whole match versus 400 KB for one snapshot, and it is the artefact the MCP/agent work (dossier 05) wants anyway. |
+| Single-player | **Autosave stays, unchanged.** Under ADR-0004 the loopback server is in the tab and holds the full authoritative state. `saveload.js` re-points from `game.state` to `session.server.state` — a one-line change to `snapshot()` (`:68-76`) — and every existing test keeps meaning what it meant. |
 
-### Odyssey — OUT
+**Keep, verbatim:** `update.js`'s dismissed-update flag, `overlays.js`'s help-strip flag,
+`game.formation` / `game.collapsedSections` / `game.groups` if they are ever persisted. These are
+per-viewer preferences, exactly what browser storage is for.
 
-Three independent reasons, any one sufficient:
+**Guard rails to add:**
 
-- **It is not a match; it is a save file.** The Odyssey is an open-world sandbox that ticks
-  *every world in the galaxy each tick* (`boot.js:503 stepGalaxy`), with a single per-player
-  credit pool, background colonies raising notifications (`boot.js:504 sweepColonies` →
-  `boot.js:605 notifyColony`), and interplanetary relocation that swaps which state is rendered
-  (`boot.js:365 focusActivePlanet`). "Two players share a galaxy" is an unanswered **game-design**
-  question, not a porting question.
-- **It pauses the world for modals.** `boot.js:332` (landing picker), `starmap.js` (M key), and
-  `techChart.js` (T key) all call `pauseLoop`. In MP nothing may pause the shared world for one
-  participant. Every Odyssey overlay would need reworking.
-- **It carries most of the client's remaining complexity.** Roughly half of `hudSelection.js`
-  (the 1,998-LOC file) is Odyssey panels. Excluding Odyssey removes ~950 LOC of panel work from
-  v1 at zero cost, because those panels never render when `game.galaxy` is null.
-
-**Keep the code in-tree and reachable on the offline path (§8). Do not delete it.** Its tests
-(`test/odyssey.test.js` 809 LOC, `test/starmap.test.js` 482, `test/landing.test.js` 439,
-`test/lanes.test.js`, `test/colonyPolicy.test.js`, `test/livingGalaxy.test.js`,
-`test/domination.test.js`, `test/rivalgate.test.js`) keep passing and keep protecting the shared
-engine code that skirmish also uses.
-
-### Competition / Elo — OUT as shipped, but read it first
-
-`competition.js` (3,773 LOC) is a single-player *ladder screen*: it schedules AI-vs-AI duels,
-runs them in a Web Worker (`competitionWorker.js`), and writes ratings into a localStorage ledger.
-None of that is multiplayer. But three things in this cluster are the prior art for the port and
-should be **read before writing the server**:
-
-- `competitionWorker.js` (355) + `tools/duelCore.js` (119) + `tools/selfplay.js` (169) —
-  **this is already a headless, off-main-thread, deterministic match runner.** It is the server
-  sim in miniature. `engine/state.js:250-254` documents `state.playerAi`, the second controller
-  slot that makes owner `"player"` AI-driven — the exact hook an MCP agent occupies.
-- `pairing.js` (518) and `elo.js` (147) are **pure, engine-free, and directly liftable** to the
-  server when MP ranking lands. `pairing.js:15` states it holds no engine state at all.
-- `playerFingerprint.js` (167) — `fingerprintPlayer(state, owner = "player")` (`:53`) and
-  `mirrorOfPlayer(state, {owner})` (`:162`) are already owner-parameterised. Useful for
-  agent-vs-human matchmaking later.
-
-Also note the guard at `test/engine-purity.test.js:20-41`: it already extends the determinism scan
-to *browser-reachable* `tools/` files precisely because "bench" code started deciding persisted
-ratings. **The same guard should be extended to the server's sim entry point on day one.**
-
-### Observer — IN, repurposed as the spectator client
-
-This is the highest-leverage "already written" asset in the tree. `observer.js`'s header states
-its contract exactly: it *"reveals fog on whichever world you're looking at"*, gives a free camera,
-*"deliberately does not touch `game.state`, `game.galaxy.activeId`, or the real input camera"*,
-and makes `input.js` refuse to issue a single order — every mouse/wheel/key path already
-early-returns into `observer.js` while `game.observerMode` is on. **That is a spectator client,
-already built and already tested** (`test/observer.test.js`, 23 tests).
-
-The change is one condition. `observer.js:128 enterObserverMode()` currently permits exactly two
-cases (an Odyssey, or a watched AI-vs-AI match) and refuses an ordinary skirmish because that
-would be a fog cheat. Add a third: *the server assigned this connection the spectator role*. The
-server then hands that connection an unfiltered projection, which is legitimate precisely because
-a spectator has no seat to cheat with.
-
-Justification for including it in v1: multiplayer needs spectating on day one, and **AI-agent
-matches make it a requirement, not a nicety** — an MCP agent playing a match is only interesting
-if a human can watch it. `observerPanel.js:89`'s two-entrant naming
-(`owner === "player" ? watch.aName : watch.bName`) is the only piece needing real work.
+- `saveShape.js:29` `resumableMode` gains one clause: return `null` when `game.match` is a networked
+  match. That single line disables the timer, the `beforeunload` write and the Continue button
+  together, because everything funnels through `snapshot()`.
+- A test asserting that no networked match ever writes `stellarfrontier.save.v1`. The failure mode
+  here is silent (`saveload.js:42` swallows storage exceptions by design) so it must be asserted, not
+  observed.
 
 ---
 
-## 8. Offline / single-player preservation
+## 7. Odyssey / galaxy / competition / observer — in or out of multiplayer v1
 
-> **Yes — and it should be the primary design constraint, not an afterthought.**
+### Odyssey (open-world campaign) — **OUT**
 
-Two reasons. First, the game *is* the single-player game; shipping a port that can only run
-against a server throws away a working product. Second and more practically: of ~2,466 tests,
-roughly **1,735 are engine/tools tests** that drive `tick()` and `createGameState` directly, and
-roughly **731 are client tests** that drive the current client against a locally-constructed
-state (`test/input.test.js` 57, `test/hudSelection.test.js` 50, `test/boot.test.js` 29,
-`test/hud.test.js` 33, `test/renderShared.test.js` 34, `test/overlays.test.js` 26,
-`test/saveload.test.js` 24, `test/observer.test.js` 23 …). **If the client can no longer run its
-own sim, every one of those 731 tests needs a mock.** That is the single biggest risk in the port.
+**Client LOC:** `starmap.js` 318 + `landingPicker.js` 211 = **529**, plus large fractions of
+`hudSelection.js` (lanes, colony policy, freight, spaceport, capital, electrify — 22 of the 38
+mutator sites in §1.2), the galaxy branch of `boot.js`'s loop (`:502-524`), `startOdyssey`/
+`bootGalaxy`/`performJump`/`initiateJump`/`surrenderOdyssey`/`focusActivePlanet`/`notifyColony`/
+`celebrateMilestone` (`boot.js:259-388`, `:605-652`) ≈ **180 LOC of `boot.js`**, and
+`observer.js`'s galaxy spectating. Call it **~900 client LOC plus a third of `hudSelection.js`'s
+behaviour**.
 
-### 8.1 Recommendation — a loopback transport
+**Why out:**
 
-Define one interface and give it two implementations:
+1. **It is a different game shape.** Odyssey simulates *every world in the galaxy* each tick
+   (`boot.js:503` `stepGalaxy`), with the player controlling one and the rest running as background
+   colonies. Multiplayer would have to decide whose worlds tick, who sees which world, and what a
+   "jump" means when four players are on four different planets. That is a design project, not a port.
+2. **It carries the engine's worst owner-literal concentration.** Dossier 01 finding #4:
+   35 of 53 engine owner literals live in `galaxy.js` (19), `scenarios.js` (4), `colonyPolicy.js` (3),
+   `sim.js`'s Odyssey-logistics block (4) and `diplomacy.js` (2) — *"in the Odyssey open-world and
+   scripted-mission layers, which a multiplayer skirmish never loads."* **Scoping Odyssey out of v1
+   removes two-thirds of the engine's N-player work.** This is the single highest-leverage scope
+   decision available.
+3. **Credits are a galaxy-level singleton.** `game.galaxy.credits` (`hudSelection.js:291`, `:414`,
+   `:628`, `hud.js:257`, `starmap.js:87`) is one number for one player. There is no defined meaning
+   for it with 5 seats.
 
-```
-Transport {
-  submit(envelope)            // a command from this client's seat
-  onSnapshot(fn)              // state deliveries
-  onMatchStart(fn) / onMatchEnd(fn)
-  seat, seats, role
-}
-```
+**Preserved through the loopback:** single-player Odyssey keeps working unchanged (ADR-0004), which
+is the whole reason this scoping is cheap rather than a feature deletion.
 
-- **`LoopbackTransport`** — constructs the state in-process with `createGameState`, runs
-  `createLoop`/`tick` exactly as `boot.js:485-531` does today, and `submit` **applies the command
-  synchronously, in the caller's stack frame**, by calling the same `issue*` the client calls
-  today. Behaviourally byte-identical to the current game.
-- **`SocketTransport`** — serializes envelopes, applies snapshots.
+**Keep the imports.** `main.js:26` side-effect-imports `starmap.js` for the M key and the galaxy
+button. In a multiplayer build the module must still load (stubbed) or the hotkey silently disappears.
 
-### 8.2 Why this keeps the tests meaningful
+### Competitions / Elo — **OUT as shipped, but read `pairing.js` and `elo.js` first**
 
-The seam is placed at exactly two points, and both preserve today's *observable* semantics:
+**Client LOC:** `competition.js` 3,773 + `competitionLedger.js` 1,290 + `pairing.js` 518 +
+`competitionWorker.js` 355 + `playerFingerprint.js` 167 + `elo.js` 147 = **6,250 LOC — 32% of the
+entire client tree, and the largest single module in it.**
 
-1. **Command submission.** Because `LoopbackTransport.submit` mutates before returning, every
-   existing client test that asserts "after this click, the unit has this order" **still passes
-   unchanged**. This is the whole trick: keep the loopback synchronous.
-2. **State delivery.** `boot.js`'s `update` callback (`:499-532`) becomes transport-driven.
-   `snapshotPositions(game.state)` (`:501`) must run before either a local tick or an applied
-   snapshot — one ordering rule, easy to pin with a test.
+**Why out:** the whole subsystem is a *local* ladder. `competitionLedger.js` stores ratings in
+`localStorage` (`:1238-1290`); `competitionWorker.js` runs AI-vs-AI duels in a Web Worker;
+`competition.js`'s Gauntlet plays fixtures against simulated opponents. Its founding constraint is
+stated in `boot.js:148-153`: *"a human cannot play forty games"*, and *"NO side-swap, because the
+human can only ever hold owner `player`"*. A real multiplayer ladder is server-side, cross-player and
+authoritative — a different system that happens to share a rating formula.
 
-Add one new engine function, `applyCommand(state, seat, envelope)`, that resolves ids → entities,
-**filters to `seat`-owned entities**, and calls the unchanged `issue*`. Then:
+**But two pieces are directly reusable and should not be rewritten:**
 
-- `test/commands.test.js` (503 LOC) keeps testing `issue*` directly — untouched.
-- One new test file pins envelope → `issue*` and the ownership filter (which is *new* safety
-  the game has never had: today nothing stops a client from ordering enemy units, because there
-  is no adversary).
-- `test/input.test.js`, `test/hudSelection.test.js`, `test/boot.test.js` keep working against the
-  loopback.
+- **`elo.js` (147 LOC)** — a pure rating function. Move it server-side as-is for a real ladder.
+- **`pairing.js` (518 LOC)** — round-robin/Swiss pairing and schedule generation. This is
+  matchmaking. Read it before writing a lobby queue.
+- `playerFingerprint.js` (167 LOC) — `fingerprintPlayer(state, owner = "player")` (`:53`) is already
+  owner-parameterized. Useful later for agent behaviour analysis (dossier 05), not for v1.
 
-**The one unavoidable test churn is `state.selection`** (§1.3): 124 test references. Moving it to
-the client session is mechanical but wide. Budget for it explicitly; do it as its own change,
-before the transport work, so the diff is reviewable.
+### Observer Mode — **IN, repurposed as the spectator client**
 
-### 8.3 What single-player retains
+**Client LOC:** `observer.js` 304 + `observerPanel.js` 246 = **550**.
 
-With a loopback transport, **the full offline game keeps working**: skirmish, all three scenarios
-(`boot.js:234, 242, 250`), the whole Odyssey (`boot.js:259`), the competition ladder and its Web
-Worker duels, file save/load, and localStorage Continue. `saveShape.js:28`'s `netMatch` term
-(§6.2) is exactly what keeps the two worlds from contaminating each other. The Hugging Face Space
-can therefore serve one bundle that plays offline *and* connects — and the offline path is also
-the fastest development loop for anyone working on the renderers or the HUD.
+**Why in — it is the cheapest feature in the port.** Observer Mode already is a
+render-a-state-you-do-not-control client:
+
+- It bypasses fog at the single predicate (`renderShared.js:254`'s `observerMode` argument,
+  threaded from `boot.js:547-548`), rather than mutating `state.fog` (`observer.js` header,
+  `renderShared.js:250-251`).
+- It has its own camera (`game.observerCamera`, `session.js:103`) independent of `game.input`'s.
+- It makes `input.js` refuse to issue orders — *"every mouse/wheel/key path already early-returns
+  into observer.js while `game.observerMode` is on"* (`boot.js:197-199`).
+- It renders a **different state object** than the one being played (`observedState()`,
+  `boot.js:545`) — which is precisely "render a replicated view".
+
+**The changes are small:** `observer.js:290-291`'s `supplyUsed(state,"ai")` becomes per-seat;
+`observerPanel.js:89`'s two-entrant naming becomes an N-seat list; entry gating moves from
+"Odyssey or `spectateMatch`" (`observer.js`) to "the server assigned me a spectator seat".
+
+**A spectator is exactly the synthetic all-seeing seat §4.4 needs.** Server-side, a spectator gets a
+filter config of "everything" (or, for competitive integrity, a delayed full view). The client-side
+machinery for it already ships.
+
+### Scenarios (Escort / Raider / Bounty) — **OUT of multiplayer v1, IN via loopback**
+
+`boot.js:234-254` — three single-player scripted missions with their own objectives. Co-op scenarios
+are an appealing v2 (`setupEscort` etc. already build a full state), but they are PvE content with
+2-side scripting. Single-player keeps them unchanged through the loopback.
+
+---
+
+## 8. Offline single-player preservation
+
+### 8.1 The loopback works for this client, and the client is unusually ready for it
+
+ADR-0004 Option C requires that the client never touches `engine/` mutation directly and instead
+talks to a session through a transport. From the client's side that is:
+
+- **64 mutation call sites** (§1.1, §1.2) become `session.send(cmd)`. Every one already has an
+  explicit argument list; dossier 02's codec owns the id→object resolution.
+- **13 sim-ownership sites** (§1.5) move behind `session.createMatch(cfg)` / the transport's
+  match-start message.
+- **`game.state` becomes the received view.** `session.js`'s read-at-call-time discipline
+  (`:8-10`) means every consumer already tolerates that object being swapped.
+
+Because the loopback server runs **in the same tab**, single-player keeps: no network, no latency, no
+service dependency, byte-identical determinism, and the full `serializeGame` save (§6).
+
+### 8.2 Why this keeps the 2,519 tests meaningful
+
+The inherited suite constructs a `State` and calls engine functions directly. Under ADR-0004:
+
+- **`engine/` tests are untouched.** The engine's API does not change (dossier 02 D2: exactly one
+  signature change, `issueSetRally`).
+- **Client tests that drive `boot.js`** (`test/boot.test.js` drives the real loop) keep working
+  because `bootState` keeps its shape (§2.3) and the loopback is synchronous.
+- **The multiplayer machinery gets covered by every single-player test run** — the codec, the
+  ownership check and the per-seat filter all execute on the loopback path. That is ADR-0004's
+  entire thesis and it holds on the client side.
+
+### 8.3 What in the client resists the loopback — five flags
+
+1. **`input.js:517-525` `placeBuildingAt` needs a synchronous answer.** `issueBuild` returns the new
+   building's id and build mode exits only if it is truthy. Loopback is synchronous so this
+   *survives unchanged locally* — which is the trap: **it will pass every single-player test and
+   fail over a socket.** Either make the transport interface async-by-contract from day one (the
+   loopback resolving immediately), or the WebSocket path will be the first place anyone discovers
+   this. **Recommend: async-by-contract, and use ADR-0004's fault-injection mode (its Decision
+   section) to run the single-player suite with simulated latency in CI.** The same applies to
+   `hud.js:37`, `hudSelection.js:449/459/485/494` and `boot.js:287`.
+2. **`boot.js:551` polls `game.state.over`.** Harmless over loopback, wrong over a socket (§2.3).
+   Make it a message from day one so the loopback exercises the message path.
+3. **Refcounted pause gates `update()`** (`boot.js:500`). Correct for single-player, illegal for
+   multiplayer. The branch has to exist; ensure single-player takes the *same* code path with a
+   server-side pause command rather than a client-side `return`.
+4. **`state.fog` alias rebinding is unsafe until the engine is fixed** — `engine/gather.js:64`,
+   `engine/scout.js:42` (§3.4, dossier 01 finding #6). Because the loopback server runs the same
+   engine in the same tab, a client-side rebind here does not merely mis-render, it **desyncs the
+   single-player sim**. Fix order matters.
+5. **`main.js`'s side-effect imports** (`:26-28`) self-wire at module-load. A build that trims
+   modules for the multiplayer bundle must keep the import or explicitly re-wire; the failure is
+   silent (README already documents this).
+
+### 8.4 What single-player retains, unchanged
+
+Full-state rendering (its loopback server can hand it an unfiltered view, or the filtered one — it
+should hand it the **filtered** one, so single-player tests the filter), autosave and Continue,
+Odyssey, the three scenarios, competitions and the local ladder, Observer Mode, the file
+export/import, and every hotkey. **Nothing in §7's "out of v1" list is deleted; it is only absent
+from networked matches.**
 
 ---
 
 ## 9. Summary table
 
-Verdicts: **verbatim** (0–2 changed lines) · **light** (a rename sweep, no restructuring) ·
-**heavy** (real rework) · **server-side** (moves out of the browser) ·
-**out-v1** (untouched, offline-only)
+Verdicts: **verbatim** (no edits) · **light** (per-site substitution, no restructuring) ·
+**heavy** (restructuring) · **server-side** (moves out of the browser) ·
+**out-v1** (not in multiplayer v1; still shipped for single-player).
 
 | Module | LOC | Verdict | Why |
 |---|---|---|---|
-| `engine/` (all 49 files) | 15,659 | **server-side** | Runs headless. Needs: `applyCommand` dispatcher, `projectFor(state, seat)`, N-entry `ownerDefs` (`state.js:174`), owner-generic `updateFog` loop (`sim.js:70`), N start bases (`map.js`), `attackHit` target owner (`combat.js`) |
-| `style.css` | 1,732 | **verbatim** | 3 team-colour hits; add N-seat variables |
-| `index.html` | 83 | **light** | Add a lobby container; hide save/load in MP |
-| `sound.js` | 181 | **verbatim** | Zero imports |
-| `effects.js` | 183 | **verbatim** | Zero imports |
-| `camera.js` | 105 | **verbatim** | Zero imports |
-| `data.js` | 242 | **verbatim** | Static tables |
-| `dom.js` | 68 | **verbatim** | Already Node-safe (`dom.js:11-18`) |
-| `version.js` | 60 | **verbatim** | |
-| `update.js` | 108 | **verbatim** | Self-wired version chip |
-| `saveShape.js` | 31 | **verbatim** | +1 term: `netMatch` (`:28`) |
-| `renderShared.js` | 255 | **verbatim** | `:254` only; + `pruneFacing` grace window (§4.2) |
-| `renderNodes.js` | 171 | **verbatim** | `:26` only |
-| `minimap.js` | 138 | **verbatim** | `:94, :99` |
-| `render.js` | 277 | **verbatim** | `:202` (`state.fog` → `fogs[seat]`) |
-| `renderUnits.js` | 699 | **verbatim** | `:91`; colour already generic at `:66` |
-| `renderBuildings.js` | 807 | **verbatim** | 6 owner lines; colour generic at `:75` |
-| `renderEffects.js` | 683 | **verbatim** | 5 owner lines |
-| `techChart.js` | 366 | **verbatim** | `:36` `OWNER`; stop pausing in MP |
-| `elo.js` | 147 | **server-side** | Pure; lift verbatim when ranking lands |
-| `pairing.js` | 518 | **server-side** | Pure; lift verbatim when ranking lands |
-| `playerFingerprint.js` | 167 | **out-v1** | Already owner-parameterised (`:53, :162`); useful later |
-| `session.js` | 120 | **light** | Additive: `seat`, `seats`, `role`, `transport`, `selection` |
-| `main.js` | 168 | **light** | `:145-151` minimap command → submit |
-| `hud.js` | 452 | **light** | 9 owner literals; score bar → roster; `:37, :38` → commands |
-| `hudPanelSignature.js` | 380 | **light** | 4 owner literals + `players.player` reads |
-| `overlays.js` | 585 | **light** | `:34, :68-81, :376, :392-394, :406-407`; N-seat game-over copy |
-| `observer.js` | 304 | **light** | `:128` gains a third permitted case → the spectator client |
-| `observerPanel.js` | 246 | **light** | `:89` two-entrant naming → N-seat |
-| `inputCommands.js` | 288 | **heavy** | 13 `issue*` + 5 selection writes + 16 owner literals; becomes the command constructor |
-| `input.js` | 588 | **heavy** | 6 `issue*` + 6 selection writes + 5 owner literals; gesture/camera/touch untouched |
-| `setup.js` | 462 | **heavy** | Splits: lobby form + (verbatim) option tables |
-| `saveload.js` | 371 | **heavy** | MP: off. SP: unchanged. Server reuses `engine/persist.js` |
-| `boot.js` | 788 | **heavy** | Lifecycle inversion; the single biggest file of real work |
-| `hudSelection.js` | 1,998 | **heavy** (~1,050) / **out-v1** (~950) | ~30 mutator calls in the skirmish half; the Odyssey panels are untouched |
-| `starmap.js` | 318 | **out-v1** | Odyssey |
-| `landingPicker.js` | 211 | **out-v1** | Odyssey |
-| `competition.js` | 3,773 | **out-v1** | Single-player ladder screen |
-| `competitionLedger.js` | 1,290 | **out-v1** | localStorage Elo ledger — forgeable, SP-only |
-| `competitionWorker.js` | 355 | **out-v1** | Read as prior art for the headless server sim |
-| `tools/` (`selfplay`, `duelCore`, `genome`, `ailab`, `serve`, `smoke`) | 3,593 | **out-v1** | `selfplay.js`/`duelCore.js` are the closest existing thing to the server runner |
-| `test/` | 43,101 | **preserve** | ~1,735 engine tests unaffected; ~731 client tests preserved by the synchronous loopback (§8) |
+| `style.css` | 1,732 | **verbatim** | additive lobby/net-status rules only |
+| `camera.js` | 105 | **verbatim** | pure math, zero state coupling |
+| `dom.js` | 68 | **verbatim** | element handles |
+| `sound.js` | 181 | **verbatim** | zero owner/state references |
+| `effects.js` | 183 | **verbatim** | `{x,y,type}` bookkeeping; fed by replicated events |
+| `data.js` | 242 | **verbatim** | pure display data (`:124`'s `"ai"` is a commodity) |
+| `version.js` | 60 | **verbatim** | version/save-impact chip |
+| `update.js` | 108 | **verbatim** | auto-update chip; keeps its `localStorage` flag |
+| `renderNodes.js` | 171 | **verbatim** | owner-free; `state.fog` (`:26`) via the alias rebind |
+| `renderBuildings.js` | 807 | **light** | 6 literals: `:84`, `:120`, `:147`, `:165`, `:181`, `:233` |
+| `renderUnits.js` | 699 | **light** | 1 literal: `:91`. Colour already generic (`:66`) |
+| `renderEffects.js` | 683 | **light** | 5 literals: `:413`, `:419`, `:563`, `:600`, `:637` |
+| `overlays.js` | 585 | **light** | objectives `:68-81`; victory copy `:376`, `:392`, `:406-407`; faction chip `:34` |
+| `setup.js` | 462 | **light** + additive | option model verbatim; new `renderLobby()` (~150–250 LOC) |
+| `hud.js` | 452 | **light** | 6 literals + 2 `players.player` reads + 1v1 score chip `:314` |
+| `hudPanelSignature.js` | 380 | **light** | 4 literals + 6 `players.player` reads; the signature idea is *right* for snapshots |
+| `techChart.js` | 366 | **light** | one line: `:36` `const OWNER = "player"` |
+| `observer.js` | 304 | **light** | repurposed as spectator; `:116`, `:290`, `:291` |
+| `render.js` | 277 | **light** | `state.fog` `:202` + interpolation continuity (§4.2.6) |
+| `renderShared.js` | 255 | **light** | one predicate: `hiddenByFog` `:253-255` |
+| `observerPanel.js` | 246 | **light** | `:89` two-entrant naming → N seats |
+| `main.js` | 168 | **light** | 2 `issue*` `:149-150`; side-effect imports `:26-28` must survive |
+| `minimap.js` | 138 | **light** | 2 literals `:94`, `:99`; colours already generic `:95`, `:100` |
+| `session.js` | 120 | **light** | additive fields: `transport`, `match`, `localOwner`, `serverTick`, `lobby`, `netStatus` |
+| `hudSelection.js` | 1,998 | **heavy** (wide, shallow) | 59 touch points = 3% of the file; layout verbatim, handlers become sends; **`:1045`, `:1722` need new engine commands** |
+| `boot.js` | 788 | **heavy** | the lifecycle: loop split, match-end message, pause semantics, lobby entry |
+| `input.js` | 588 | **heavy** | 17 touch points + `placeBuildingAt` `:517-525` goes async |
+| `inputCommands.js` | 288 | **heavy** | 37 touch points = 13% of the file; the right-click dispatch |
+| `saveload.js` | 371 | **server-side** | match persistence + rejoin move to the server; single-player keeps it (§6) |
+| `saveShape.js` | 31 | **light** | one clause: refuse to checkpoint a networked match |
+| `competition.js` | 3,773 | **out-v1** | local ladder vs simulated opponents |
+| `competitionLedger.js` | 1,290 | **out-v1** | `localStorage` ratings store |
+| `pairing.js` | 518 | **out-v1** | **read first** — this is matchmaking |
+| `competitionWorker.js` | 355 | **out-v1** | Web Worker duel runner |
+| `starmap.js` | 318 | **out-v1** | Odyssey galaxy map; keep the `main.js` import |
+| `landingPicker.js` | 211 | **out-v1** | Odyssey jump landing site |
+| `playerFingerprint.js` | 167 | **out-v1** | already owner-generic (`:53`); useful for agent analysis later |
+| `elo.js` | 147 | **out-v1** | **reuse server-side** — pure rating function |
+| **Total** | **19,635** | | |
 
-**Totals:** verbatim/near-verbatim ≈ **6,900 LOC (39 % of shipped client JS)** ·
-light sweep ≈ **2,700 (15 %)** · heavy ≈ **4,500 (25 %)** · out-v1 ≈ **3,800 (21 %)** ·
-plus 15,659 LOC of engine relocated intact and 1,732 LOC of CSS untouched.
+**Roll-up (in-scope for v1 = 12,856 LOC):** verbatim 2,850 (22%) · light 5,942 (46%) ·
+heavy 3,662 (28%) · server-side/repurposed 402 (3%). **Verbatim + light = 68%.**
 
 ---
 
 ## 10. Ordered recommendations
 
-1. **Move `state.selection` off the sim state first.** 10 write sites, 32 client reads, 2 engine
-   reads, 124 test references. It is the widest mechanical change and it is independent of
-   everything else — do it as its own reviewable diff, before the transport.
-2. **Add `applyCommand(state, seat, envelope)` to `engine/commands.js`**, with the
-   **seat-ownership filter** that does not exist today. Keep every `issue*` unchanged so
-   `test/commands.test.js` is untouched.
-3. **Introduce `Transport` with `LoopbackTransport` first.** Land the whole port against
-   loopback before a socket exists. The client tests are the regression suite.
-4. **Sweep the owner literals** behind `session.seat` / `isMine(e)` (§3.1). ~70 one-liners with
-   heavy existing coverage.
-5. **Make the engine N-seat**: `ownerDefs` (`engine/state.js:174`), the `updateFog` loop
-   (`engine/sim.js:70`), N start bases (`engine/map.js`), and `attackHit`'s target owner
-   (`engine/combat.js`). `test/ownerScaffold.test.js` is the spec that already exists.
-6. **Write `projectFor(state, seat)` and prove it renders identically to the full state**
-   before anything depends on it (M0 in §4.4).
-7. **Record the command log from day one.** It is nearly free once commands are envelopes, it
-   is the replay format, the anti-cheat audit trail, and the MCP agent's trace.
-8. **Extend `test/engine-purity.test.js`'s reachability walk to the server entry point** the
-   moment it exists. The guard's own comment (`:20-41`) explains what happened last time a
-   "bench" file started deciding real outcomes.
-9. **Defer Odyssey and the competition ladder; keep both alive on the loopback path.** They cost
-   nothing to keep and protect ~1,000 tests over shared engine code.
-10. **Ship the spectator seat in v1** by widening `observer.js:128`. It is already written,
-    already tested, and AI-agent matches make it a requirement rather than a nicety.
+1. **Add two engine commands before the codec ships** — `issueClearHomeBase` and
+   `issueSetElectrified` — closing `hudSelection.js:1045` and `hudSelection.js:1722`, the only two
+   client writes with no envelope. Smallest change in this document, largest correctness payoff.
+2. **Fix `engine/gather.js:64` and `engine/scout.js:42` before anything rebinds `state.fog`.**
+   Dossier 01 finding #6. Under the loopback this is a desync, not a render bug.
+3. **Introduce `state.localOwner` (or `game.localOwner`) and sweep the 71 "is this mine" literals
+   site-by-site.** Never with a blind `sed`: `data.js:124` defines a commodity called `"ai"`.
+4. **Scope Odyssey and competitions out of multiplayer v1.** Removes 6,779 client LOC and — per
+   dossier 01 finding #4 — two-thirds of the engine's owner-literal work. Both keep working in
+   single-player via the loopback.
+5. **Make the transport interface asynchronous by contract from day one**, and run the single-player
+   suite under ADR-0004's fault-injection latency in CI. Otherwise `input.js:521` and the four other
+   return-value sites pass every test and break over the socket.
+6. **Replace the `game.state.over` poll (`boot.js:551`) with a `match-end` message immediately**, so
+   the loopback exercises the message path from the first commit.
+7. **Ship fog-filtered replication from day one** (§4.4), following the six-step migration path.
+   Send the map config not the map, and one `explored` bitset not two JSON fog arrays.
+8. **Keep `bootState` as the single boot funnel and `session.js`'s read-at-call-time discipline.**
+   They are why the rest of this is cheap.
