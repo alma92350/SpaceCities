@@ -18,7 +18,7 @@ occupy an ordinary player seat in a SpaceCities match.
 The current MCP protocol revision is **`2026-07-28`**, published **28 July 2026**, and it is
 declared *Current* on the versioning page:
 
-> "The **current** protocol version is [**2026-07-28**](/specification/2026-07-28/)."
+> "The **current** protocol version is [**2026-07-28**](https://modelcontextprotocol.io/specification/2026-07-28/)."
 > — <https://modelcontextprotocol.io/specification/versioning>
 
 Revision history (all still reachable): `2026-07-28` (current), `2025-11-25`, `2025-06-18`,

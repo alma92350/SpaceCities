@@ -1,6 +1,6 @@
 # SpaceCities — Product Requirements Document
 
-**Status:** Draft v0.1 — pending review
+**Status:** Draft v0.2 — pending review
 **Owner:** alma92350
 **Last updated:** 2026-08-30
 **Related:** [`docs/adr/`](adr/) (architecture decisions) · [`TASKS.md`](../TASKS.md) (delivery tracking)
@@ -233,24 +233,48 @@ agent-seat match completion rate; desync events per 100 matches (target: 0).
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| **HF Space sleeps and kills live matches** | High | Short default matches (§6.1); lobby state on `/data`; reconnect-with-AI-takeover (§6.2) makes a wake-up survivable. Escalation: paid always-on. *Confirm behaviour — HF dossier.* |
-| **WebSockets constrained on Spaces** | High | Hand-rolled RFC 6455 behind a transport interface, so an SSE+POST fallback is a swap, not a rewrite ([ADR-0005](adr/0005-transport.md)). *Confirm — HF dossier.* |
+| **Every deploy destroys in-flight matches** — a Space rebuilds and restarts on *every git push* | High | **Confirmed.** Matches snapshot to disk and restore on boot ([ADR-0012](adr/0012-crash-tolerant-matches.md)), sharing the reconnect mechanism. Raised from a Phase 7 nicety to a Phase 3 architectural requirement. |
+| **The Space is private, so nobody can play** | High | **Confirmed blocker** — a private Space returns `404` for the running app, not just the source. Needs owner action (Q1). |
+| **A non-PRO account may not be able to rebuild an existing Docker Space** | High | **Unverified, and cheap to test.** T-007a pushes a trivial commit and watches it build, before any porting effort is spent. Escalation: PRO at $9/month. |
+| ~~WebSockets constrained on Spaces~~ | ~~High~~ | **Resolved.** Upgrades verified to traverse the HF edge proxy, and the owner's own live Space already serves a WebSocket plus `/mcp` on one port. A ~90-line zero-dependency server round-tripped against real Chromium ([ADR-0005](adr/0005-transport.md)). |
+| **HF free hardware sleeps after 48 h idle** | Low | Tolerable for a game people play; snapshot/restore covers it. **No keep-alive pinger** — Spaces have been paused for abuse over exactly that. |
 | **Server-authority refactor breaks determinism** | High | Determinism guards run in CI on every commit; the loopback transport (Phase 1) forces single-player through the identical code path, so the existing suite tests the multiplayer path too. |
 | **N-player generalization is broader than the `state.owners` scaffold suggests** | Medium | ~53 hardcoded owner comparisons are known to exist. Audited before work starts (engine dossier); 2-seat multiplayer ships first and needs almost none of it. |
-| **Free-tier CPU cannot run 4 concurrent 20 Hz sims** | Medium | Measure early with `tools/selfplay.js` as a load generator; the loop already degrades to slow motion rather than spiralling (`engine/loop.js` `MAX_SUBSTEPS`). |
+| ~~Free-tier CPU cannot run 4 concurrent 20 Hz sims~~ | ~~Medium~~ | **Resolved.** Measured: p99 4.6–9.1 ms/tick for realistic 200–400-unit matches against a 50 ms budget, and 22 ms even at 800 units in contact. Free tier is 2 vCPU / 16 GB. The real cost is serialization and fog filtering, not simulation — measured next (T-015). |
 | **Empty lobbies make the game feel dead** | Medium | AI fills every open seat (FR-3): a solo arrival always gets a match. |
 | **Port drifts from upstream, losing future fixes** | Low | Upstream history preserved; `upstream` remote configured; engine changes kept minimal and upstreamable. |
 
 ## 11. Open questions
 
-- **Q1** Should the Space be public (§6.4)? Requires an explicit decision from the owner — it makes
-  the game world-readable. *(Blocking for G1.)*
-- **Q2** Free tier, or paid always-on hardware? Determines whether long matches are viable.
-- **Q3** Is multiplayer **Odyssey** a wanted v2, or is skirmish the whole product? Shapes how much
-  generality Phase 3 builds for.
-- **Q4** Should agent seats be visibly labelled to human opponents? (Fairness/transparency vs. a
-  more interesting game.) Recommendation: **yes, labelled.**
-- **Q5** Does the existing single-player Elo/competition system get a multiplayer counterpart in v2?
+- **Q1 — still open, and blocking.** Should the Space be made public (§6.4)? Now confirmed to be a
+  hard blocker rather than a preference: a private Space returns `404` for the running application,
+  so no anonymous player can reach the game at all. Requires an explicit owner decision, since it
+  makes the game world-readable. *(Blocks G1 and all of Phases 3–7 in production.)*
+- **Q2 — answered.** Start on **free CPU Basic** ([ADR-0010](adr/0010-hf-deployment.md)). 48 hours of
+  idle tolerance is ample, and `$0.03/hour` CPU Upgrade removes sleep later if the game gets
+  traction. What remains is a *risk*, not a question: whether a non-PRO account can rebuild an
+  existing Docker Space — resolved empirically by T-007a.
+- **Q3 — still open.** Is multiplayer **Odyssey** a wanted v2, or is skirmish the whole product?
+  Shapes how much generality Phase 5 builds for.
+- **Q4 — still open.** Should agent seats be visibly labelled to human opponents?
+  Recommendation: **yes, labelled**, and their APM cap published alongside
+  ([ADR-0007](adr/0007-agent-pacing.md)).
+- **Q5 — still open.** Does the single-player Elo/competition system get a multiplayer counterpart
+  in v2?
+
+## 12. Evidence base
+
+Every claim in this document that could have been guessed was instead measured or verified. The
+supporting dossiers live in [`docs/analysis/`](analysis/):
+
+| Dossier | What it settles |
+|---|---|
+| [00 — Feasibility spikes](analysis/00-feasibility-spikes.md) | A ~90-line zero-dependency WebSocket server round-tripping against real Chromium; per-tick simulation cost under load; the platform precedent from the owner's own live Space |
+| [01 — Engine N-player seams](analysis/01-engine-nplayer-seams.md) | Every owner literal in the engine, classified; the six real chokepoints; why two seats first is the cheap path |
+| [02 — Command & wire protocol](analysis/02-command-wire-protocol.md) | The full command signature audit, the anti-cheat surface, the wire schema, and five engine defects that block multiplayer |
+| [03 — Client coupling](analysis/03-client-coupling.md) | What the client must change, what is reusable verbatim, and why fog-filtered projection needs no renderer changes |
+| [04 — HF Spaces](analysis/04-hf-deployment.md) | Platform limits, lifecycle, storage, secrets, and a ready-to-use Dockerfile and deploy workflow |
+| [05 — MCP agent play](analysis/05-mcp-agent-play.md) | The current protocol revision verified against live docs, the tool surface, and the pacing analysis |
 
 ---
 
