@@ -25,9 +25,11 @@ Use [`_template.md`](_template.md) for new records.
 | [0002](0002-import-upstream-verbatim.md) | Port by importing upstream verbatim, with history | Accepted | — |
 | [0003](0003-server-authoritative-simulation.md) | Server-authoritative simulation, not peer lockstep | Accepted | — |
 | [0004](0004-loopback-transport.md) | Single-player runs through the multiplayer path | Accepted | — |
-| [0005](0005-transport.md) | Hand-rolled RFC 6455 WebSocket, zero dependencies | Proposed | — |
-| [0006](0006-command-wire-protocol.md) | Id-based, tick-scheduled command protocol | Proposed | — |
-| [0007](0007-agent-pacing.md) | Agents play in real time under an APM budget | Proposed | — |
-| [0008](0008-n-player-generalization.md) | Two seats first, N seats second | Proposed | — |
-| [0009](0009-fog-filtered-state.md) | Per-seat fog-filtered state replication | Proposed | — |
-| [0010](0010-hf-deployment.md) | Deployment to Hugging Face Spaces | Proposed | — |
+| [0005](0005-transport.md) | Hand-rolled RFC 6455 WebSocket, zero dependencies | Accepted | — |
+| [0006](0006-command-wire-protocol.md) | Id-based, server-stamped, tick-scheduled commands | Accepted | — |
+| [0007](0007-agent-pacing.md) | Agents play real time under an APM ceiling; gated mode for evaluation | Accepted | — |
+| [0008](0008-n-player-generalization.md) | Two seats first, N seats second | Accepted | — |
+| [0009](0009-fog-filtered-state.md) | Per-seat fog-filtered state projection | Accepted | — |
+| [0010](0010-hf-deployment.md) | Deploy by direct git push, on free CPU Basic | Accepted | — |
+| [0011](0011-one-match-per-process.md) | One match per worker process | Accepted | — |
+| [0012](0012-crash-tolerant-matches.md) | Matches are crash-tolerant, snapshotted to disk | Accepted | — |

@@ -12,17 +12,40 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 8 | 3 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 10 | 3 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
 | **2** | Commands are data; a match replays bit-identically | 9 | 0 | ⚪ Not started |
-| **3** | Two humans play a full match over the network | 8 | 0 | ⚪ Not started |
+| **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
 | **4** | Multiplayer is pleasant: lobby, seats, reconnect | 8 | 0 | ⚪ Not started |
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
-| **6** | An agent plays a human to a finish over MCP | 10 | 0 | ⚪ Not started |
+| **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **65** | **3** | |
+| | | **70** | **3** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
+
+### What the evidence changed
+
+The plan is not the one drafted before the codebase and platform were investigated. Six findings
+moved it, and each is worth knowing before reading the phases:
+
+1. **The engine is nearly N-player already.** Combat, movement, gather, supply and fog are
+   owner-generic; victory is already last-side-standing with a *passing three-owner test*. The real
+   owner-literal work is in the **client** (~80–110 sites), not the engine.
+2. **Five engine defects block multiplayer, and three of them would ship a rigged game.** Seat B
+   would silently lose squad formations, lose worker auto-repair, and be the only seat that kites.
+   These are now Phase 2 tasks, before any netcode.
+3. **A module-global entity-id counter** makes two concurrent matches in one process
+   non-replayable — silently. Hence one match per worker (ADR-0011).
+4. **Every deploy destroys in-flight matches.** An HF Space rebuilds and restarts on *every git
+   push*. Match snapshotting is therefore architectural, not hardening, and moved from Phase 7 to
+   Phase 3 (ADR-0012).
+5. **The account is not PRO**, and HF now gates Docker Spaces behind a paid plan *to create*.
+   Whether a free account can still **rebuild** an existing one is unverified — so T-007a tests
+   exactly that, first, before anything is invested.
+6. **The MCP spec moved.** Revision `2026-07-28` **removed** the `initialize` handshake,
+   `Mcp-Session-Id`, the GET SSE endpoint and resumability. A server written from memory or from any
+   pre-2026 tutorial would not conform.
 
 ---
 
@@ -59,8 +82,10 @@ ships, the pipeline is already boring.
 | **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, `version.js`/`version.json`, page title — **without touching engine internals** | G5 | T-001 | ⚪ | Suite green incl. `test/release-manifest.test.js`, `test/version.test.js`; `upstream/main..HEAD` diff stays semantically clean |
 | **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | ⚪ | All three checks green on a pushed branch; branch protection documented |
 | **T-006** | `Dockerfile` for Node 22 on HF: UID-1000 user, port 7860, `/data`, **no npm install** | G5, NFR-5 | T-004 | ⚪ | Image builds; container serves the game locally on 7860 |
-| **T-007** | `.github/workflows/deploy-hf.yml` — push to `main` deploys to the Space using `HF_TOKEN` | FR-21 | T-006 | ⚪ | A push updates the Space; token never appears in logs; existing unrelated HF history handled deliberately |
-| **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | 🔴 | Blocked on owner decision (Q1). Anonymous browser plays a full skirmish on the live Space |
+| **T-007a** | ⚠️ **Do this first.** Push a trivial commit to the Space and watch it rebuild — proving a **non-PRO account can still rebuild an existing Docker Space** | ADR-0010 B2 | — | ⚪ | A rebuild completes. If it fails, PRO ($9/mo) becomes a prerequisite and the plan changes — better known in week one than week ten |
+| **T-007** | `.github/workflows/deploy-hf.yml` — **direct authenticated git push** (not `hub-sync`, which calls `hf repo create` and could hit the paywall) | FR-21, ADR-0010 | T-006, T-007a | ⚪ | A push updates the Space; token never in logs; the unrelated Python history is force-overwritten deliberately. **Never delete the Space** — it may not be recreatable |
+| **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | 🔴 | **Hard blocker, confirmed:** a private Space returns `404` to everyone but the owner — the running app, not just the source. Anonymous browser plays a full skirmish on the live Space |
+| **T-008a** | Attach a Storage Bucket and **verify `/data` actually persists** — classic persistent storage no longer exists and the inherited `ln -s /data data` likely points at ephemeral disk | ADR-0010 B3, FR-22 | T-006 | ⚪ | A file written to `/data` survives a factory rebuild |
 
 ---
 
@@ -109,6 +134,8 @@ already proven by 2,519 tests (ADR-0004).
 | **T-027** | HTTP server: static assets + WebSocket + reserved `/mcp`, all on port 7860 | ADR-0005 | T-026 | ⚪ | One port serves all three; verified in the Docker image |
 | **T-028** | Per-seat fog-filtered state replication | FR-9, ADR-0009 | T-015, T-021 | ⚪ | Test: a client's payload contains **no** entity its seat cannot see |
 | **T-029** | Match worker process; parent relays sockets ↔ workers | ADR-0011 | T-016, T-027 | ⚪ | Two concurrent matches in one server replay independently and identically |
+| **T-029a** | **Match snapshot to disk + restore on boot** — every deploy restarts the Space and destroys in-memory state, so this is architectural, not hardening | ADR-0012, FR-22 | T-029 | ⚪ | Test: a match snapshotted mid-play, restored and continued yields the same `fingerprint(state)` as one that ran uninterrupted |
+| **T-029b** | Rejoin-by-match-id after a server restart, sharing the reconnect mechanism | ADR-0012, FR-5 | T-029a | ⚪ | Deploying mid-match costs seconds, not the match |
 | **T-030** | Client `localOwner` seam — replace the ~80 non-engine owner literals | ADR-0008 | T-012 | ⚪ | Client renders correctly as **either** seat; golden HUD/render tests updated |
 | **T-031** | Seat identity: display names, per-seat colours beyond the hardcoded two | FR-12 | T-030 | ⚪ | No `"player"`/`"ai"` string reaches the UI |
 | **T-032** | Latency handling: local prediction of selection and camera, server-confirmed orders | FR-11 | T-013, T-026 | ⚪ | Playable at 150 ms simulated RTT; measured, not asserted |
@@ -155,7 +182,8 @@ announced, and confined to this phase**.
 
 | ID | Task | Serves | Depends | Status | Exit criteria |
 |---|---|---|---|---|---|
-| **T-049** | MCP transport: Streamable HTTP + JSON-RPC 2.0 core, zero dependencies | FR-13, NFR-5 | T-027 | ⚪ | `initialize`/`tools/list`/`tools/call` verified against golden transcripts and a real MCP client |
+| **T-049** | MCP transport: Streamable HTTP + JSON-RPC 2.0 core, zero dependencies, targeting revision **`2026-07-28`** — which **removed** `initialize`/`initialized`, `Mcp-Session-Id`, the GET SSE endpoint and `Last-Event-ID` resumability | FR-13, NFR-5 | T-027 | ⚪ | `tools/list`/`tools/call` verified against golden transcripts and a real MCP client. **Re-verify the spec revision before coding** — no pre-2026 tutorial or SDK example shows this shape |
+| **T-049a** | Seat handle as an explicit tool argument (the spec's "Stateful Tools" pattern), since protocol-level sessions no longer exist | FR-13 | T-049 | ⚪ | A seat handle minted by `join_match` authorizes every later call |
 | **T-050** | Seat auth: per-seat tokens; an agent can act **only** on its own seat | FR-18 | T-049 | ⚪ | Adversarial test: cross-seat command rejected |
 | **T-051** | Lobby tools — `list_matches`, `join_match`, `leave_match` | FR-13 | T-049, T-033 | ⚪ | An agent joins a match unaided |
 | **T-052** | Observation tools — `get_situation`, `list_entities`, `get_map_overview`, `get_tech_options`, **fog-respecting and summarized** | FR-14 | T-028, T-049 | ⚪ | Digest fits a reasonable context; test proves nothing outside the seat's fog leaks |
@@ -173,8 +201,8 @@ announced, and confined to this phase**.
 
 | ID | Task | Serves | Depends | Status | Exit criteria |
 |---|---|---|---|---|---|
-| **T-059** | Persistence to `/data`: lobby and match results survive restart | FR-22 | T-033 | ⚪ | Space restart loses live matches (by design) but not the lobby |
-| **T-060** | Sleep/wake survival: behaviour verified against real Space idle behaviour | Risk | T-059 | ⚪ | Documented, and the client explains it to players |
+| **T-059** | Lobby and match-result persistence to `/data` (live match state already covered by T-029a) | FR-22 | T-033, T-008a | ⚪ | A Space restart loses neither the lobby nor recorded results |
+| **T-060** | Sleep/wake UX: friendly loading state and WebSocket retry with backoff for the `503` a sleeping Space returns. **No keep-alive pinger** — Spaces have been paused for abuse over exactly that | Risk, ADR-0010 | T-059 | ⚪ | First visitor after 48 h idle sees a loading state, not an error |
 | **T-061** | Structured logging and operational metrics | Ops | T-029 | ⚪ | Desyncs, disconnects, match durations, tick overruns all observable |
 | **T-062** | Load test: concurrent matches to the measured ceiling | NFR-4 | T-014 | ⚪ | Ceiling documented; graceful degradation verified, not assumed |
 | **T-063** | Security review: transport, codec, auth, rate limits | FR-10 | T-039, T-050 | ⚪ | `/security-review` clean; adversarial suite green |
@@ -187,8 +215,8 @@ announced, and confined to this phase**.
 
 | # | Question | Blocks | Owner |
 |---|---|---|---|
-| **Q1** | Make the Space **public**? Anonymous players cannot reach a private Space, so G1 depends on it. | T-008, and all of Phases 3–7 in production | alma92350 |
-| **Q2** | Free tier, or paid always-on hardware? Determines whether 20–40 minute matches survive idling. | T-060 | alma92350 |
+| **Q1** | Make the Space **public**? **Confirmed hard blocker** — a private Space returns `404` to everyone but the owner and collaborators, for the running app as well as the source. G1 is unreachable while it stays private. | T-008, and all of Phases 3–7 in production | alma92350 |
+| **Q2** | ~~Free tier or paid always-on?~~ **Answered by ADR-0010: start free.** 48 h idle tolerance is ample; `$0.03/h` CPU Upgrade removes sleep later if the game gets traction. Open only as a **risk**: whether a non-PRO account can rebuild an existing Docker Space — resolved by T-007a. | T-007a | — |
 | **Q3** | Is multiplayer **Odyssey** a wanted v2? Shapes how much generality Phase 5 builds. | T-041 scope | alma92350 |
 | **Q4** | Are agent seats visibly labelled to human opponents? (Recommendation: **yes**.) | T-031 | alma92350 |
 
