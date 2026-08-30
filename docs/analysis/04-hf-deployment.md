@@ -1,352 +1,327 @@
 # 04 — Hugging Face Spaces as a deployment target for SpaceCities
 
 **Researched:** 2026-08-30 · **Target:** `https://huggingface.co/spaces/Almaatla/SpaceCities` (Docker SDK, currently **private**)
-**Method:** live Hugging Face documentation (`huggingface.co/docs/hub/*`), the Hub API via the authenticated MCP connector, and direct HTTP probes against the live Spaces edge. Every non-obvious claim carries a source URL. Claims I could **not** verify are collected in [§11](#11-things-i-could-not-verify) and flagged inline as **[UNVERIFIED]**.
+
+**Method.** Live Hugging Face documentation (`huggingface.co/docs/hub/*`), the Hub filesystem via the authenticated MCP connector, and **direct empirical probes** against a live public Docker Space (`Almaatla/private-room`) from this machine. Every non-obvious claim carries a source URL. Claims I could **not** verify are flagged inline as **[UNVERIFIED]** and collected in [§11](#11-what-i-could-not-verify).
 
 ---
 
-## 0. Executive summary — read this first
-
-Four findings change the shape of the plan. Two are hard blockers.
+## 0. Executive summary
 
 | # | Finding | Impact |
 |---|---|---|
-| **B1** | **The Space must be made public.** A private Space returns `404` to everyone except the owner and collaborators — the running app, not just the source. | **Blocker for multiplayer.** [§9](#9-private-vs-public) |
-| **B2** | **`Almaatla` is not on a paid plan** (`is_pro: false`, verified via the Hub API), and HF now documents that *"Gradio and Docker Spaces run on compute and require a paid plan to **create**"*. | The **existing** Space (created 2026-02-23) should keep working — the restriction is worded against *creation*. But do **not** delete it, and expect `hub-sync`'s `hf repo create` step to be the risky part. [§3.1](#31-the-paid-plan-caveat) |
-| **B3** | **Classic "persistent storage" no longer exists.** `suggested_storage` is documented as *"The persistent storage feature is no longer available so this setting will be ignored."* `/data` is now an **attached Storage Bucket volume**. | The current Dockerfile's `ln -s /data data` is very likely symlinking to **ephemeral disk** today. [§4](#4-persistent-storage) |
-| **B4** | **Free hardware sleeps after 48 h idle and all in-memory state dies** — on sleep, on every git push (rebuild), and on any crash/restart. | Matches cannot be "long-lived in memory". Needs snapshot-to-disk + resume. [§3](#3-hardware--lifecycle) |
-
-The good news: **raw WebSockets work.** I verified empirically that a `Upgrade: websocket` request traverses the HF edge proxy and reaches the container ([§1.1](#11-verified-websocket-upgrades-reach-the-container)). A 20 Hz push is not a problem.
+| **F1** | **WebSockets work, and 20 Hz is comfortable.** Measured through the real HF edge: 400/400 frames round-tripped, **0% loss, p50 RTT 32.6 ms, max 48.8 ms**. | No blocker. [§1](#1-websockets) |
+| **F2** | **The Space must be made public (or "protected").** A **private** Space returns **404** to everyone but the owner/collaborators — the *running app*, not just the source. | **Blocker for multiplayer.** [§9](#9-private-vs-public) |
+| **F3** | **Classic persistent storage is gone.** HF now documents `suggested_storage` as *"The persistent storage feature is no longer available so this setting will be ignored."* Disk is **ephemeral**; persistence is now an attached **Storage Bucket**. | The Space's current `ln -s /data data` is almost certainly pointing at ephemeral disk. [§4](#4-persistent-storage) |
+| **F4** | **Free hardware sleeps after 48 h idle**, and in-memory state dies on sleep, on every push (rebuild), and on any crash. | Long matches need snapshot + resume. [§3](#3-hardware--lifecycle) |
+| **F5** | **Creating** a Docker Space now requires a paid plan (PRO for personal accounts). The Space already exists, so we are overwriting, not creating — but **do not delete it**, and avoid `hub-sync`, whose first step is `hf repo create`. | [§3.1](#31-the-paid-plan-caveat), [§7](#7-deploying-from-github-actions) |
+| **F6** | `node:22` images **already ship a UID-1000 user** named `node`. The HF-documented `RUN useradd -m -u 1000 user` **fails** on them. | Dockerfile must not copy the Python recipe blindly. [§8](#8-the-dockerfile) |
 
 ---
 
-## 1. WebSockets on HF Spaces
+## 1. WebSockets
 
-### 1.1 Verified: WebSocket upgrades reach the container
+### 1.1 Verified end-to-end, not inferred
 
-There is **no page in the HF docs that states "WebSockets are supported"** in so many words. So I tested it directly against a live, running public Docker Space (`Almaatla/private-room`, a FastAPI/uvicorn app with no WebSocket route):
+There is **no HF documentation page that says "WebSockets are supported."** So I tested it, and I want to record the false negative first because it is a trap.
+
+A raw `curl` upgrade probe against `Almaatla/private-room` returns **403** — on the real route *and* on a nonsense path:
 
 ```console
-$ curl -sS -o /dev/null -D - --http1.1 \
-    -H "Connection: Upgrade" -H "Upgrade: websocket" \
-    -H "Sec-WebSocket-Version: 13" \
-    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+$ curl -sS -o /dev/null -D - --http1.1 -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
     https://almaatla-private-room.hf.space/ws
-
 HTTP/1.1 403 Forbidden
-Date: Sun, 30 Aug 2026 16:49:01 GMT
-Connection: keep-alive
 x-proxied-host: http://10.112.58.9
 x-proxied-replica: uxm7fnh3-hqx78
 x-proxied-path: /ws
 ```
 
-Two things are proven by this response:
+That 403 is **not** the edge blocking WebSockets. Reading the app source (`hf://spaces/Almaatla/private-room/app.py`) explains it: the handler calls `websocket.close(code=1008, reason="chat_id required")` **before** `websocket.accept()` when the `chat_id` query parameter is missing, and Starlette renders a pre-accept close as an HTTP 403 handshake rejection. My probe simply omitted the parameter.
 
-1. **The upgrade request was forwarded to the container.** The `x-proxied-host` / `x-proxied-replica` / `x-proxied-path` headers are added by the HF edge *when it proxies to the app*. A proxy-level rejection would not carry them. The `403` is Starlette's own reply for a WebSocket handshake against an unrouted path — i.e. the request arrived as an ASGI `websocket` scope.
-2. **The edge downgrades to HTTP/1.1 for the upgrade.** Note `HTTP/1.1 403` here versus `HTTP/2 404` for the same path over plain GET (see [§10.2](#102-http2-at-the-edge)). That is exactly the behaviour of a WebSocket-capable reverse proxy.
+With a **real WebSocket client** (Node 22's built-in `WebSocket`) and the required parameter, the handshake succeeds:
 
-Corroborating evidence from live Spaces:
-
-- `langtech-innovation/WhisperLiveKitDiarization` is a public Docker Space whose README describes *"A FastAPI-based WebSocket server that receives streamed audio data, processes it in real time, and returns transcriptions to the frontend"* — continuous bidirectional binary streaming, on Spaces. It also uses `app_port: 8000`. — <https://huggingface.co/spaces/langtech-innovation/WhisperLiveKitDiarization/blob/main/README.md>
-- HF's own Panel guide instructs users to pass `allow-websocket-origin` *"to enable the connection to the server's websocket"* — HF documenting a WebSocket app on Spaces. — <https://huggingface.co/docs/hub/spaces-sdks-docker-panel>
-- The user's own `Almaatla/WebSocketChat` Docker Space (private, uvicorn on 7860) is prior art in this exact account.
-
-**Verdict: raw WebSockets on a Docker Space are fine. Use `wss://`, never `ws://`.**
-
-### 1.2 Client-side URL
-
-Connect to the Space's own origin, not `huggingface.co`:
-
-```js
-const ws = new WebSocket(`wss://${location.host}/ws`);
+```console
+$ node ws-test.mjs 'wss://almaatla-private-room.hf.space/ws?chat_id=sc-probe&name=probe'
+[353ms] OPEN protocol="" ext="permessage-deflate"
+[359ms] MSG#1 len=99 {"type": "system", ... "message": "probe joined (users=1)"}
 ```
 
-The Space is served from the root of `https://<space-subdomain>.hf.space` — *"Your space is always served from the root of this subdomain."* — <https://huggingface.co/docs/hub/spaces-embed#direct-url>. For `Almaatla/SpaceCities` that is `https://almaatla-spacecities.hf.space`.
+**Control:** the same script against `wss://echo.websocket.org/` and `wss://ws.postman-echo.com/raw` also opened and held, proving my sandbox egress is not the variable.
 
-> **Gotcha:** when a Space is viewed inside the `huggingface.co/spaces/...` page it runs in an **iframe** whose `location.host` is already the `.hf.space` subdomain, so the snippet above is correct in both contexts. Do **not** hard-code `ws://` — mixed content will be blocked. A recurring forum failure mode is exactly this: *"my mistake was to use `ws://` instead of `wss://`"* — <https://discuss.huggingface.co/t/fastapi-websocket-returns-http-404-on-spaces/159865>
+Two details worth keeping:
 
-### 1.3 Timeouts, message rate and size — the honest picture
+- **`permessage-deflate` is negotiated.** Per-message compression is on by default here. For a 20 Hz binary delta stream this is usually a *win* on bandwidth but costs CPU per frame on a 2-vCPU box. If frames are already compact binary, consider disabling it server-side and measuring.
+- **The edge downgrades to HTTP/1.1 for the upgrade** while serving normal pages over HTTP/2 (see [§10.3](#103-http2)). That is exactly how a WebSocket-capable reverse proxy behaves.
 
-| Question | Answer |
-|---|---|
-| Documented idle/proxy timeout for WS? | **[UNVERIFIED]** — HF publishes no number. |
-| Documented max message size? | **[UNVERIFIED]** — none published. |
-| Documented max connection duration? | **[UNVERIFIED]** — none published. |
-| Documented max concurrent connections? | **[UNVERIFIED]** — none published. |
+### 1.2 Measured: 20 Hz is fine
 
-What I can say with evidence:
+Round-trip test through the live edge — 400 messages at 20 Hz (50 ms interval), echoed back by the server's broadcast:
 
-- **A 20 Hz server push is never idle**, so any idle-timeout the edge may impose (commonly 60–100 s on CDN-fronted proxies) cannot fire on a live match. The risk is confined to *lobby* / *spectator* / *paused* connections. **Mitigation: send an application-level ping every ~20–30 s on every socket, in both directions**, and treat a missed pong as a disconnect. This is cheap insurance and standard practice.
-- There *is* circumstantial evidence of proxy-level timeout sensitivity for long-lived connections: HF's Shiny-for-R guide requires the development build of `httpuv` because it *"resolves an issue with app timeouts on Hugging Face"* — <https://huggingface.co/docs/hub/spaces-sdks-docker-shiny>. That is an R-stack quirk, not a documented WS limit, but it tells you the edge is opinionated about long-held sockets.
-- A 12 MB POST body passed through the edge to the container untouched (verified, [§10.4](#104-request-body-size)), so there is no aggressive small body cap. Game deltas at 20 Hz are kilobytes; this is a non-issue.
-- **Design guidance:** at 20 Hz with N players, keep per-tick payloads small (binary or compact JSON deltas, not full-state snapshots). This is good practice regardless of HF; it also keeps you far away from any undocumented ceiling.
+```
+sent=400  echoed=400  lost=0 (0.0%)
+RTT ms: p50=32.6  p90=33.2  p99=36.6  max=48.8
+```
 
-### 1.4 Fallbacks, if WS ever misbehaves
+Zero loss, and jitter under 20 ms across the whole run. **A 20 Hz authoritative push is not at risk from the transport.** The tight p50/p99 spread (32.6 → 36.6 ms) suggests the edge is not batching or throttling small frames.
 
-- **SSE (`text/event-stream`) works and is HF's own transport.** HF documents streaming Space responses with `curl -N` returning `event: complete / data: ...` — <https://huggingface.co/docs/hub/spaces-api-endpoints#queue-based-api-recommended> — and the Hub itself streams Space logs/events/metrics over SSE — <https://huggingface.co/docs/hub/spaces-gpus#streaming>. SSE is server→client only, so you'd need `POST` for client→server input: roughly 2× the round trips and no ordering guarantee between the two channels. Acceptable for a fallback, poor as a primary for an RTS.
-- **Long-poll** works but is the worst option at 20 Hz — one request per tick per player.
-- **Browser connection limits are relaxed here** because the edge speaks HTTP/2 ([§10.2](#102-http2-at-the-edge)), which multiplexes; the classic 6-connections-per-host cap that cripples SSE over HTTP/1.1 does not bite.
+> Caveat: this measures *one* client against a trivial broadcast app on a warm Space. It does not measure N concurrent players or the CPU cost of the SpaceCities simulation. See [§3.2](#32-what-2-vcpu-means-for-a-20-hz-authoritative-sim).
 
-**Recommendation:** WebSocket primary, SSE+POST fallback only if telemetry shows real-world upgrade failures. Do not build the fallback speculatively.
+### 1.3 Idle timeout and keep-alive
+
+**[PARTIALLY VERIFIED]** I ran a fully idle WebSocket (no application traffic in either direction) against the live Space. Result is recorded in [§11](#11-what-i-could-not-verify) — at the time of writing it had survived the observation window without being closed.
+
+HF publishes **no documented WebSocket idle timeout**. Given that, treat the timeout as unknown-and-hostile and implement keep-alive regardless:
+
+- **Send a ping every 20–30 s.** This is the standard interval for surviving reverse-proxy idle timeouts, which commonly default to 60 s. — <https://websocket.org/guides/troubleshooting/timeout/>
+- Use **RFC 6455 protocol-level ping/pong**, not an application JSON heartbeat, where possible. Node's `ws` library does this with `ws.ping()`; the browser has no API to send a protocol ping, so the **server** must ping and the browser auto-replies with a pong.
+- Add **client-side dead-connection detection**: if no frame arrives for ~2 ping intervals, tear down and reconnect rather than waiting for a TCP timeout.
+
+For SpaceCities specifically, a 20 Hz push means the connection is **never idle during a match**, so the idle timeout only matters in lobby/menu/paused states. That is where a keep-alive is genuinely needed.
+
+**Recommended:** server pings every 25 s; client reconnects with exponential backoff and resumes from a server-authoritative snapshot.
+
+### 1.4 Message size and rate
+
+**[UNVERIFIED]** HF documents no WebSocket frame-size or message-rate limit. I did not empirically find the ceiling. Practical guidance:
+
+- Keep per-tick deltas well under **64 KB**; that is comfortably inside any plausible proxy buffer.
+- If a full-state snapshot is large, chunk it rather than sending one multi-megabyte frame.
+- The 20 Hz test above shows no rate limiting at 20 messages/second/connection.
 
 ---
 
-## 2. Port & networking
+## 2. Port and networking
 
-### 2.1 The listening port
+**Listen on `0.0.0.0:7860`.** Confirmed in two places:
 
-- **Default is `7860`.** *"You can also change the default exposed port `7860` by setting `app_port: 7860`."* — <https://huggingface.co/docs/hub/spaces-sdks-docker#setting-up-docker-spaces>
-- Config reference: **`app_port` : _int_ — "Port on which your application is running. Used only if `sdk` is `docker`. Default port is `7860`."** — <https://huggingface.co/docs/hub/spaces-config-reference>
-- **Bind to `0.0.0.0`, not `127.0.0.1`.** Every official HF Dockerfile example does (`--host 0.0.0.0 --port 7860`) — <https://huggingface.co/docs/hub/spaces-sdks-docker-first-demo>. The current SpaceCities Space README has **no** `app_port` key and works on 7860, confirming the default empirically.
+- *"You can also change the default exposed port `7860` by setting `app_port: 7860`."* — <https://huggingface.co/docs/hub/spaces-sdks-docker>
+- `app_port` : *int* — *"Port on which your application is running. Used only if `sdk` is `docker`. Default port is `7860`."* — <https://huggingface.co/docs/hub/spaces-config-reference>
 
-**Decision: keep 7860 and omit `app_port`.** Adding `app_port: 7860` is harmless and self-documenting; I'd include it for clarity. Read the port from `process.env.PORT` with a `7860` default so local dev and the Space agree.
+Bind to `0.0.0.0`, **not** `127.0.0.1` — the HF-documented Dockerfile uses `--host 0.0.0.0`. — <https://huggingface.co/docs/hub/spaces-sdks-docker-first-demo>
 
-### 2.2 Only one port is exposed to the internet
+### 2.1 Only one port is exposed — confirmed
 
 > *"Internally you could have as many open ports as you want. For instance, you can install Elasticsearch inside your Space and call it internally on its default port 9200. If you want to expose apps served on multiple ports to the outside world, a workaround is to use a reverse proxy like Nginx to dispatch requests from the broader internet (on a single port) to different internal ports."*
-> — <https://huggingface.co/docs/hub/spaces-sdks-docker#setting-up-docker-spaces>
+> — <https://huggingface.co/docs/hub/spaces-sdks-docker>
 
-**Exactly one port is reachable from outside.** So for SpaceCities:
+**This confirms the expectation: exactly one externally reachable port.** Static assets, the WebSocket endpoint, and `/mcp` must all be multiplexed behind port 7860 by our own Node server. That is exactly what `Almaatla/private-room` does (FastAPI serving `/`, `@app.websocket("/ws")`, and `app.mount("", _mcp_app)` for `/mcp` — all on 7860), and I confirmed `/mcp` responds on the same host and port:
 
-- **Do not** put the game server and the MCP server on different ports.
-- **Do** multiplex by path in a single Node HTTP server — e.g. `/` → static assets, `/ws` → game WebSocket, `/mcp` → MCP streamable-HTTP endpoint, `/healthz` → liveness. Since the game is zero-dependency Node, a single `http.createServer` with a path switch plus a WebSocket upgrade handler is the natural shape and needs no nginx.
+```console
+$ curl -sS -o /dev/null -D - https://almaatla-private-room.hf.space/mcp
+HTTP/2 401
+server: uvicorn
+x-proxied-path: /mcp
+```
 
-### 2.3 Outbound networking is restricted
+(The 401 is that app's own API-key middleware, not an HF restriction — proof the request reached the app.)
+
+### 2.2 Outbound networking
 
 > *"If your Space needs to make any network requests, you can make requests through the standard HTTP and HTTPS ports (80 and 443) along with port 8080. Any requests going to other ports will be blocked."*
 > — <https://huggingface.co/docs/hub/spaces-overview#networking>
 
-Irrelevant for a self-contained game, but it rules out e.g. an external Postgres on 5432 or a Redis on 6379 later. Plan persistence around HTTPS-reachable services only.
+Irrelevant for us today (SpaceCities makes no outbound calls), but it rules out ever adding an external database on a nonstandard port.
+
+### 2.3 Deriving the WebSocket URL in the browser
+
+Do **not** hardcode the host. The Space is served both at `https://<owner>-<space>.hf.space` and inside an iframe on the Space page. Derive it:
+
+```js
+const wsUrl = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+```
+
+Always `wss://` in practice — the edge is HTTPS-only, and a `ws://` URL from an HTTPS page is blocked as mixed content.
+
+At runtime the container also gets `SPACE_HOST` (e.g. `osanseviero-i-like-flan.hf.space`) if the server needs to know its own public hostname. — <https://huggingface.co/docs/hub/spaces-overview#built-in-environment-variables>
 
 ---
 
-## 3. Hardware & lifecycle
+## 3. Hardware and lifecycle
 
-### 3.1 The paid-plan caveat
+### 3.1 Free tier
 
-HF now gates compute-backed Spaces behind a subscription:
+| Hardware | CPU | Memory | Disk | Hourly Price |
+|---|---|---|---|---|
+| **CPU Basic** | **2 vCPU** | **16 GB** | **50 GB** | **Free** |
+| CPU Upgrade | 8 vCPU | 32 GB | 50 GB | $0.03 |
+
+— <https://huggingface.co/docs/hub/spaces-gpus#hardware-specs>
+
+Also stated as: *"Each Spaces environment is limited to 16GB RAM, 2 CPU cores and 50GB of (not persistent) disk space by default."* — <https://huggingface.co/docs/hub/spaces-overview#hardware-resources>
+
+Note the disk is explicitly described as **"(not persistent)"**.
+
+#### The paid-plan caveat
 
 > *"Static Spaces are free for everyone. Gradio and Docker Spaces run on compute and require a paid plan to create: PRO for personal accounts, Team or Enterprise for organizations."*
 > — <https://huggingface.co/docs/hub/spaces-overview#creating-a-new-space>
->
-> *"CPU Basic has no hourly cost, but creating a new Space that runs on compute (Gradio or Docker) requires a paid plan."*
-> — <https://huggingface.co/docs/hub/spaces-gpus#cpu>
 
-I confirmed via the authenticated Hub API that the account is **not** on PRO:
+The restriction is worded against **creating**. `Almaatla/SpaceCities` already exists as a Docker Space, so overwriting its contents should be unaffected. Two consequences:
 
-```json
-{"account":{"name":"Almaatla","is_pro":false}, "organizations":[{"name":"OrganizedProgrammers","role":"admin"}]}
-```
+1. **Do not delete the Space** to "start clean." You may not be able to recreate it.
+2. **Do not use `huggingface/hub-sync`**, whose documented mechanism is *"`hf repo create` + `hf upload`"* — the create step is the risky one. Use a plain git push instead ([§7](#7-deploying-from-github-actions)).
 
-Both doc sentences are worded against **creating**, and `Almaatla/SpaceCities` already exists (`sdk: docker`, `private: true`, last modified 2026-02-23). So overwriting it should be fine. **Consequences to plan around:**
+### 3.2 What 2 vCPU means for a 20 Hz authoritative sim
 
-- **Never delete the Space.** You may not be able to recreate it.
-- **Prefer a workflow that pushes to the existing repo** over one that creates it. `huggingface/hub-sync` runs `hf repo create` — idempotent on an existing repo, but it is the one step that could hit the paywall. The `git push` variant ([§7.3](#73-alternative-direct-git-force-push)) touches no creation API at all, which makes it the **safer** choice for this account.
-- PRO is **$9/month** (<https://huggingface.co/pricing>) and would additionally unlock *protected* visibility, custom sleep time, custom domains and Dev Mode — see [§9](#9-private-vs-public).
-- **[UNVERIFIED]** Whether a free account can still *push to and rebuild* an existing Docker Space. The docs only speak about creation. This is the single highest-value thing to test early: push a trivial commit and watch it build before investing in the port.
+**[UNVERIFIED — needs a load test]** 2 vCPU / 16 GB is generous on RAM and thin on CPU. Node is single-threaded for the simulation, so effectively **one core runs the 20 Hz tick loop** and the second absorbs I/O, TLS, and `permessage-deflate`. A 50 ms budget per tick is a lot for an RTS at small player counts, but the serialize-and-fan-out cost grows with players × entities. Measure before promising a player cap.
 
-### 3.2 Free-tier hardware
+### 3.3 Sleep and idle behaviour — the important part
 
-> | **Hardware** | **CPU** | **Memory** | **Disk** | **Hourly Price** |
-> |---|---|---|---|---|
-> | CPU Basic | 2 vCPU | 16 GB | 50 GB | Free! |
->
-> — <https://huggingface.co/docs/hub/spaces-gpus#cpu>
-
-Also: *"Each Spaces environment is limited to 16GB RAM, 2 CPU cores and 50GB of (not persistent) disk space by default."* — <https://huggingface.co/docs/hub/spaces-overview#hardware-resources>
-
-**2 vCPU / 16 GB is generous for a 20 Hz authoritative sim in Node.** Node is single-threaded, so the sim gets ~1 core and the second core absorbs I/O and GC. 16 GB means memory is a non-constraint; the binding constraint will be the 50 ms tick budget on one core.
-
-At runtime the container also gets `CPU_CORES` and `MEMORY` env vars — <https://huggingface.co/docs/hub/spaces-overview#built-in-environment-variables> — useful for sizing worker pools or logging.
-
-### 3.3 Sleeping — this determines the whole persistence design
-
-> *"If your Space runs on the default `cpu-basic` hardware, it will go to sleep if inactive for more than a set time (currently, **48 hours**). Anyone visiting your Space will restart it automatically. If you want your Space never to deactivate or if you want to set a custom sleep time, **you need to upgrade to paid hardware**."*
+> *"If your Space runs on the default `cpu-basic` hardware, it will go to sleep if inactive for more than a set time (currently, 48 hours). Anyone visiting your Space will restart it automatically."*
+> *"If you want your Space never to deactivate or if you want to set a custom sleep time, you need to upgrade to paid hardware."*
 > — <https://huggingface.co/docs/hub/spaces-gpus#sleep-time>
 
-Reinforced by the `huggingface_hub` guide: *"if you are using a 'cpu-basic' hardware, you cannot configure a custom sleep time. Your Space will automatically be paused after 48h of inactivity."* — <https://huggingface.co/docs/huggingface_hub/guides/manage-spaces>
+And: *"Spaces running on free hardware are suspended automatically if they are not used for an extended period of time (e.g. two days). Upgraded Spaces run indefinitely by default, even if there is no usage."* — <https://huggingface.co/docs/hub/spaces-gpus#billing>
 
-And from billing: *"Spaces running on free hardware are suspended automatically if they are not used for an extended period of time (e.g. two days)."* — <https://huggingface.co/docs/hub/spaces-gpus#billing>
+So, on free hardware:
 
-**What happens to in-memory state:** it is destroyed. The container is torn down. Beyond sleep, state is *also* lost on:
+| Event | Trigger | In-memory state |
+|---|---|---|
+| **Sleep** | 48 h with no traffic | **Lost** |
+| **Wake** | any visitor | fresh process, empty memory |
+| **Rebuild** | every git push | **Lost** |
+| **Crash / restart** | app failure | **Lost** |
+| **Pause** | manual, owner only | **Lost**; owner must restart |
 
-- **every git push** — *"Each time a new commit is pushed, the Space will automatically rebuild and restart"* — <https://huggingface.co/docs/hub/spaces-overview#creating-a-new-space>
-- **every settings change** — *"Any change in your Space configuration (secrets or hardware) will trigger a restart of your app."* — <https://huggingface.co/docs/huggingface_hub/guides/manage-spaces>
-- manual pause/restart, factory reboot, and crashes (*"If a running Space starts to fail, it will be automatically suspended"* — <https://huggingface.co/docs/hub/spaces-gpus#billing>).
+**48 h of idle is not the threat.** The threats are (a) *every deploy restarts the game*, and (b) a crash wipes every match. Neither is fixed by upgrading hardware.
 
-I observed this live: three Spaces I probed returned an immediate `HTTP/2 503` with no `x-proxied-*` headers — sleeping, nothing behind the proxy. A sleeping Space answers `503` on its `.hf.space` subdomain; it is the *Space page* visit that wakes it.
+**Cold start.** **[UNVERIFIED]** HF does not publish a cold-start number. What is documented is the *ceiling*: `startup_duration_timeout` *"is the maximum time your Space is allowed to start before it times out and is flagged as unhealthy. Defaults to 30 minutes."* — <https://huggingface.co/docs/hub/spaces-config-reference>. For a zero-dependency Node app with no model download, container start should be seconds, but the wake-from-sleep path also has to schedule and pull the image. Expect a visitor hitting a sleeping Space to wait — plan a loading state, not an instant connect.
 
-> **Design consequence — this is the important one.** Treat every match as **crash-tolerant**, not merely long-lived. Snapshot authoritative match state to disk on a cadence (say every 5–10 s, plus on every significant transition) and restore on boot. Give each match an id and let clients rejoin by id after a reconnect. Without this, an unlucky `git push` mid-match destroys every game in progress.
+### 3.4 Always-on options and cost
 
-### 3.4 Cold start
+- **CPU Upgrade: $0.03/hour.** Running continuously that is **~$0.72/day, ~$21.90/month** (730 h). *"Upgraded Spaces run indefinitely by default."*
+- **Plus the PRO plan** for the account, since compute Spaces are a paid-plan feature.
+- Billing is *"computed by the minute: you get charged for every minute the Space runs on the requested hardware, regardless of whether the Space is used"*, and *"there is no cost during build."* — <https://huggingface.co/docs/hub/spaces-gpus#billing>
+- To stop billing: switch back to CPU Basic, or **pause** the Space (*"Paused time is not billed"*).
+- On upgraded hardware you can also set a **custom sleep time** so it idles (and stops billing) when unused, waking on the next visitor.
 
-**[UNVERIFIED — no published number.]** What is documented:
+**Recommendation:** stay on **CPU Basic** and engineer for restart-survival. Paying ~$22/month buys "no 48 h sleep" but does **not** buy "matches survive a deploy or a crash" — that requires snapshotting either way. Build the snapshot; upgrade only if idle-sleep proves to be a real user complaint.
 
-- `startup_duration_timeout` defaults to **30 minutes** — *"the maximum time your Space is allowed to start before it times out and is flagged as unhealthy"* — <https://huggingface.co/docs/hub/spaces-config-reference>. That is a ceiling, not an expectation.
-- A wake from sleep re-provisions a VM and starts the container. There is no rebuild (the image is cached), so cold start ≈ VM provisioning + `node server/index.js`. For a zero-dependency Node app, process start is milliseconds; the VM is the cost.
-- Practical expectation: **tens of seconds**, not minutes. Measure it once deployed; do not design around a guess.
+### 3.5 Replicas — do not use
 
-**Mitigation for players:** the first visitor after a sleep will hit a `503` on the raw subdomain. Serve a friendly retry/loading page and have the client retry the WebSocket with backoff.
+> *"You can scale your Space horizontally by requesting multiple replicas... Replicas are only available for upgraded (paid) hardware."*
+> — <https://huggingface.co/docs/hub/spaces-gpus#replicas>
 
-### 3.5 "Always on"
-
-There is no free always-on option.
-
-- **Upgrade to CPU Upgrade — $0.03/hour** (8 vCPU / 32 GB) — <https://huggingface.co/docs/hub/spaces-gpus#cpu>. *"Upgraded Spaces run indefinitely by default, even if there is no usage."* — <https://huggingface.co/docs/hub/spaces-gpus#billing>. That is ~**$21.60/month** if left running, billed by the minute while `Starting` or `Running`, and **not** billed during build or while paused.
-- **Do not build an external keep-alive pinger.** A user who pinged `/health/ready` every 2 minutes from a Cloudflare Worker had the Space **paused for abuse** — <https://discuss.huggingface.co/t/keepalive-ping-get-health-ready-every-2-minutes/176238>. (Community thread, not staff guidance — but the outcome is real and the downside is losing the Space.)
-
-**Recommendation:** ship on free CPU Basic with proper snapshot/restore. 48 h of idle tolerance is plenty for a game people actually play; if it gets traction, $0.03/h removes the problem entirely.
+**Actively harmful for us.** An authoritative simulation with in-memory match state cannot be load-balanced across replicas without shared state and sticky sessions. Keep `replicas: 1`.
 
 ---
 
 ## 4. Persistent storage
 
-### 4.1 The old model is gone
+### 4.1 The model changed — this is the biggest surprise
 
-> **`suggested_storage`** … *"**The persistent storage feature is no longer available so this setting will be ignored.**"*
+The old "persistent storage" tiers are **retired**:
+
+> **`suggested_storage`** — *"The persistent storage feature is no longer available so this setting will be ignored."*
 > — <https://huggingface.co/docs/hub/spaces-config-reference>
 
-The paid Small/Medium/Large `/data` tiers are no longer the mechanism. The replacement is **Storage Buckets attached as volumes**.
+And the storage page is now titled *"Disk usage on Spaces"*:
 
-### 4.2 Everything else is ephemeral
-
-> *"Every Space comes with a small amount of disk storage. This disk space is **ephemeral**, meaning its content will be lost if your Space restarts or is stopped."*
+> *"Every Space comes with a small amount of disk storage. This disk space is **ephemeral**, meaning its content will be lost if your Space restarts or is stopped. If you need to persist data with a longer lifetime than the Space itself, you can attach one or more Storage Buckets as volumes."*
 > — <https://huggingface.co/docs/hub/spaces-storage>
->
-> *"The data written on disk is lost whenever your Docker Space restarts. To persist data across restarts, you can attach a Storage Bucket to your Space."*
+
+The Docker page agrees:
+
+> *"The data written on disk is lost whenever your Docker Space restarts. To persist data across restarts, you can attach a Storage Bucket to your Space. At the moment, `/data` volume is only available at runtime, i.e. you cannot use `/data` during the build step of your Dockerfile."*
 > — <https://huggingface.co/docs/hub/spaces-sdks-docker#data-persistence>
 
-The 50 GB container disk survives nothing. Anything not in a mounted bucket is gone on restart, rebuild, sleep or crash.
+### 4.2 What this means for `/data`
 
-### 4.3 How `/data` works now
+The current Space Dockerfile does:
 
-> *"Storage Buckets are the recommended way to persist data in your Space. Attached buckets are mounted into the Space container at the path you specify, making their contents available as local files at runtime. Buckets can be attached when creating a Space, from the Space settings UI, or programmatically… They can be mounted read-write (the default) or read-only."*
-> — <https://huggingface.co/docs/hub/spaces-storage#attached-volumes>
-
-Buckets are S3-like, **non-versioned and mutable**, built on Xet — <https://huggingface.co/docs/hub/storage-buckets>. That suits snapshot files far better than the old "commit to a dataset repo" trick.
-
-**Concrete recipe** (HF's own, from the Label Studio guide — <https://huggingface.co/docs/hub/spaces-sdks-docker-label-studio#enable-persistence-with-hf-storage-buckets>):
-
-```bash
-# 1. create the bucket
-hf buckets create Almaatla/spacecities-data --private
-
-# 2. attach it at /data  (UI: Space Settings → Storage Buckets, mount path /data)
-hf spaces volumes set Almaatla/SpaceCities -v hf://buckets/Almaatla/spacecities-data:/data
-
-# 3. factory rebuild so the mount takes effect
-hf spaces restart Almaatla/SpaceCities --factory-reboot
+```dockerfile
+RUN mkdir /data && chmod 777 /data
+RUN rm -rf data && ln -s /data data
 ```
 
-Or in Python — <https://huggingface.co/docs/huggingface_hub/guides/manage-spaces#mount-volumes-in-your-space>:
+**[UNVERIFIED but strongly implied]** With no bucket attached, that `/data` is a plain directory on the **ephemeral 50 GB layer** — it looks persistent and is not. The `RUN mkdir /data` in the build even guarantees the path exists, masking the problem. **Do not inherit this pattern and assume durability.**
 
-```python
-from huggingface_hub import HfApi, Volume
-api = HfApi()
-api.set_space_volumes(
-    "Almaatla/SpaceCities",
-    volumes=[Volume(type="bucket", source="Almaatla/spacecities-data", mount_path="/data")],
-)
-api.restart_space("Almaatla/SpaceCities", factory_reboot=True)
-```
+**The rest of the filesystem is confirmed ephemeral** — stated three times across the docs above, and the hardware table calls the 50 GB *"(not persistent)"*.
 
-> ⚠️ `set_space_volumes` **replaces** the full volume list: *"Setting volumes replaces any previously mounted volumes."* Read `api.get_space_runtime(...).volumes` first if anything is already attached.
-> ⚠️ Only buckets support **read-write**: *"Models, datasets, and Spaces are always mounted as read-only. Only storage buckets support read-write mounts."*
+### 4.3 Storage Buckets — the current answer
 
-### 4.4 Free tier and size
-
-> *"Buckets are available to all users and organizations."* … *"As for other repositories, buckets are free to create and have a free storage allowance."*
+> *"Storage Buckets are a repo type on the Hugging Face Hub providing S3-like object storage... **non-versioned** and **mutable**, designed for use cases where you need simple, fast storage."*
+> *"Buckets are available to all users and organizations."*
+> *"As for other repositories, buckets are free to create and have a free storage allowance."*
 > — <https://huggingface.co/docs/hub/storage-buckets>
 
-A **free user gets 100 GB of private storage** — <https://huggingface.co/docs/hub/storage-limits#storage-plans>. Match snapshots are kilobytes. **A private bucket is comfortably free for this project.**
+> *"Attached buckets are mounted into the Space container at the path you specify, making their contents available as local files at runtime. Buckets can be attached when creating a Space, from the Space settings UI, or programmatically... They can be mounted read-write (the default) or read-only."*
+> — <https://huggingface.co/docs/hub/spaces-storage#attached-volumes>
 
-### 4.5 Survival matrix
+So the path forward for durable match state:
 
-| Event | Container disk | Mounted bucket |
-|---|---|---|
-| Restart / sleep→wake | ❌ lost | ✅ survives |
-| Rebuild (git push) | ❌ lost | ✅ survives |
-| Factory reboot | ❌ lost | ✅ survives |
-| Space deleted | ❌ | ✅ (bucket is a separate repo) |
+1. Create a bucket (`hf buckets create SpaceCities-state`, or the UI at <https://huggingface.co/new-bucket>).
+2. Attach it to the Space **at mount path `/data`**, read-write, from Space settings.
+3. Then — and only then — is `/data` durable across restart/rebuild/sleep.
+4. **`/data` is runtime-only.** Never `COPY` into it or read it in a `RUN` step.
 
-Buckets are a distinct repo type with their own lifecycle, so they outlive the Space. Note the flip side: *"deletions are immediate and permanent — there is no way to recover a deleted file."*
+**Survival matrix** (with a bucket attached at `/data`):
 
-### 4.6 Build-time restriction
+| Event | `/data` (bucket) | Rest of filesystem | In-memory |
+|---|---|---|---|
+| Restart / wake from sleep | **Survives** | Reset to image | Lost |
+| Rebuild (git push) | **Survives** | Rebuilt from Dockerfile | Lost |
+| Factory reset | **[UNVERIFIED]** — bucket is a separate repo, so it should survive; the Space's own disk does not | Reset | Lost |
+| Bucket detached/deleted | Gone permanently (*"deletions are immediate and permanent — there is no way to recover a deleted file"*) | — | — |
 
-> *"At the moment, `/data` volume is **only available at runtime**, i.e. you cannot use `/data` during the build step of your Dockerfile."*
-> — <https://huggingface.co/docs/hub/spaces-sdks-docker#data-persistence>
+**Caveat:** a bucket is object storage, not a POSIX filesystem. **[UNVERIFIED]** how well it tolerates frequent small random writes or `fsync`-heavy patterns. For 20 Hz match state, do **not** write every tick — snapshot periodically (e.g. every 10–30 s and on clean shutdown) and write whole files, not in-place mutations.
 
-So: no seeding `/data` from the Dockerfile. Create directories and default files **at server startup**, idempotently.
-
-### 4.7 Action item on the current Space
-
-The existing Dockerfile does `RUN mkdir /data && chmod 777 /data` and `RUN rm -rf data && ln -s /data data`. Given that classic persistent storage is retired, that `/data` is now **almost certainly a plain ephemeral directory** unless a bucket happens to be attached. **Verify in Space Settings → Storage Buckets (or `hf spaces volumes ls Almaatla/SpaceCities`) before assuming any existing data survives the overwrite — and back up anything in there first.**
+**Alternative:** commit snapshots to a Hub **Dataset** repo, the long-standing pattern HF documents for Space persistence. — <https://huggingface.co/docs/hub/spaces-sdks-docker#data-persistence>
 
 ---
 
-## 5. Secrets & variables
+## 5. Secrets and variables
 
 ### 5.1 Setting them
 
-Space **Settings** page → *Variables and secrets*. — <https://huggingface.co/docs/hub/spaces-overview#managing-secrets>
+Space **Settings** page → add a **variable** or a **secret**.
 
-> *"**Variables** if you need to store non-sensitive configuration values. They are publicly accessible and viewable and will be automatically added to Spaces duplicated from yours. **Secrets** to store access tokens, API keys, or any sensitive values or credentials. They are private and their value cannot be read from the Space's settings page once set. They won't be added to Spaces duplicated from your repository."*
+> *"Use **Variables** if you need to store non-sensitive configuration values. They are publicly accessible and viewable and will be automatically added to Spaces duplicated from yours."*
+> *"Use **Secrets** to store access tokens, API keys, or any sensitive values or credentials. They are private and their value cannot be read from the Space's settings page once set. They won't be added to Spaces duplicated from your repository."*
+> — <https://huggingface.co/docs/hub/spaces-overview#managing-secrets>
 
-Programmatically: `api.add_space_secret(repo_id, key, value)` / `api.add_space_variable(...)` — <https://huggingface.co/docs/huggingface_hub/guides/manage-spaces#configure-secrets-and-variables>. Secret values are write-only on read-back.
-
-### 5.2 Build-time vs runtime — the part that bites
+### 5.2 Build time vs runtime — the trap
 
 | | Build time | Runtime |
 |---|---|---|
-| **Variables** | Passed as Docker **`build-arg`s** — declare with `ARG NAME` in the Dockerfile | Injected as env vars |
-| **Secrets** | **NOT** env vars and **NOT** build-args. Must be explicitly mounted per-`RUN` | Injected as env vars |
+| **Variables** | Passed as Docker **`build-arg`s**; read with `ARG NAME` | Injected as environment variables |
+| **Secrets** | **NOT** environment variables. Must be explicitly mounted per-`RUN` | Injected as environment variables |
 
-> *"Variables are passed as `build-arg`s when building your Docker Space."*
-> *"In Docker Spaces, the secrets management is different for security reasons. Once you create a secret in the Settings tab, you can expose the secret by adding the following line in your Dockerfile: … you can read it at build time by mounting it to a file, then reading it with `$(cat /run/secrets/SECRET_EXAMPLE)`."*
-> — <https://huggingface.co/docs/hub/spaces-sdks-docker#secrets-and-variables-management>
+— <https://huggingface.co/docs/hub/spaces-sdks-docker#secrets-and-variables-management>
+
+**Explicitly: secrets are not ambiently available at build time.** To read one during build you must opt in per instruction:
 
 ```dockerfile
-# Build-time secret access — the ONLY way. Not available as $ENV during build.
 RUN --mount=type=secret,id=SECRET_EXAMPLE,mode=0444,required=true \
-    some-command --token "$(cat /run/secrets/SECRET_EXAMPLE)"
+    some-command "$(cat /run/secrets/SECRET_EXAMPLE)"
 ```
 
-> **Takeaway for SpaceCities:** we have no build step and need no build-time secrets. Read everything at runtime. Do not add `ARG`/`ENV` lines for secrets — they'd bake values into image layers.
+**For SpaceCities this is a non-issue and should stay that way.** We have no build step and no build-time secret need. Read everything at runtime.
 
-### 5.3 Reading them in Node
+### 5.3 Reading them from Node
 
-Plain `process.env`. Nothing HF-specific:
+Plain `process.env` — nothing HF-specific:
 
 ```js
-// config.js — read at runtime; never at import-time-with-throw, or a missing
-// secret turns into a boot loop and an auto-suspended Space.
-export const config = {
-  port:      Number(process.env.PORT ?? 7860),
-  host:      process.env.HOST ?? '0.0.0.0',
-  dataDir:   process.env.DATA_DIR ?? '/data',
-  mcpToken:  process.env.MCP_TOKEN ?? null,      // Space *secret*
-  spaceHost: process.env.SPACE_HOST ?? null,     // injected by HF
-  spaceId:   process.env.SPACE_ID ?? null,       // injected by HF
-};
+const port = Number(process.env.PORT ?? process.env.APP_PORT ?? 7860);
+const dataDir = process.env.DATA_DIR ?? '/data';
+const adminKey = process.env.ADMIN_KEY;          // a Space *secret*
+const spaceHost = process.env.SPACE_HOST;        // injected by HF
+if (!adminKey) console.warn('ADMIN_KEY unset — admin endpoints disabled');
 ```
 
-HF injects these automatically at runtime — <https://huggingface.co/docs/hub/spaces-overview#built-in-environment-variables>:
-`SPACE_ID`, `SPACE_HOST` (e.g. `almaatla-spacecities.hf.space`), `SPACE_AUTHOR_NAME`, `SPACE_REPO_NAME`, `SPACE_TITLE`, `SPACE_CREATOR_USER_ID`, `CPU_CORES`, `MEMORY`, `ACCELERATOR`.
+Useful built-ins injected at runtime: `SPACE_ID`, `SPACE_HOST`, `SPACE_AUTHOR_NAME`, `SPACE_REPO_NAME`, `SPACE_TITLE`, `CPU_CORES`, `MEMORY`, `ACCELERATOR`. — <https://huggingface.co/docs/hub/spaces-overview#built-in-environment-variables>
 
-`SPACE_HOST` is the clean way to build absolute URLs (MCP endpoint advertisement, OAuth redirect URIs) without hard-coding the subdomain.
-
-> ⚠️ **Changing a secret or variable restarts the Space** — *"Any change in your Space configuration (secrets or hardware) will trigger a restart of your app."* Every in-flight match dies. Set them once, before launch.
-
-> ⚠️ HF runs a **Secrets Scanner** and warns owners about hard-coded secrets — <https://huggingface.co/docs/hub/spaces-overview#managing-secrets>. Since the Space will be public, this matters.
+> HF runs a **Secrets Scanner** and warns owners when hard-coded secrets are found in a Space. — <https://huggingface.co/docs/hub/spaces-overview#managing-secrets>
 
 ---
 
-## 6. README front-matter / Space config
+## 6. README front matter
 
-Config lives in the YAML block at the top of `README.md` **at the repo root** — <https://huggingface.co/docs/hub/spaces-config-reference>.
+All keys below verified against <https://huggingface.co/docs/hub/spaces-config-reference>.
 
-### 6.1 Recommended block for SpaceCities
+**Ship this exact block** as the top of the Space's `README.md`:
 
 ```yaml
 ---
@@ -357,81 +332,100 @@ colorTo: purple
 sdk: docker
 app_port: 7860
 pinned: false
-license: mit
-short_description: Multiplayer real-time strategy, playable by humans and AI agents.
 header: mini
 fullWidth: true
+short_description: Real-time multiplayer space RTS with an MCP endpoint for agent players.
+license: mit
 tags:
   - game
   - multiplayer
+  - rts
   - websocket
   - mcp
 ---
 ```
 
-### 6.2 Key reference (verbatim from the config reference)
+Why each key:
 
-| Key | Type | Notes |
+| Key | Value | Rationale |
 |---|---|---|
-| `title` | string | Display title. Also surfaces as `SPACE_TITLE` env var. |
-| `emoji` | string | *"Space emoji (emoji-only character allowed)."* |
-| `colorFrom` / `colorTo` | string | Thumbnail gradient. One of `red, yellow, green, blue, indigo, purple, pink, gray`. |
-| `sdk` | string | *"Can be either `gradio`, `docker`, or `static`."* → **`docker`** |
-| **`app_port`** | int | *"Port on which your application is running. **Used only if `sdk` is `docker`. Default port is `7860`.**"* |
-| `pinned` | bool | Keeps the Space at the top of your profile. |
-| `license` | string | Standard SPDX-ish identifier. |
-| `short_description` | string | *"Displayed in the Space's thumbnail."* |
-| `tags` | list | Free-form descriptors. |
-| `header` | string | `mini` or `default`. *"If `header` is set to `mini` the space will be displayed full-screen with a mini floating header."* — **want this for a game.** |
-| `fullWidth` | bool | *"Whether your Space is rendered inside a full-width … or fixed-width column … inside the iframe. Defaults to `true`."* |
-| `disable_embedding` | bool | *"Whether the Space iframe can be embedded in other websites. Defaults to false, i.e. Spaces *can* be embedded."* |
-| `startup_duration_timeout` | string | *"maximum time your Space is allowed to start before it times out and is flagged as unhealthy. Defaults to 30 minutes."* |
-| `custom_headers` | dict | **Only** COEP / COOP / CORP are allowed. All keys and values lowercase. |
-| `base_path` | string | *"For non-static Spaces, initial url to render. Needs to start with `/`."* |
-| `hf_oauth` (+ `hf_oauth_scopes`, `hf_oauth_expiration_minutes`, `hf_oauth_authorized_org`) | — | Sign-in with HF. See [§9.4](#94-optional-hf-oauth-for-identity). |
-| `models` / `datasets` | list | Linked Hub artefacts; auto-parsed from code if omitted. |
-| `suggested_hardware` | string | `cpu-basic`, `cpu-upgrade`, … *"Setting this value will not automatically assign an hardware."* |
-| `suggested_storage` | string | ⚠️ **Ignored — persistent storage feature is retired.** Do not use. |
-| `python_version`, `sdk_version`, `app_file`, `app_build_command`, `preload_from_hub` | — | Gradio/static only. **Not applicable to a Docker Space.** |
+| `title` | `SpaceCities` | Display title. Also surfaces as `SPACE_TITLE` env var. |
+| `emoji` | `🚀` | *"emoji-only character allowed."* |
+| `colorFrom` / `colorTo` | `indigo` / `purple` | Thumbnail gradient. **Allowed values only:** `red, yellow, green, blue, indigo, purple, pink, gray`. |
+| `sdk` | `docker` | *"Can be either `gradio`, `docker`, or `static`."* |
+| `app_port` | `7860` | *"Used only if `sdk` is `docker`. Default port is `7860`."* Explicit is better. |
+| `pinned` | `false` | Whether it stays on top of the profile. |
+| `header` | `mini` | *"If `header` is set to `mini` the space will be displayed full-screen with a mini floating header."* **Right choice for a game.** |
+| `fullWidth` | `true` | Full-width rather than a fixed-width container. Defaults to `true`; explicit for clarity. |
+| `short_description` | … | *"displayed in the Space's thumbnail."* |
+| `license` | `mit` | Match the repo's LICENSE. |
+| `tags` | list | *"List of terms that describe your Space task or scope."* |
 
-### 6.3 Is `app_port` needed?
+**Deliberately omitted:**
 
-**No — 7860 is the default**, and the existing Space runs on 7860 with no `app_port` key. Include it anyway: it is one line, it documents intent, and it prevents a future port change from silently 503-ing.
-
-### 6.4 The front-matter trap
-
-**Whatever deploy mechanism you use overwrites the Space's `README.md` with the GitHub repo's `README.md`.** If the GitHub README has no YAML front-matter, the Space loses `sdk: docker` and **stops building**. The current Space README (`title: Voice Notes`, `sdk: docker`) will be replaced.
-
-→ **Put the block above at the top of the GitHub repo's root `README.md` before the first deploy.** This is the single most likely way to break the first deployment.
+- `suggested_storage` — **retired**; *"no longer available so this setting will be ignored."*
+- `suggested_hardware` — only affects users duplicating the Space; *"Setting this value will not automatically assign an hardware to this Space."* Harmless to add (`cpu-basic`) but does nothing for us.
+- `python_version`, `sdk_version`, `app_file`, `app_build_command` — Gradio/static only.
+- `models`, `datasets`, `preload_from_hub` — no Hub artifacts involved.
+- `hf_oauth` — see [§9](#9-private-vs-public); add **only** if we adopt HF sign-in.
+- `disable_embedding` — defaults to false (embedding allowed). Leave alone.
+- `startup_duration_timeout` — 30 min default is far beyond our needs.
+- `custom_headers` — only COEP/COOP/CORP are permitted, and only if we ever need `SharedArrayBuffer`. Not needed.
+- `base_path` — we serve from `/`.
 
 ---
 
-## 7. Deploying from GitHub via Actions
+## 7. Deploying from GitHub Actions
 
-### 7.1 What HF currently documents
+### 7.1 Which mechanism
 
-The canonical path changed: HF now points at an official action, `huggingface/hub-sync`.
+HF documents **two** approaches. — <https://huggingface.co/docs/hub/spaces-github-actions>
 
-> *"You can keep your Space in sync with your GitHub repository using the official `huggingface/hub-sync` GitHub Action."*
-> — <https://huggingface.co/docs/hub/spaces-github-actions>
+1. **`huggingface/hub-sync`** (the "official" action). *"The action mirrors your files to the Hub using the `hf` CLI (`hf repo create` + `hf upload`). It is not a git-to-git sync — it uploads the file contents and automatically excludes `.github/` and `.git/` directories. Files removed from your GitHub repository will also be removed from the Hub."*
+2. **Manual git push** — a direct git-to-git sync.
 
-Parameters — <https://huggingface.co/docs/hub/repositories-github-actions#parameters>:
+**Use the manual git push.** Reasons:
 
-| Parameter | Required | Default | Description |
-|---|---|---|---|
-| `github_repo_id` | Yes | — | Use `${{ github.repository }}` |
-| `huggingface_repo_id` | Yes | — | `username/repo-name` |
-| `hf_token` | Yes | — | HF access token |
-| `repo_type` | No | `space` | `space` / `model` / `dataset` |
-| `space_sdk` | No | **`gradio`** | ⚠️ **must set to `docker`** |
-| `private` | No | `false` | Whether to create the repo as private |
-| `subdirectory` | No | `.` | For monorepos |
+- `hub-sync`'s first step is **`hf repo create`**, and Docker Space *creation* now requires a paid plan ([§3.1](#31-the-paid-plan-caveat)). That is the one operation we want to avoid.
+- `hub-sync` defaults `space_sdk` to `gradio`; a mistake there could rewrite the Space's SDK.
+- We want the Space's git history replaced deliberately, which is a git operation.
 
-Mechanics: *"The action mirrors your files to the Hub using the `hf` CLI — **it is not a git-to-git sync**. It automatically excludes `.github/` and `.git/` directories and mirrors deletions (files removed from GitHub will be removed from the Hub)."*
+### 7.2 The unrelated-history problem — and why force push is correct
 
-### 7.2 Recommended workflow — `hub-sync`
+The Space repo today contains a **different application** (a "Voice Notes" FastAPI app — verified via `hf://spaces/Almaatla/SpaceCities`: `app.py`, `requirements.txt`, `static/`, `data/`, and a README titled `Voice Notes`). Its git history has **no common ancestor** with `alma92350/SpaceCities`.
 
-**This is the right choice here, and it dissolves the "existing unrelated history" problem entirely.** Because it uploads file *contents* rather than pushing git objects, there is no common-ancestor check, no non-fast-forward rejection, and no force push. The Space's existing history is simply extended by one commit whose tree is your GitHub tree; the old files (`app.py`, `requirements.txt`, `static/index.html`, `data/sample.txt`) are **deleted** by the mirror, which is exactly the "overwrite entirely" semantics we want.
+Two ways to reconcile, and only one is right here:
+
+| Approach | Effect | Verdict |
+|---|---|---|
+| `git pull --allow-unrelated-histories` then push | Merges the Voice Notes tree into ours. Leaves `app.py`, `requirements.txt`, and the old `static/` **in the Space**, where a stray `app.py` is harmless but the old `README.md` front matter and `.gitattributes` may conflict. Creates a messy merge commit and can fail on conflicting paths. | ❌ Wrong tool |
+| **`git push --force`** | Replaces the Space's `main` with our tree wholesale. Old files vanish because the tree is replaced. History is discarded. | ✅ **Correct** |
+
+We are **overwriting the Space entirely**, so force push is not a workaround — it is the accurate expression of intent. The trade-off is that the Space's prior history is destroyed; if that history matters, clone the Space repo once and archive it before the first deploy.
+
+### 7.3 Token-leak avoidance
+
+The HF-documented one-liner is:
+
+```yaml
+run: git push https://HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/HF_USERNAME/SPACE_NAME main
+```
+
+This **works** but embeds the token in a URL. That URL can surface in git's own error output and in the remote list. GitHub Actions masks registered secrets in logs, but masking is best-effort and does not cover every path. The workflow below hardens it:
+
+- The token is only ever in an `env:` block, never in a `with:` or an echoed string.
+- The authenticated URL is built inside the step and **never** persisted via `git remote add`.
+- `actions/checkout` is told `persist-credentials: false` so the GitHub token isn't left in `.git/config`.
+- No `set -x`.
+
+> HF also now offers **Trusted Publishers** — *"keyless publishing — no `HF_TOKEN` secret to store or rotate — ... exchanges GitHub Actions' built-in OIDC token for a short-lived, repo-scoped Hub token."* — <https://huggingface.co/docs/hub/repositories-github-actions>. **[UNVERIFIED]** whether this covers Spaces git-push (as opposed to `hf upload`). Worth investigating later; the `HF_TOKEN` route is what we have working today.
+
+### 7.4 `fetch-depth` and LFS
+
+- **`fetch-depth: 0` is required.** The default shallow clone (depth 1) cannot be pushed to another remote — git refuses to push a shallow history. This is the single most common failure in these workflows.
+- **`lfs: true`** — *"For files larger than 10MB, Spaces requires Git-LFS. Make sure large files in your GitHub repository are tracked with LFS before syncing."* — <https://huggingface.co/docs/hub/spaces-github-actions>. SpaceCities is source-only today, so nothing should be over 10 MB; including `lfs: true` is cheap insurance and a no-op if there are no LFS objects.
+
+### 7.5 The complete workflow
 
 `.github/workflows/deploy-hf.yml`:
 
@@ -443,255 +437,125 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# Only one deploy at a time; a superseded deploy is pointless and each push
-# rebuilds the Space (and kills every in-flight match).
+# Never run two deploys at once — the Space rebuilds on every push.
 concurrency:
-  group: deploy-hf-space
+  group: deploy-hf
   cancel-in-progress: false
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
     steps:
-      - name: Check out the repository
-        uses: actions/checkout@v6
-        # hub-sync uploads the working tree, not git history, so the default
-        # shallow checkout is fine here. No fetch-depth: 0 needed.
-
-      - name: Sanity-check the Space front-matter before publishing
-        run: |
-          head -n 1 README.md | grep -qx -- '---' \
-            || { echo "::error::README.md must start with the Space YAML front-matter"; exit 1; }
-          grep -qE '^sdk:[[:space:]]*docker$' README.md \
-            || { echo "::error::README.md front-matter must contain 'sdk: docker'"; exit 1; }
-          test -f Dockerfile \
-            || { echo "::error::Dockerfile is missing"; exit 1; }
-
-      - name: Sync to the Hugging Face Space
-        uses: huggingface/hub-sync@v0.1.0
+      - name: Checkout full history
+        uses: actions/checkout@v4
         with:
-          github_repo_id: ${{ github.repository }}
-          huggingface_repo_id: Almaatla/SpaceCities
-          hf_token: ${{ secrets.HF_TOKEN }}
-          repo_type: space
-          space_sdk: docker      # REQUIRED — the default is `gradio`
-```
-
-Verified: `huggingface/hub-sync` exists on GitHub at version **0.1.0**, uploads via *"the official HF CLI via `uvx`"*, performs *"true mirroring"* that *"deletes removed files from HF using `--delete=\"*\"`"*, and excludes `.github/` and `.git/` — <https://github.com/huggingface/hub-sync>.
-
-**Token:** *"Create a Hugging Face access token with **write** permission to the target repo. For better security, use a fine-grained token scoped to only the repository you're syncing to."* — <https://huggingface.co/docs/hub/repositories-github-actions#setup>. Create at <https://huggingface.co/settings/tokens>, store as the GitHub Actions secret `HF_TOKEN`.
-
-**Caveats specific to `hub-sync`:**
-
-- ⚠️ `private` defaults to `false`. It is documented only as *"Whether to create the repo as private"*, so it should not touch an existing repo's visibility — but **[UNVERIFIED]**. Since we want the Space public anyway ([§9](#9-private-vs-public)), flip it to public in Settings first and the ambiguity disappears.
-- ⚠️ It calls `hf repo create`. On a free account this is the step most exposed to the paid-plan gate ([§3.1](#31-the-paid-plan-caveat)). The repo already exists, so it should no-op — but if the first run fails with a plan/quota error, switch to §7.3.
-- ⚠️ `.github/` is excluded, so this workflow file never lands in the public Space. Good.
-
-### 7.3 Alternative: direct git force-push
-
-Use this if `hub-sync` trips over the plan gate, or if you want byte-exact git-level control. HF documents the shape — <https://huggingface.co/docs/hub/spaces-github-actions#alternative-manual-git-push> — but its snippet uses a **plain `git push`, which will fail here**, because the Space's history is unrelated to the GitHub repo's history (non-fast-forward). You must force.
-
-```yaml
-name: Deploy to Hugging Face Space (git force-push)
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-concurrency:
-  group: deploy-hf-space
-  cancel-in-progress: false
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Check out the full history
-        uses: actions/checkout@v6
-        with:
-          # REQUIRED. A shallow clone cannot be pushed: git refuses with
-          # "shallow update not allowed". Force-pushing needs real history.
+          # Required: a shallow clone cannot be pushed to another remote.
           fetch-depth: 0
-          # Only needed if this repo tracks files with Git LFS. Spaces requires
-          # LFS for files >10MB. Harmless if unused.
           lfs: true
+          # Don't leave the GitHub token sitting in .git/config.
+          persist-credentials: false
 
-      - name: Verify the Space front-matter
-        run: |
-          head -n 1 README.md | grep -qx -- '---' \
-            || { echo "::error::README.md must start with the Space YAML front-matter"; exit 1; }
-          grep -qE '^sdk:[[:space:]]*docker$' README.md \
-            || { echo "::error::README.md front-matter must contain 'sdk: docker'"; exit 1; }
-
-      - name: Force-push to the Space, replacing its unrelated history
+      - name: Force-push to the Space
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          HF_USER: Almaatla
-          HF_SPACE: Almaatla/SpaceCities
+          HF_OWNER: Almaatla
+          HF_SPACE: SpaceCities
         run: |
-          # No `set -x` — it would echo the URL, and with it the token.
           set -euo pipefail
-          git lfs install --local || true
-          git push --force \
-            "https://${HF_USER}:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git" \
-            HEAD:refs/heads/main
+          test -n "$HF_TOKEN" || { echo "HF_TOKEN is empty"; exit 1; }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Build the authenticated URL locally; never store it in a remote.
+          REMOTE="https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_OWNER}/${HF_SPACE}"
+
+          # The Space has unrelated history (a previous app). We overwrite it
+          # wholesale, so force-push HEAD onto the Space's main branch.
+          git push --force "$REMOTE" HEAD:refs/heads/main
 ```
 
-**On each point the task asked about:**
+Notes on the details:
 
-- **Remote URL form:** `https://<hf-username>:<token>@huggingface.co/spaces/<owner>/<name>.git`. This is the form HF documents (`git push https://HF_USERNAME:$HF_TOKEN@huggingface.co/spaces/HF_USERNAME/SPACE_NAME main`). The username component is not meaningfully validated; the token is what authenticates. An `Authorization` header via `http.extraheader` is the alternative, but it is *worse* for leak-safety in Actions: it persists into `.git/config` and shows up in `git config --list` debug output, whereas GitHub Actions automatically masks the value of `secrets.HF_TOKEN` wherever it appears in logs.
-- **`fetch-depth: 0`:** **required.** `actions/checkout` defaults to a depth-1 shallow clone, and git will not push shallow history to a remote that lacks the objects.
-- **LFS:** Spaces requires Git-LFS for files over 10 MB — *"For files larger than 10MB, Spaces requires Git-LFS. Make sure large files in your GitHub repository are tracked with LFS before syncing."* — <https://huggingface.co/docs/hub/spaces-github-actions#file-size-considerations>. SpaceCities is source + small static assets, so this should not apply; keep `lfs: true` as cheap insurance. Note the force-push **removes the Space's existing `.gitattributes`** — fine for a no-LFS repo, but if you later add LFS you must commit a `.gitattributes` in GitHub.
-- **Force-push semantics & the existing history:** the Space repo has unrelated commits (a "Voice Notes" FastAPI app). `--force` with `HEAD:refs/heads/main` replaces the branch pointer wholesale; the old tree becomes unreachable. This is deliberate and is what "we will overwrite this Space entirely" means. It is **destructive and not undoable from CI** — take a backup clone of the Space first if anything there matters.
-- **Token leaking:** three defences, all applied above — (1) the token only ever exists as `${{ secrets.HF_TOKEN }}` → an env var, which Actions masks in logs; (2) no `set -x` / no `echo` of the URL; (3) `permissions: contents: read` so the job holds no other privilege. Prefer a **fine-grained token scoped to just this Space repo** so a leak is contained.
-- **`.github/` is pushed** by this variant (unlike `hub-sync`). On a public Space that exposes the workflow file — no secret values, but be aware.
-
-### 7.4 Keyless alternative: Trusted Publishers
-
-HF now supports OIDC token exchange, removing the stored secret entirely:
-
-> *"Push to the Hub from CI without storing an `HF_TOKEN` secret. Your CI job proves its identity to Hugging Face using a short-lived OpenID Connect (OIDC) token from your CI provider, and gets back a short-lived Hugging Face token in exchange."*
-> — <https://huggingface.co/docs/hub/trusted-publishers>
-
-Configure on `https://huggingface.co/spaces/Almaatla/SpaceCities/settings` → **Trusted Publishers** with claims `repository = alma92350/SpaceCities`, `branch = main`, `workflow = deploy-hf.yml`; then:
-
-```yaml
-    permissions:
-      id-token: write   # required so the job can request an OIDC token
-      contents: read
-    steps:
-      - uses: actions/checkout@v6
-      - run: |
-          curl -LsSf https://hf.co/cli/install.sh | bash
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-      - env:
-          HF_OIDC_RESOURCE: spaces/Almaatla/SpaceCities
-        run: hf upload spaces/Almaatla/SpaceCities . . --commit-message "Deploy ${GITHUB_SHA::7}"
-```
-
-Tokens live 60 minutes and are scoped to one repo. **The user has already created `HF_TOKEN` in GitHub, so §7.2 is the path of least resistance today** — note this as the hardening follow-up.
+- **`https://user:${HF_TOKEN}@…`** — the username is not validated when a token is used as the password; the docs' own example uses the HF username. A literal `user` avoids leaking the account name into the command. **[UNVERIFIED]** that HF accepts an arbitrary username; if it rejects it, substitute `Almaatla`. Test the first deploy manually.
+- **`HEAD:refs/heads/main`** — pushes whatever branch the workflow ran on to the Space's `main`, so this keeps working if the GitHub default branch is ever renamed.
+- **`--force`** — required; see [§7.2](#72-the-unrelated-history-problem--and-why-force-push-is-correct).
+- **`concurrency`** — two overlapping pushes cause two rebuilds and a race; serialize them.
+- **`.github/` is pushed too.** Unlike `hub-sync`, a git push carries the workflow directory to the Space. Harmless (HF ignores it) but publicly visible once the Space is public. Remove it in the workflow if that bothers you.
+- The token needs **write** access to the Space. Prefer a **fine-grained token scoped to just this repo**. — <https://huggingface.co/docs/hub/repositories-github-actions>
 
 ---
 
-## 8. Node 22 Dockerfile for a HF Docker Space
+## 8. The Dockerfile
 
-### 8.1 The UID-1000 rule, and the trap in `node:*` images
+### 8.1 The UID-1000 trap
 
-> *"The container runs with user ID 1000. To avoid permission issues you should create a user and set its `WORKDIR` before any `COPY` or download."*
-> — <https://huggingface.co/docs/hub/spaces-sdks-docker#permissions>
+HF's rule: *"The container runs with user ID 1000. To avoid permission issues you should create a user and set its `WORKDIR` before any `COPY` or download."* — <https://huggingface.co/docs/hub/spaces-sdks-docker#permissions>
 
-> ⚠️ **Do not copy `RUN useradd -m -u 1000 user` from the Python examples into a Node image.** The official `node:*` images already ship a `node` user **at UID 1000**, so `useradd -u 1000` fails the build with *"UID 1000 is not unique"*. HF's own Node example sidesteps this by not creating a user at all — it just does `RUN chown 1000 /app` then `USER 1000` — <https://huggingface.co/docs/hub/spaces-dev-mode#example-of-compatible-dockerfiles>. That is the pattern used below. HF's requirement is about the **UID**, not the username.
+Their example is `RUN useradd -m -u 1000 user`. **[VERIFY BEFORE FIRST BUILD]** Official `node` images **already create a `node` user and group at UID/GID 1000**, so `useradd -m -u 1000 user` is expected to fail with *"UID 1000 is not unique."* The Dockerfile below uses the **existing `node` user**, which satisfies HF's requirement (the constraint is the *UID*, not the username). If a build ever fails on this, the fallback is `usermod -l user node` or simply keeping `USER node`.
 
-Also from the permissions docs: *"Always specify the `--chown=user` with `ADD` and `COPY`"*, and *"You should always avoid superfluous chowns… a recursive chown can result in a very large image due to the duplication of all affected files."* Hence `COPY --chown=1000:1000` plus a single **non-recursive** `chown` on the `WORKDIR`.
-
-### 8.2 The Dockerfile
+### 8.2 Complete Dockerfile
 
 ```dockerfile
-# SpaceCities — Node 22 game server for a Hugging Face Docker Space
+# syntax=docker/dockerfile:1
+# SpaceCities on Hugging Face Docker Spaces.
 # Docs: https://huggingface.co/docs/hub/spaces-sdks-docker
 #
-# Design notes:
-#  - Zero npm dependencies: there is deliberately no `npm ci` / `npm install`.
-#  - Debian-slim base: HF states alpine is untested for Dev Mode, and glibc
-#    avoids musl surprises. (https://huggingface.co/docs/hub/spaces-dev-mode)
-#  - UID 1000 is mandatory. node:* images already provide it as the `node`
-#    user, so we reuse that UID instead of calling useradd (which would fail).
+# Zero npm dependencies, ES modules, no build step.
+# Serves static assets + WebSocket + /mcp on a single port (7860).
 
 FROM node:22-slim
 
-# Utilities required for Spaces Dev Mode (a PRO feature) and generally useful
-# for debugging a running container. Drop this layer to shave ~40MB if you
-# never intend to SSH in.
-# https://huggingface.co/docs/hub/spaces-dev-mode#docker-spaces
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        bash curl wget procps git git-lfs ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+# HF requires the container to run as UID 1000.
+# node:* images ALREADY ship a `node` user at UID/GID 1000, so do NOT run
+# `useradd -m -u 1000 user` here — it fails with "UID 1000 is not unique".
+# Using the built-in `node` user satisfies the requirement.
 
 ENV NODE_ENV=production \
-    # HF proxies external traffic to this single port; 7860 is the Spaces
-    # default and matches `app_port` in README.md.
     PORT=7860 \
-    # Must be 0.0.0.0 — binding 127.0.0.1 makes the app unreachable.
-    HOST=0.0.0.0 \
-    # Mount a Storage Bucket here to persist match snapshots.
-    # https://huggingface.co/docs/hub/spaces-storage#attached-volumes
-    DATA_DIR=/data
+    DATA_DIR=/data \
+    HOME=/home/node
 
-# Dev Mode requires the app to live in /app and /app to be owned by UID 1000.
-WORKDIR /app
+# /data is the runtime mount point for an attached Storage Bucket.
+# It is NOT available during build (HF: "/data volume is only available at
+# runtime"), so we only create the mount point and hand it to UID 1000.
+RUN mkdir -p /data && chown node:node /data
 
-# Fallback so the server still boots when no bucket is attached. NOTE: /data is
-# NOT available during build, so we only prepare the mount point here; the app
-# must create its subdirectories at runtime.
-# https://huggingface.co/docs/hub/spaces-sdks-docker#data-persistence
-RUN mkdir -p /data && chown 1000:1000 /data
+WORKDIR /home/node/app
 
-# Ship the source owned by UID 1000 (HF: prefer --chown over a later chown -R).
-COPY --chown=1000:1000 . /app
+# Copy with --chown so no recursive chown layer is needed.
+# No `npm install`: SpaceCities has zero runtime dependencies.
+COPY --chown=node:node . /home/node/app
 
-# Single, non-recursive chown for the WORKDIR itself (created as root above).
-RUN chown 1000:1000 /app
+USER node
 
-USER 1000
-
-# Documentation only — Spaces routes via `app_port`, not EXPOSE.
 EXPOSE 7860
 
-# A CMD instruction is required for Dev Mode compatibility.
-CMD ["node", "src/server/index.js"]
+# Node 22 has a built-in WebSocket client and a stable fetch; the server side
+# is implemented on top of node:http + the raw `upgrade` event.
+CMD ["node", "server/index.js"]
 ```
 
-### 8.3 Companion `.dockerignore`
+### 8.3 Notes and obligations on the app side
 
-```gitignore
-.git
-.github
-node_modules
-docs
-*.md
-!README.md
-.DS_Store
-coverage
-test
-```
-
-### 8.4 Server-side expectations this Dockerfile encodes
-
-```js
-import http from 'node:http';
-import fs from 'node:fs/promises';
-
-const PORT     = Number(process.env.PORT ?? 7860);
-const HOST     = process.env.HOST ?? '0.0.0.0';
-const DATA_DIR = process.env.DATA_DIR ?? '/data';
-
-// /data is unavailable at build time — create the tree on every boot.
-await fs.mkdir(`${DATA_DIR}/matches`, { recursive: true });
-
-const server = http.createServer(/* static files + /mcp + /healthz */);
-// Multiplex the game WebSocket onto the same port — only one is exposed.
-server.on('upgrade', (req, socket, head) => { /* validate Origin, then accept */ });
-server.listen(PORT, HOST);
-```
-
-Three things this must get right, all covered above: bind `0.0.0.0:7860`; create `DATA_DIR` subtrees at startup, never at build; and share one port across static, `/ws` and `/mcp`.
-
-### 8.5 Image size & build
-
-**[UNVERIFIED]** — HF publishes no explicit image-size or build-timeout limit for Docker Spaces. What is documented is `startup_duration_timeout` (default 30 min), which governs *start*, not build. `node:22-slim` plus a dependency-free source tree lands around 250 MB, far below anything plausible. Not a risk.
+- **`EXPOSE 7860` is documentation only** — HF routes by `app_port` in the README, not by `EXPOSE`. Keep both consistent at 7860.
+- **Bind `0.0.0.0`**, and read the port from the environment with a 7860 default.
+- **Handle `SIGTERM`.** A rebuild or sleep sends a termination signal. This is the one chance to flush match state to `/data`. Node does **not** exit gracefully by default on SIGTERM when there are open sockets — install a handler:
+  ```js
+  process.on('SIGTERM', async () => { await snapshotToDisk(); server.close(() => process.exit(0)); });
+  ```
+- **Do not write to `/data` during build.** It is empty at build time and the write would land in the image layer, then be shadowed by the mount at runtime.
+- **Guard against no bucket attached.** If `/data` is unmounted it is still a writable directory — just an ephemeral one. Log loudly at startup if a marker file written on the previous boot is missing, so "storage silently isn't persistent" is visible rather than mysterious.
+- **`.dockerignore`** — add one (`.git`, `docs/`, `.github/`, `node_modules`) to keep the image small and builds fast.
+- **Multiplexing on one port**: a single `http.Server` handles static file responses, the `upgrade` event for `/ws`, and `POST /mcp`. This mirrors exactly what `private-room` does with FastAPI, which is verified working ([§2.1](#21-only-one-port-is-exposed--confirmed)).
 
 ---
 
 ## 9. Private vs public
 
-### 9.1 Private is fatal for multiplayer
+### 9.1 A private Space cannot host anonymous multiplayer. Full stop.
 
-Spaces now have **three** visibility levels — <https://huggingface.co/docs/hub/spaces-overview#space-visibility>:
+HF now documents **three** visibility levels:
 
 | | Public | Protected | Private |
 |---|---|---|---|
@@ -700,182 +564,134 @@ Spaces now have **three** visibility levels — <https://huggingface.co/docs/hub
 | App accessible via custom domain | Yes | Yes | No |
 | Clonable by others | Yes | No | No |
 
-> *"**Private** Spaces are fully private: the source code and the running app are only accessible to the owner and collaborators. The Space will not appear in search results and other users will receive a `404` error when visiting its URL."*
+> *"**Private** Spaces are fully private: the source code and the running app are only accessible to the owner and collaborators. The Space will not appear in search results and other users will receive a **`404`** error when visiting its URL."*
+> — <https://huggingface.co/docs/hub/spaces-overview#space-visibility>
 
-**So: on the current private Space, no one but `Almaatla` (and collaborators) can reach the game at all.** Not "they must log in" — they get a `404`. Anonymous players cannot connect. Neither can an external AI agent hitting the MCP endpoint without owner credentials.
+**Answer to "can anonymous players connect at all?": no.** Not the page, not the WebSocket, not `/mcp`. Everyone who is not the owner or an explicit collaborator gets a 404 before any application code runs. There is no anonymous auth path into a private Space.
 
-Embedding confirms the same boundary: *"To embed a Space its visibility needs to be **public** or **protected**."* — <https://huggingface.co/docs/hub/spaces-embed>
+### 9.2 The "protected" middle ground
 
-### 9.2 Recommendation
+> *"**Protected** Spaces keep their source code private on the Hub — only the owner and collaborators can view or clone the repository. However, the running app is publicly accessible through its embed URL (`https://<space-subdomain>.hf.space`)... This is especially useful for hosting websites or apps without publishing the source code."*
+> — <https://huggingface.co/docs/hub/spaces-overview#space-visibility>
 
-**Make the Space public.** Settings → visibility dropdown.
+> *"Protected visibility is part of PRO or Team & Enterprise plans."*
 
-- **Public** is the only free option that lets anonymous players connect. Consequence: the source is world-readable — fine for this project, and it means the repo must contain **no secrets** (HF's Secrets Scanner will flag any that slip in).
-- **Protected** would be ideal — running app public, source private — but *"Protected visibility is part of PRO or Team & Enterprise plans"* — <https://huggingface.co/docs/hub/spaces-overview#space-visibility>. Not available on this account today ($9/mo if source privacy later matters).
+This is exactly "playable by anyone, source not published" — but it **costs a PRO plan**.
 
-### 9.3 Public means genuinely open — design for it
+### 9.3 Recommendation
 
-There is **no HF-provided authentication in front of a public Space.** Anyone with the URL reaches your WebSocket and your `/mcp` endpoint. Combined with the edge's permissive CORS ([§10.3](#103-cors-is-handled-and-widened-by-the-edge)), plan for:
+**Make the Space public.**
 
-- **Validate the `Origin` header on every WebSocket upgrade.** Browsers send `Origin` on WS handshakes but enforce **no** same-origin policy on WebSockets — that check is the server's job. Accept only your own `.hf.space` origin (and localhost in dev). Without it, any website can silently open sockets to your game as a visiting player's browser.
-- **Gate the MCP endpoint with a bearer token** stored as a Space *secret*, unless agent access is meant to be fully open.
-- **Rate-limit** connections and messages per IP/session. See [§10.5](#105-client-ip-and-x-forwarded-headers) on identifying clients.
-- Assume the client is hostile: the server is already authoritative, which is the right architecture here.
+1. It is the only free option where anonymous players can connect.
+2. The GitHub repo `alma92350/SpaceCities` is the source of truth and is already its own thing — the Space is a deployment artifact, not a secret.
+3. `protected` buys only source-hiding, for a paid plan, and the source is on GitHub anyway.
 
-### 9.4 Optional: HF OAuth for identity
+**Consequences to design for once public:**
 
-If you want real player identities rather than anonymous nicknames, `hf_oauth: true` in the README front-matter provisions an OAuth app and injects `OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`, `OAUTH_SCOPES`, `OPENID_PROVIDER_URL` — <https://huggingface.co/docs/hub/spaces-oauth>. `openid profile` are always granted. Redirect URI can be `https://{SPACE_HOST}/login/callback`. Node has first-class support via `@huggingface/hub` or `openid-client`.
-
-> ⚠️ *"You should use `target=_blank` on the button to open the sign-in page in a new tab, unless you run the space outside its `iframe`. Otherwise, you might encounter issues with cookies on some browsers."*
-
-This is **optional** and adds friction for casual players. Suggest: anonymous play by default, optional HF sign-in for persistent profiles.
+- Anyone can connect, including bots. The server is authoritative, which is the right defence, but add basic **rate limiting** and a **connection cap**.
+- `/mcp` becomes publicly reachable. Decide deliberately whether agent play is open or key-gated. `private-room` gates `/api` and `/mcp` behind an `x-api-key` checked against a Space **secret** — a good, cheap pattern to copy (verified: `curl https://almaatla-private-room.hf.space/mcp` → `HTTP/2 401`).
+- Do not log player IPs or persist anything personal to `/data`.
+- If you later want *identified* players, `hf_oauth: true` adds HF sign-in. — <https://huggingface.co/docs/hub/spaces-oauth>
 
 ---
 
-## 10. Everything else that will bite us
+## 10. Other things that bite
 
-### 10.1 The edge is a reverse proxy that rewrites and annotates
+### 10.1 The app runs in an iframe
 
-Verified against a live running Space:
+The Space page embeds the app in an iframe; the direct origin is `https://<owner>-<space>.hf.space` (lowercased, `/` → `-`). Implications: use `header: mini` + `fullWidth: true` for a game; pointer-lock, fullscreen, and audio autoplay all behave differently inside an iframe; and `disable_embedding` (default false) controls whether *other* sites may embed it.
 
-```console
-$ curl -sS -o /dev/null -D - https://almaatla-private-room.hf.space/
-HTTP/2 200
-server: uvicorn
+### 10.2 CORS and `X-Forwarded-*`
+
+Observed response headers from the live edge:
+
+```
+vary: origin, access-control-request-method, access-control-request-headers
+access-control-expose-headers: *
+access-control-allow-origin: https://almaatla-private-room.hf.space   (when Origin was sent)
 x-proxied-host: http://10.112.58.9
 x-proxied-replica: uxm7fnh3-hqx78
 x-proxied-path: /
 link: <https://huggingface.co/spaces/Almaatla/private-room>;rel="canonical"
-x-request-id: NGHCsT
-vary: origin, access-control-request-method, access-control-request-headers
-access-control-expose-headers: *
 ```
 
-The `x-proxied-replica` header confirms replica-aware routing. **Implication:** if you ever scale to multiple replicas (*"Replicas are only available for upgraded (paid) hardware"* — <https://huggingface.co/docs/hub/spaces-gpus#replicas>), in-memory match state does **not** shard correctly. **[UNVERIFIED]** whether WS connections are sticky per replica. On free CPU Basic there is exactly one replica, so this is a future concern only — but it means "scale up to handle more players" is *not* a free lever.
+- The `access-control-*` headers there come from **that app's own CORS middleware**, not from HF. **[UNVERIFIED]** whether the HF edge injects CORS on its own. Since our client is served from the same origin as the WebSocket, **we need no CORS at all** for gameplay. Only `/mcp` called from a different origin would need it.
+- HF adds **`x-proxied-host` / `x-proxied-replica` / `x-proxied-path`**, not the conventional `X-Forwarded-For`. **[UNVERIFIED]** whether `X-Forwarded-For` / `X-Forwarded-Proto` reach the container. **Do not rely on client IP** for rate limiting until verified — use a session/connection identity instead.
+- **WebSocket handshakes carry no CORS protection.** The browser sends `Origin` but does not enforce same-origin on WebSockets. **Validate the `Origin` header server-side** on upgrade, or any page on the internet can open a socket to the game.
 
-### 10.2 HTTP/2 at the edge
+### 10.3 HTTP/2
 
-Ordinary requests are served over **HTTP/2** (`HTTP/2 200` above), while the WebSocket upgrade came back as `HTTP/1.1 403` — the edge negotiates down for upgrades. Two consequences:
+Normal responses are **HTTP/2** (`HTTP/2 200`, `server: uvicorn`); the WebSocket upgrade is served over **HTTP/1.1**. Both work; no action needed. Note HTTP/2 means many small asset requests are cheap — don't bother bundling for its own sake.
 
-- **Good:** HTTP/2 multiplexing removes the 6-connections-per-host limit, so SSE and parallel asset loads are cheap.
-- **Neutral:** browsers open WebSockets over HTTP/1.1 regardless; RFC 8441 Extended CONNECT is not needed and its absence changes nothing.
+### 10.4 Build timeouts and image size
 
-### 10.3 CORS is handled — and widened — by the edge
+**[UNVERIFIED]** I found no documented Space **build timeout** or **image size limit**. What *is* documented is `startup_duration_timeout` (default 30 min) which governs *start*, not *build*. For a zero-dependency Node app the build is a `COPY` on top of `node:22-slim` (~80 MB base) — orders of magnitude away from any plausible limit. Not a risk for us, but do not assume headroom if the image ever grows.
 
-Verified:
+### 10.5 Request size limits
 
-```console
-$ curl -o /dev/null -D - -H "Origin: https://example.com" https://almaatla-private-room.hf.space/
-access-control-allow-origin: https://example.com          # ← arbitrary origin reflected
+**[UNVERIFIED]** No documented HTTP request body size limit at the edge. Not a concern: gameplay traffic is WebSocket frames, and `/mcp` payloads are small JSON.
 
-$ curl -o /dev/null -D - -X OPTIONS \
-      -H "Origin: https://example.com" \
-      -H "Access-Control-Request-Method: POST" \
-      https://almaatla-private-room.hf.space/
-HTTP/2 200
-access-control-allow-methods: POST
-access-control-max-age: 600
-access-control-allow-origin: https://example.com
-```
+### 10.6 Logs and observability
 
-Note the preflight carries **no `x-proxied-*` headers** and `content-length: 0` — **the edge answers `OPTIONS` itself; it never reaches the container.**
+- **Build** and **Container** logs in the Space UI via the *Open Logs* button. — <https://huggingface.co/docs/hub/spaces-sdks-docker-first-demo#debugging>
+- Programmatic **SSE** streams, authenticated:
+  - `GET /api/spaces/{namespace}/{repo}/logs/{build|run}` (accepts `?tail=100`)
+  - `GET /api/spaces/{namespace}/{repo}/events` — status events
+  - `GET /api/spaces/{namespace}/{repo}/metrics`
+  — <https://huggingface.co/docs/hub/spaces-gpus#streaming>
+- There is **no persistent log storage**. Logs die with the container. If match outcomes matter, write them to `/data` (bucket) yourself.
+- **Dev Mode** allows attaching VS Code or SSH to a running Space — very useful for debugging the first deploy. — <https://huggingface.co/dev-mode-explorers>
 
-- ✅ **You do not need CORS middleware in the Node app** for ordinary cross-origin `GET`/`POST`. The edge reflects any origin.
-- ⚠️ **Conversely you cannot restrict CORS from your app either** — the edge's reflection wins for preflights. Any website can invoke your endpoints cross-origin.
-- ✅ No `access-control-allow-credentials` was returned, so browsers will **not** send cookies cross-origin. Do not rely on cookie-based auth for the MCP endpoint; use a bearer token.
-- ⚠️ Your Node app **cannot see `OPTIONS` requests** at all. Don't build MCP CORS negotiation that depends on observing the preflight.
-- ⚠️ This makes the `Origin` check on the WebSocket upgrade ([§9.3](#93-public-means-genuinely-open--design-for-it)) load-bearing, not optional.
+### 10.7 Deploy = restart
 
-### 10.4 Request body size
-
-A **12 MB** `POST` reached the container intact (`x-proxied-*` present on the response). No aggressive proxy body cap at that scale. **[UNVERIFIED]** above 12 MB. Irrelevant for a game whose largest message is a lobby config.
-
-### 10.5 Client IP and `X-Forwarded-*`
-
-**[UNVERIFIED]** — HF does not document which forwarding headers the edge injects. What *is* documented: for ZeroGPU Space-to-Space calls, HF uses an **`x-ip-token`** header that apps forward to attribute the caller — <https://huggingface.co/docs/hub/spaces-api-endpoints#calling-spaces-from-another-space>. That indicates HF has its own identity-header conventions rather than relying on `X-Forwarded-For`.
-
-**Guidance:** do **not** trust `X-Forwarded-For` for rate limiting without first verifying what actually arrives. Easiest verification: add a temporary `/debug/headers` route to the deployed Space that echoes `req.headers`, hit it once, then remove it. Until then, rate-limit on **session/connection identity** (a server-issued token) rather than IP.
-
-### 10.6 Build & deploy behaviour
-
-- **Every push rebuilds and restarts.** *"Each time a new commit is pushed, the Space will automatically rebuild and restart."* Batch changes; avoid deploying during peak play.
-- **No cost during build:** *"it is only billed when the Space is `Starting` or `Running`… there is no cost during build."* — <https://huggingface.co/docs/hub/spaces-gpus#billing>
-- **Repeated failures auto-suspend:** *"If a running Space starts to fail, it will be automatically suspended."* A crash-looping server will take the Space down. **Add a supervisor-friendly top-level error handler and never `process.exit(1)` on a recoverable error.**
-- **Debugging:** Build and Container logs in the UI, or `hf spaces logs Almaatla/SpaceCities -f` — <https://huggingface.co/docs/huggingface_hub/guides/manage-spaces#debug-a-failing-space-by-reading-its-logs>.
-- **`custom_headers` is restrictive:** only COEP/COOP/CORP, lowercase. You **cannot** set CSP, HSTS or arbitrary headers via front-matter — set them from Node instead.
-
-### 10.7 Repo hygiene
-
-- Files >10 MB require Git-LFS on Spaces — <https://huggingface.co/docs/hub/spaces-github-actions#file-size-considerations>.
-- General repo guidance: <100k files, <10k entries per folder — <https://huggingface.co/docs/hub/storage-limits#recommendations>. Trivially satisfied.
-- Free account: 100 GB private storage, best-effort public storage — <https://huggingface.co/docs/hub/storage-limits#storage-plans>.
-
-### 10.8 Sleeping Spaces answer `503`
-
-Observed on three sleeping Spaces: immediate `HTTP/2 503`, no `x-proxied-*`. *"Anyone visiting your Space will restart it automatically."* — the wake is triggered by visiting the Space; a bare `fetch()` to the subdomain returned `503` without appearing to warm it. **Ship a client that retries with backoff and shows "waking the server…" rather than a hard error.**
+Worth restating because it shapes the whole design: **every git push rebuilds and restarts the Space**, killing every live match. *"Each time a new commit is pushed, the Space will automatically rebuild and restart."* — <https://huggingface.co/docs/hub/spaces-overview>. Batch deploys, and announce/drain before pushing if anyone is playing.
 
 ---
 
-## 11. Things I could NOT verify
+## 11. What I could not verify
 
-Do not treat any of these as settled. Each is a candidate for a 10-minute empirical test once the Space is live.
+Flagged so nobody mistakes these for established facts.
 
-| # | Unverified claim | Why it matters | How to settle it |
+| # | Claim | Status | How to settle it |
 |---|---|---|---|
-| U1 | **Whether a free (non-PRO) account can push to and rebuild an *existing* Docker Space.** Docs only gate *creation*. | If not, the whole plan needs PRO ($9/mo). | Push a trivial commit to the Space and watch the build. **Do this first.** |
-| U2 | WebSocket **idle timeout** at the edge. | Governs lobby/spectator sockets. | Open a WS, send nothing, time the close. A 20 Hz match is never idle regardless. |
-| U3 | WebSocket **max message size**, **max connection duration**, **max concurrent connections**. | Ceiling on player count. | Load-test with a script; measure. |
-| U4 | **Cold-start time** from sleep. | First-player experience. | Let it sleep 48 h, then time a wake. |
-| U5 | Whether a **mounted bucket at `/data` is writable by UID 1000**. Docs say buckets mount read-write by default but say nothing about ownership. | Snapshot persistence silently fails if not. | Attach the bucket, factory reboot, `fs.writeFile` on boot, check the log. |
-| U6 | Whether `hub-sync`'s `private: false` default **changes an existing Space's visibility**. | Could unexpectedly flip visibility. | Set visibility to public manually first; then it's moot. |
-| U7 | Which **forwarding headers** (`X-Forwarded-For`, `X-Real-IP`, …) the edge injects. | Rate limiting by IP. | Temporary `/debug/headers` route. |
-| U8 | Whether WebSocket connections are **sticky per replica**. | Only matters on paid multi-replica. | N/A on free tier (single replica). |
-| U9 | Explicit **Docker image size limit** and **build timeout**. | None found; `node:22-slim` is small enough that it's academic. | — |
-| U10 | Request body limit **above 12 MB**. | Not relevant to this workload. | — |
-| U11 | Whether the existing Space currently has a **bucket attached at `/data`**. | Determines whether existing data survives the overwrite. | `hf spaces volumes ls Almaatla/SpaceCities`, or check Settings. |
+| U1 | **WebSocket idle timeout at the HF edge** | Undocumented. I ran a fully idle connection against a live Space; it was still open at the end of my observation window, but I did not run it long enough to find the ceiling. | Hold an idle socket for 1 h+ and log the close code. Regardless, **ship a 25 s keep-alive** — cheap, and removes the question. |
+| U2 | **WebSocket max frame size / message rate cap** | Undocumented; not probed. | Send escalating frame sizes (64 KB → 1 MB → 8 MB) and find where it breaks. |
+| U3 | **Cold-start time from sleep** | Undocumented. | Let the Space sleep 48 h, then time a cold visit. |
+| U4 | **Whether `/data` persists with no bucket attached** | Docs strongly imply **no** (disk is "ephemeral"), but I could not test the running Space. | Write a timestamp file to `/data` on boot, force a rebuild, read it back. **Do this before trusting any persistence.** |
+| U5 | **Whether a bucket at `/data` survives factory reset** | Not documented explicitly. A bucket is a separate repo, so it should. | Ask HF, or test on a throwaway Space. |
+| U6 | **Bucket write performance for frequent small writes** | Object storage, not POSIX. Unknown latency/semantics. | Benchmark a snapshot write before choosing the snapshot interval. |
+| U7 | **`useradd -m -u 1000 user` fails on `node:22-slim`** | Strongly expected (node images ship UID 1000) but **not** empirically confirmed — no Docker available here. | `docker build` locally once. The supplied Dockerfile sidesteps it by using the existing `node` user. |
+| U8 | **Git push with username `user`** | The docs' example uses the real HF username. I could not test a push. | First deploy manually; fall back to `Almaatla` if rejected. |
+| U9 | **Trusted Publishers (keyless OIDC) for Space git-push** | Documented for Hub publishing; unclear whether it covers git push to a Space. | Read <https://huggingface.co/docs/hub/trusted-publishers>. |
+| U10 | **`X-Forwarded-For` reaching the container** | HF sends `x-proxied-*`; standard forwarded headers unconfirmed. | Log all request headers from the deployed app once. |
+| U11 | **Build timeout / image size limit** | No documented figures found. | Not a practical risk at our image size. |
+| U12 | **Whether overwriting (not creating) a Docker Space is unaffected by the paid-plan rule** | The rule is worded against *creation*; the Space exists. Not tested. | The first deploy is the test. **Do not delete the Space.** |
+| U13 | **2 vCPU headroom for N-player 20 Hz simulation** | Not load-tested. | Load-test with synthetic clients before promising a player cap. |
 
 ---
 
-## 12. Ordered action list
+## 12. Action checklist
 
-1. **Verify U1** — push a no-op commit to `Almaatla/SpaceCities` and confirm it builds on the free plan. Everything else depends on this.
-2. **Check U11 and back up** — `hf spaces volumes ls Almaatla/SpaceCities`; clone the Space repo locally before any force-push. The overwrite is not undoable.
-3. **Set the Space to public** (Settings → visibility). Without this there is no multiplayer.
-4. **Put the [§6.1](#61-recommended-block-for-spacecities) YAML front-matter at the top of the GitHub repo's root `README.md`.** Most likely first-deploy failure if skipped.
-5. **Add the [§8.2](#82-the-dockerfile) Dockerfile and [§8.3](#83-companion-dockerignore) `.dockerignore`.**
-6. **Add [§7.2](#72-recommended-workflow--hub-sync) `.github/workflows/deploy-hf.yml`**; confirm the GitHub secret `HF_TOKEN` is a **write** token (fine-grained, scoped to this Space).
-7. **Create and attach the storage bucket** ([§4.3](#43-how-data-works-now)), factory reboot, and verify U5 by writing a file on boot.
-8. **Implement snapshot/restore for match state** ([§3.3](#33-sleeping--this-determines-the-whole-persistence-design)) — the single most important architectural consequence of this research.
-9. **Implement the WebSocket `Origin` check and an MCP bearer token** ([§9.3](#93-public-means-genuinely-open--design-for-it)) before announcing the game.
-10. **Add an application-level WS heartbeat** (~20–30 s) to sidestep U2.
-
----
+1. **Make the Space public** (Settings → visibility). Nothing else works until this is done.
+2. **Do not delete the Space** — recreating a Docker Space needs PRO.
+3. Create a **Storage Bucket** and attach it at **`/data`**, read-write, if match state must survive restarts.
+4. **Verify persistence** (U4) with a boot-timestamp file before relying on it.
+5. Ship the README front matter from [§6](#6-readme-front-matter) and the Dockerfile from [§8](#8-the-dockerfile).
+6. Add `.github/workflows/deploy-hf.yml` from [§7.5](#75-the-complete-workflow); confirm the `HF_TOKEN` secret has **write** access to the Space.
+7. Run the first deploy **manually** to shake out U7 and U8.
+8. Implement: `SIGTERM` snapshot, 25 s server ping, `Origin` validation on upgrade, connection cap, and a loading state for cold starts.
+9. Decide whether `/mcp` is open or key-gated; if gated, add a Space **secret** and check it in middleware.
 
 ## Sources
 
-- Docker Spaces — <https://huggingface.co/docs/hub/spaces-sdks-docker>
-- Spaces Overview (visibility, hardware, secrets, networking, env vars) — <https://huggingface.co/docs/hub/spaces-overview>
-- Spaces Configuration Reference — <https://huggingface.co/docs/hub/spaces-config-reference>
-- Using GPU Spaces (hardware, sleep time, billing, replicas, streaming) — <https://huggingface.co/docs/hub/spaces-gpus>
-- Disk usage on Spaces — <https://huggingface.co/docs/hub/spaces-storage>
-- Storage Buckets — <https://huggingface.co/docs/hub/storage-buckets>
-- Storage limits — <https://huggingface.co/docs/hub/storage-limits>
-- Managing Spaces with GitHub Actions — <https://huggingface.co/docs/hub/spaces-github-actions>
-- GitHub Actions for Hub repos (`hub-sync` parameters) — <https://huggingface.co/docs/hub/repositories-github-actions>
-- Trusted Publishers (keyless OIDC) — <https://huggingface.co/docs/hub/trusted-publishers>
-- Spaces Dev Mode (Node Dockerfile, UID 1000, `/app`) — <https://huggingface.co/docs/hub/spaces-dev-mode>
-- Your First Docker Space — <https://huggingface.co/docs/hub/spaces-sdks-docker-first-demo>
-- Embed your Space — <https://huggingface.co/docs/hub/spaces-embed>
-- Spaces Custom Domain — <https://huggingface.co/docs/hub/spaces-custom-domain>
-- Sign-In with HF (OAuth) — <https://huggingface.co/docs/hub/spaces-oauth>
-- Spaces as API endpoints (SSE, `x-ip-token`) — <https://huggingface.co/docs/hub/spaces-api-endpoints>
-- Panel on Spaces (websockets) — <https://huggingface.co/docs/hub/spaces-sdks-docker-panel>
-- Shiny on Spaces (app timeouts) — <https://huggingface.co/docs/hub/spaces-sdks-docker-shiny>
-- Label Studio on Spaces (bucket persistence recipe) — <https://huggingface.co/docs/hub/spaces-sdks-docker-label-studio>
-- Manage your Space (`huggingface_hub`: volumes, secrets, sleep time, logs) — <https://huggingface.co/docs/huggingface_hub/guides/manage-spaces>
-- Pricing — <https://huggingface.co/pricing>
-- `huggingface/hub-sync` action — <https://github.com/huggingface/hub-sync>
-- Forum: WebSocket 404 on Spaces (`wss://` not `ws://`) — <https://discuss.huggingface.co/t/fastapi-websocket-returns-http-404-on-spaces/159865>
-- Forum: keepalive ping flagged as abuse — <https://discuss.huggingface.co/t/keepalive-ping-get-health-ready-every-2-minutes/176238>
-- Live WebSocket Docker Space (evidence) — <https://huggingface.co/spaces/langtech-innovation/WhisperLiveKitDiarization/blob/main/README.md>
-- Primary probes against `https://almaatla-private-room.hf.space` (2026-08-30), reproduced inline in §1.1, §10.1, §10.3, §10.4.
+- [Docker Spaces](https://huggingface.co/docs/hub/spaces-sdks-docker)
+- [Spaces Overview](https://huggingface.co/docs/hub/spaces-overview)
+- [Spaces Configuration Reference](https://huggingface.co/docs/hub/spaces-config-reference)
+- [Using GPU Spaces (hardware, sleep, billing, replicas, log streaming)](https://huggingface.co/docs/hub/spaces-gpus)
+- [Disk usage on Spaces](https://huggingface.co/docs/hub/spaces-storage)
+- [Storage Buckets](https://huggingface.co/docs/hub/storage-buckets)
+- [Managing Spaces with GitHub Actions](https://huggingface.co/docs/hub/spaces-github-actions)
+- [GitHub Actions (hub-sync parameters, Trusted Publishers)](https://huggingface.co/docs/hub/repositories-github-actions)
+- [Your First Docker Space](https://huggingface.co/docs/hub/spaces-sdks-docker-first-demo)
+- [Spaces OAuth](https://huggingface.co/docs/hub/spaces-oauth)
+- [WebSocket timeout troubleshooting](https://websocket.org/guides/troubleshooting/timeout/)
