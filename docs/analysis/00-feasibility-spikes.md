@@ -119,7 +119,6 @@ At 20 Hz the wall-clock budget is **50 ms per tick**. A match consuming *x* ms p
 ---
 
 ## Reproducing
-
 Both spikes live in the session scratchpad rather than the repo, because they are throwaway
 evidence, not shipped code. The stress harness is worth re-creating as a committed benchmark under
 `tools/` once the server exists — task **T-013**.

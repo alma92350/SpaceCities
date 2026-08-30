@@ -1,0 +1,206 @@
+# SpaceCities — Task Tracking
+
+**The single source of truth for where this port is and what remains.**
+Update this file in the same commit as the work it describes.
+
+**Related:** [`docs/PRD.md`](docs/PRD.md) (what and why) · [`docs/adr/`](docs/adr/) (decisions) ·
+[`docs/analysis/`](docs/analysis/) (evidence)
+
+---
+
+## Status at a glance
+
+| Phase | Milestone | Tasks | Done | Status |
+|---|---|---:|---:|---|
+| **0** | Single-player game live on HF, deploying automatically | 8 | 3 | 🟡 In progress |
+| **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
+| **2** | Commands are data; a match replays bit-identically | 9 | 0 | ⚪ Not started |
+| **3** | Two humans play a full match over the network | 8 | 0 | ⚪ Not started |
+| **4** | Multiplayer is pleasant: lobby, seats, reconnect | 8 | 0 | ⚪ Not started |
+| **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
+| **6** | An agent plays a human to a finish over MCP | 10 | 0 | ⚪ Not started |
+| **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
+| | | **65** | **3** | |
+
+**Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
+
+---
+
+## Working agreement
+
+This project is **test-driven**, inheriting `CONTRIBUTING.md`'s rules unchanged. For every task:
+
+1. **Write the test first**, from the requirement, and watch it fail for the right reason.
+2. Implement the smallest change that passes.
+3. Run the **whole** suite plus `npm run typecheck`. An inherited test whose assumption a change
+   makes obsolete gets its assertion **updated to the new intended contract — never deleted, never
+   skipped**.
+
+**Invariants that must be green at every commit** (each has a guarding test):
+- `engine/` stays pure, deterministic and DOM-free (`test/engine-purity.test.js`).
+- Same seed ⇒ same game (`test/determinism*.test.js`) — except where an ADR **deliberately**
+  re-baselines it, which is announced in the task.
+- **Zero runtime dependencies. No build step.** (PRD NFR-5, NFR-6.)
+- Every task lists its **exit criteria**; a task is not done until they are demonstrably met.
+
+---
+
+## Phase 0 — Baseline and deployment pipeline
+**Milestone M0: the existing single-player game is live on the Space, CI green, deploying on push.**
+
+Deployment is de-risked *before* any multiplayer complexity, so that when the first networked build
+ships, the pipeline is already boring.
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-001** | Import upstream verbatim with full history; `upstream` remote configured | ADR-0002 | — | ✅ | 542 commits present; `npm test` green (2,519 tests); `git blame` reaches upstream authorship |
+| **T-002** | PRD, ADR log, feasibility spikes | G4 | — | ✅ | `docs/PRD.md`, `docs/adr/0001…0011`, `docs/analysis/00` committed |
+| **T-003** | Analysis dossiers: engine seams, command protocol, client coupling, HF platform, MCP | G4 | — | 🟡 | Five dossiers in `docs/analysis/`; each ADR they ground cites them |
+| **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, `version.js`/`version.json`, page title — **without touching engine internals** | G5 | T-001 | ⚪ | Suite green incl. `test/release-manifest.test.js`, `test/version.test.js`; `upstream/main..HEAD` diff stays semantically clean |
+| **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | ⚪ | All three checks green on a pushed branch; branch protection documented |
+| **T-006** | `Dockerfile` for Node 22 on HF: UID-1000 user, port 7860, `/data`, **no npm install** | G5, NFR-5 | T-004 | ⚪ | Image builds; container serves the game locally on 7860 |
+| **T-007** | `.github/workflows/deploy-hf.yml` — push to `main` deploys to the Space using `HF_TOKEN` | FR-21 | T-006 | ⚪ | A push updates the Space; token never appears in logs; existing unrelated HF history handled deliberately |
+| **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | 🔴 | Blocked on owner decision (Q1). Anonymous browser plays a full skirmish on the live Space |
+
+---
+
+## Phase 1 — The session and transport seam
+**Milestone M1: single-player runs entirely through the multiplayer code path, suite green.**
+
+The largest architectural move, made *before* any network code exists — so it lands on a path
+already proven by 2,519 tests (ADR-0004).
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-009** | Define the transport interface and session protocol shapes (tests first) | ADR-0004 | T-005 | ⚪ | Interface documented with JSDoc typedefs; tests exist and fail for the right reason |
+| **T-010** | `server/session.js` — owns one match's state, applies commands, advances the loop | ADR-0003 | T-009 | ⚪ | A session plays a full AI-vs-AI match headlessly to a winner |
+| **T-011** | `net/loopback.js` — in-process transport | ADR-0004 | T-009 | ⚪ | Round-trips commands and state synchronously; unit-tested |
+| **T-012** | Port the single-player client onto session + loopback | G3 | T-010, T-011 | ⚪ | **Full inherited suite green**; browser smoke green; a human plays a full skirmish with no engine call from the client |
+| **T-013** | Fault-injection loopback: latency, reordering, drops | FR-11 | T-011 | ⚪ | Netcode behaviour under 150 ms RTT and 2% loss is covered by deterministic unit tests |
+| **T-014** | Commit `tools/bench.js`; re-run spikes 1–2 **on Space hardware**; measure memory per match | NFR-2, NFR-4 | T-006 | ⚪ | Measured p99 tick cost and memory per match recorded in `docs/analysis/00` |
+| **T-015** | Measure serialization + fog-filtering cost per client per tick | NFR-3, ADR-0009 | T-010 | ⚪ | Numbers recorded; ADR-0009 chooses a replication strategy on evidence |
+
+---
+
+## Phase 2 — Commands as data
+**Milestone M2: every command round-trips as JSON; a match replays bit-identically from its log.**
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-016** | **Fix B1** — move the entity-id counter off the module global, or enforce one match per worker | ADR-0011 | T-010 | ⚪ | Test: two **interleaved** `createGameState` runs each replay identically |
+| **T-017** | **Fix the three fairness asymmetries** — formation gate (`commands.js:155`), auto-repair gate (`sim.js:241`), kiting gate (`combat.js:94`) — via an `isHumanControlled` predicate | ADR-0008 | T-010 | ⚪ | Test: both seats get identical formation, auto-repair and kiting behaviour; existing 2-owner world byte-identical |
+| **T-018** | **Fix the fog desync landmine** — `gather.js:64`, `scout.js:42` → `state.fogs[unit.owner]`; `sim.js:70-71` iterate `state.owners` | ADR-0008 | T-010 | ⚪ | Test: a 3-owner state updates all three fogs; no engine line reads `state.fog`/`state.fogAI` |
+| **T-019** | Fix `issueRecycle`'s missing ownership check, its false comment (`recycle.js:87-89`), and friendly-fire on explicit attack (`combat.js:46`) | FR-10 | T-010 | ⚪ | Adversarial tests: cross-owner recycle and friendly-fire attack both rejected |
+| **T-020** | Wire command schema — versioned, id-based, server-stamped owner | ADR-0006 | T-009 | ⚪ | Schema documented; round-trip property test over all command types |
+| **T-021** | `net/commandCodec.js` — encode/decode/validate/apply; the **sole** wire→engine path | ADR-0006 | T-020 | ⚪ | Guard test (purity-test idiom) asserts no server module calls `issue*` outside the codec |
+| **T-022** | Extend the codec to the **economy** surface — the ~20 cost-bearing mutators `hudSelection.js` calls directly | FR-8, FR-10 | T-021 | ⚪ | Production, research, market, colony actions all validated server-side |
+| **T-023** | Deterministic application order `(applyTick, ownerIndex, clientSeq)`, applied immediately before `tick` | ADR-0006 | T-021 | ⚪ | Test: shuffled arrival order yields an identical final-state fingerprint |
+| **T-024** | Command-log recording and replay | FR-19 | T-023 | ⚪ | Test: `(seed, log)` replays to an identical `fingerprint(state)` |
+
+---
+
+## Phase 3 — Two humans over the network
+**Milestone M3: two browsers play a full 20-minute match to a decided result.**
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-025** | `net/ws.js` — RFC 6455: handshake, framing, **ping/pong**, continuation frames, size limits, close handshake | ADR-0005 | T-009 | ⚪ | Adversarial codec tests: malformed lengths, split frames, oversized payloads, **unmasked client frames rejected** |
+| **T-026** | WebSocket transport implementing the Phase 1 interface (client + server) | ADR-0005 | T-025, T-011 | ⚪ | Swapping loopback→WebSocket changes no client code above the transport |
+| **T-027** | HTTP server: static assets + WebSocket + reserved `/mcp`, all on port 7860 | ADR-0005 | T-026 | ⚪ | One port serves all three; verified in the Docker image |
+| **T-028** | Per-seat fog-filtered state replication | FR-9, ADR-0009 | T-015, T-021 | ⚪ | Test: a client's payload contains **no** entity its seat cannot see |
+| **T-029** | Match worker process; parent relays sockets ↔ workers | ADR-0011 | T-016, T-027 | ⚪ | Two concurrent matches in one server replay independently and identically |
+| **T-030** | Client `localOwner` seam — replace the ~80 non-engine owner literals | ADR-0008 | T-012 | ⚪ | Client renders correctly as **either** seat; golden HUD/render tests updated |
+| **T-031** | Seat identity: display names, per-seat colours beyond the hardcoded two | FR-12 | T-030 | ⚪ | No `"player"`/`"ai"` string reaches the UI |
+| **T-032** | Latency handling: local prediction of selection and camera, server-confirmed orders | FR-11 | T-013, T-026 | ⚪ | Playable at 150 ms simulated RTT; measured, not asserted |
+
+---
+
+## Phase 4 — Multiplayer that is pleasant to use
+**Milestone M4: lobby, AI fill, disconnect survival, spectating.**
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-033** | Lobby model: create / list / join, seat kinds, seat tokens | FR-1, FR-2 | T-029 | ⚪ | Lobby survives a server restart via `/data` |
+| **T-034** | Lobby UI, and a shareable join link | FR-1, FR-2 | T-033 | ⚪ | A stranger joins from a link in under 60 s |
+| **T-035** | Match lifecycle: start conditions, **AI fill for open seats**, end and score screen | FR-3, FR-4, FR-6 | T-033 | ⚪ | A solo arrival gets an immediately playable match against AI |
+| **T-036** | Disconnect → AI takeover → reclaim with the seat token | FR-5 | T-035 | ⚪ | Close the tab mid-match, rejoin, resume the same seat; the match never stops for others |
+| **T-037** | Spectator seats (full-map vision, read-only) | FR-7 | T-028 | ⚪ | A spectator cannot issue any command; host can disable spectators |
+| **T-038** | In-match text chat | FR-12 | T-026 | ⚪ | Chat is rate-limited and length-capped |
+| **T-039** | Rate limiting and abuse guards on every client-driven path | FR-10 | T-021 | ⚪ | A flooding client is throttled, then disconnected, without affecting the match |
+| **T-040** | Desync detection via state fingerprint reporting | FR-20 | T-024 | ⚪ | An artificially divergent client is detected and logged |
+
+---
+
+## Phase 5 — N seats
+**Milestone M5: a 4-seat free-for-all plays to a winner.**
+
+Bumps `SAVE_VERSION` to 2 and re-baselines determinism fixtures for N ≥ 3 (ADR-0008) — **planned,
+announced, and confined to this phase**.
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-041** | `ownerDefs` built from lobby config; N-seat `state.owners` | FR-1 | T-035 | ⚪ | 4-seat AI-only match plays headlessly to a winner |
+| **T-042** | `state.controllers{}` replacing the 2-slot `state.ai`/`state.playerAi` | ADR-0008 | T-041 | ⚪ | N AI seats each act on their own budget; `test/ownerScaffold.test.js` extended |
+| **T-043** | `opponentsOf()` replacing `otherOwner()`'s "exactly one enemy" axiom | ADR-0008 | T-042 | ⚪ | AI targets sensibly with 3+ opponents |
+| **T-044** | Radial map generator for N ≥ 3 start positions; fairness checked | FR-1 | T-041 | ⚪ | Start positions equidistant and resource-fair; **2-seat path byte-identical** |
+| **T-045** | N-fog / N-controller save shape; `SAVE_VERSION` → 2 | FR-19 | T-042 | ⚪ | Round-trip test at N=4; version gate rejects v1 saves cleanly |
+| **T-046** | Elimination events, surrender, and last-seat-standing victory at N | FR-6 | T-041 | ⚪ | Eliminated player becomes a spectator; match continues |
+| **T-047** | Re-baseline determinism fixtures for N ≥ 3; **2-seat replays preserved** | NFR-8 | T-044 | ⚪ | `test/determinism*.test.js` green; 2-seat fixtures unchanged |
+| **T-048** | Sweep the remaining skirmish-critical owner literals (~18 engine sites) | ADR-0008 | T-043 | ⚪ | No skirmish-path engine line compares an owner to a literal |
+
+---
+
+## Phase 6 — Agents play
+**Milestone M6: a Claude agent and a human play a full match to a decided result.**
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-049** | MCP transport: Streamable HTTP + JSON-RPC 2.0 core, zero dependencies | FR-13, NFR-5 | T-027 | ⚪ | `initialize`/`tools/list`/`tools/call` verified against golden transcripts and a real MCP client |
+| **T-050** | Seat auth: per-seat tokens; an agent can act **only** on its own seat | FR-18 | T-049 | ⚪ | Adversarial test: cross-seat command rejected |
+| **T-051** | Lobby tools — `list_matches`, `join_match`, `leave_match` | FR-13 | T-049, T-033 | ⚪ | An agent joins a match unaided |
+| **T-052** | Observation tools — `get_situation`, `list_entities`, `get_map_overview`, `get_tech_options`, **fog-respecting and summarized** | FR-14 | T-028, T-049 | ⚪ | Digest fits a reasonable context; test proves nothing outside the seat's fog leaks |
+| **T-053** | Action tools — batched, group-oriented, mapped onto the Phase 2 codec | FR-15 | T-052, T-022 | ⚪ | An agent commands 20 units in one call; validation identical to a human's |
+| **T-054** | `wait_for_event` — **bounded well under the client tool-call timeout**, returning "nothing yet" on expiry rather than erroring | FR-17 | T-052 | ⚪ | A repeated wait loop is cheap, bounded and safe |
+| **T-055** | MCP resources — unit stats, counter triangle, build costs, tech tree | FR-16 | T-049 | ⚪ | An agent reads the rules once instead of re-deriving them |
+| **T-056** | Agent APM budget, reusing the existing `aiApm` mechanism | §6.3, ADR-0007 | T-053 | ⚪ | Agent actions/minute are capped and the cap is visible to opponents |
+| **T-057** | Turn-gated evaluation mode for benchmarking (never in a lobby with a human) | §6.3 | T-056 | ⚪ | A seeded match with a scripted agent replays to a known outcome |
+| **T-058** | Reference scripted agent + agent developer guide | P2 | T-055 | ⚪ | A third party connects an agent using the docs alone |
+
+---
+
+## Phase 7 — Harden and launch
+**Milestone M7: v1.**
+
+| ID | Task | Serves | Depends | Status | Exit criteria |
+|---|---|---|---|---|---|
+| **T-059** | Persistence to `/data`: lobby and match results survive restart | FR-22 | T-033 | ⚪ | Space restart loses live matches (by design) but not the lobby |
+| **T-060** | Sleep/wake survival: behaviour verified against real Space idle behaviour | Risk | T-059 | ⚪ | Documented, and the client explains it to players |
+| **T-061** | Structured logging and operational metrics | Ops | T-029 | ⚪ | Desyncs, disconnects, match durations, tick overruns all observable |
+| **T-062** | Load test: concurrent matches to the measured ceiling | NFR-4 | T-014 | ⚪ | Ceiling documented; graceful degradation verified, not assumed |
+| **T-063** | Security review: transport, codec, auth, rate limits | FR-10 | T-039, T-050 | ⚪ | `/security-review` clean; adversarial suite green |
+| **T-064** | Player-facing docs and the in-game help overlay updated for multiplayer | P1 | T-035 | ⚪ | A new player understands seats, AI fill and reconnect without asking |
+| **T-065** | Launch checklist: PRD §9 success criteria all demonstrated | §9 | all | ⚪ | All six criteria met and evidenced |
+
+---
+
+## Blocked / needs a decision
+
+| # | Question | Blocks | Owner |
+|---|---|---|---|
+| **Q1** | Make the Space **public**? Anonymous players cannot reach a private Space, so G1 depends on it. | T-008, and all of Phases 3–7 in production | alma92350 |
+| **Q2** | Free tier, or paid always-on hardware? Determines whether 20–40 minute matches survive idling. | T-060 | alma92350 |
+| **Q3** | Is multiplayer **Odyssey** a wanted v2? Shapes how much generality Phase 5 builds. | T-041 scope | alma92350 |
+| **Q4** | Are agent seats visibly labelled to human opponents? (Recommendation: **yes**.) | T-031 | alma92350 |
+
+---
+
+## Deferred (explicitly not v1)
+
+| Item | Why | Revisit |
+|---|---|---|
+| Multiplayer Odyssey / galaxy | Persistent multi-world sandbox; a product of its own | v2 |
+| Ranked ladder / Elo | Single-player Elo exists; server-side identity is a separate product | v2 |
+| Teams / alliances | `teamOf()` must thread through combat, auras, fog sharing, victory (ADR-0008 Phase 4) | v2 |
+| User accounts | Login friction opposes G1 | v2 |
+| Replay playback UX | Recording ships in T-024; playback UI does not | v2 |
+| Multiplayer scenarios | `engine/scenarios.js` is single-player scripted content | — |
