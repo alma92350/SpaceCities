@@ -786,3 +786,55 @@ Flagged so nobody mistakes these for established facts. **An unverified claim he
 - [nodejs/docker-node — 22/bookworm-slim/Dockerfile](https://github.com/nodejs/docker-node/blob/main/22/bookworm-slim/Dockerfile)
 - [encode/uvicorn — config.py defaults](https://github.com/encode/uvicorn/blob/master/uvicorn/config.py)
 - [WebSocket timeout troubleshooting](https://websocket.org/guides/troubleshooting/timeout/)
+
+---
+
+## 13. T-007a result — the paywall question, answered
+
+**Run:** [GitHub Actions run 33337999794](https://github.com/alma92350/SpaceCities/actions/runs/33337999794), 2026-08-30 22:01 UTC, via `.github/workflows/hf-probe.yml`.
+**Method:** clone the Space, add one `DEPLOY_PROBE.md`, push, watch `runtime.stage`, then require the Space's HEAD sha to equal the pushed commit. A stage transition could be coincidental; a matching sha could not.
+
+```
+before: cbf2903ffbd0c7fbac89580128178852efe8991b
+after : 894b2c63d7cbbe4534232c39ce4269f931fd73dd
+22:01:52  stage=RUNNING_BUILDING
+22:02:12  stage=RUNNING_APP_STARTING
+22:02:33  stage=RUNNING
+Space HEAD now          : 894b2c63d7cbbe4534232c39ce4269f931fd73dd
+PASS: a non-PRO account pushed to and rebuilt an existing Docker Space.
+attempt 1: HTTP 200
+PASS: the app is serving anonymously after the rebuild.
+```
+
+### What this closes
+
+| Was | Now |
+|---|---|
+| **U11** — whether overwriting (not creating) a Docker Space escapes the paid-plan rule | **Resolved.** It does. A free account pushed and the Space rebuilt. |
+| **U7** — the git push workflow itself, never executed | **Resolved.** Push via credential-store auth works; the mechanics are proven and carry into T-007. |
+| **F2 / B2** — the paid-plan risk that gated the whole plan | **Closed.** PRO is not a prerequisite. |
+| **Q1** — private Space unreachable | **Closed.** `private: False`; `api/spaces` and the running app both return **200 anonymously**. |
+
+### The finding nobody was looking for
+
+The stage sequence was **`RUNNING_BUILDING` → `RUNNING_APP_STARTING` → `RUNNING`**, not `BUILDING → RUNNING`.
+
+`RUNNING_BUILDING` means **the Space keeps serving the old build while the new image builds.** A deploy is therefore a *rolling swap*, not a hard outage. Measured windows:
+
+- **Total rebuild: ~41 seconds** (push at 22:01:52 → serving at 22:02:33), on a warm layer cache with a one-file change.
+- **Actual unavailability: the `APP_STARTING` window only — ~21 seconds here**, and even that was not observed as a failed request: the very first anonymous probe after `RUNNING` returned 200.
+
+**This does not change [ADR-0012](../adr/0012-crash-tolerant-matches.md).** The new container is still a new process, so in-memory match state is still destroyed on every deploy, and snapshot/restore remains architectural. What it changes is the *availability* story around it: players are not locked out for the length of a build, only across a short restart. Combined with snapshot/restore and AI seat takeover, a deploy should cost an in-flight match a few seconds, not the match.
+
+It is also a partial answer to **U2 (cold start)**: a *rebuild* takes ~41 s. A wake **from 48 h sleep** is a different path (VM re-provisioning) and is still unmeasured.
+
+### Still open after this probe
+
+- **U3** — whether `/data` persists with no bucket attached. Untouched by this run; still the next thing to settle (T-008a).
+- **U2** — cold start from a real 48 h sleep.
+- **U5** — storage-bucket write latency.
+- **U12** — 2-vCPU headroom under N-player load.
+
+### Housekeeping
+
+`DEPLOY_PROBE.md` is now on the Space. It is harmless and is overwritten when T-007 deploys the real tree.

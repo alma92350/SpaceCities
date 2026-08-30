@@ -12,7 +12,7 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 10 | 3 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 10 | 4 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
@@ -20,7 +20,7 @@ Update this file in the same commit as the work it describes.
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **72** | **3** | |
+| | | **72** | **4** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -40,9 +40,11 @@ moved it, and each is worth knowing before reading the phases:
 4. **Every deploy destroys in-flight matches.** An HF Space rebuilds and restarts on *every git
    push*. Match snapshotting is therefore architectural, not hardening, and moved from Phase 7 to
    Phase 3 (ADR-0012).
-5. **The account is not PRO**, and HF now gates Docker Spaces behind a paid plan *to create*.
-   Whether a free account can still **rebuild** an existing one is unverified — so T-007a tests
-   exactly that, first, before anything is invested.
+5. ~~**The account is not PRO**, and whether a free account can rebuild an existing Docker Space
+   is unverified.~~ **Settled by T-007a: it can.** A free account pushed to the Space and it
+   rebuilt in 41 s. PRO is not a prerequisite. The probe also found that HF does a **rolling
+   swap** — the Space keeps serving the old build while the new one builds — so a deploy costs
+   ~21 s of unavailability, not a whole build.
 6. **The MCP spec moved.** Revision `2026-07-28` **removed** the `initialize` handshake,
    `Mcp-Session-Id`, the GET SSE endpoint and resumability. A server written from memory or from any
    pre-2026 tutorial would not conform.
@@ -80,11 +82,11 @@ ships, the pipeline is already boring.
 | **T-002** | PRD, ADR log, feasibility spikes | G4 | — | ✅ | `docs/PRD.md`, `docs/adr/0001…0011`, `docs/analysis/00` committed |
 | **T-003** | Analysis dossiers: engine seams, command protocol, client coupling, HF platform, MCP | G4 | — | 🟡 | Five dossiers in `docs/analysis/`; each ADR they ground cites them |
 | **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, `version.js`/`version.json`, page title — **without touching engine internals** | G5 | T-001 | ⚪ | Suite green incl. `test/release-manifest.test.js`, `test/version.test.js`; `upstream/main..HEAD` diff stays semantically clean |
-| **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | ⚪ | All three checks green on a pushed branch; branch protection documented |
+| **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | 🟡 | Inherited `test.yml` has run **5×, all green** on this branch. Remaining: confirm all three job names, and document branch protection |
 | **T-006** | `Dockerfile` for Node 22 on HF: port 7860, `/data` mount point, **no npm install**. ⚠️ Do **not** copy the HF Python recipe's `RUN useradd -m -u 1000 user` — `node:*` images already ship a UID-1000 `node` user and the command fails with "UID 1000 is not unique" | G5, NFR-5 | T-004 | ⚪ | Image builds; container serves the game locally on 7860 as UID 1000 |
-| **T-007a** | ⚠️ **Do this first.** Push a trivial commit to the Space and watch it rebuild — proving a **non-PRO account can still rebuild an existing Docker Space** | ADR-0010 B2 | — | ⚪ | A rebuild completes. If it fails, PRO ($9/mo) becomes a prerequisite and the plan changes — better known in week one than week ten |
-| **T-007** | `.github/workflows/deploy-hf.yml` — **direct authenticated git push** (not `hub-sync`, which calls `hf repo create` and could hit the paywall) | FR-21, ADR-0010 | T-006, T-007a | ⚪ | A push updates the Space; token never in logs; the unrelated Python history is force-overwritten deliberately. **Never delete the Space** — it may not be recreatable |
-| **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | 🔴 | **Hard blocker, confirmed:** a private Space returns `404` to everyone but the owner — the running app, not just the source. Anonymous browser plays a full skirmish on the live Space |
+| **T-007a** | Push a trivial commit to the Space and watch it rebuild — proving a **non-PRO account can still rebuild an existing Docker Space** | ADR-0010 B2 | — | ✅ | **PASS** ([run 33337999794](https://github.com/alma92350/SpaceCities/actions/runs/33337999794)). `RUNNING_BUILDING → RUNNING_APP_STARTING → RUNNING` in **41 s**; Space HEAD advanced to the pushed commit `894b2c6`; app returned 200 anonymously. **PRO is not a prerequisite.** |
+| **T-007** | `.github/workflows/deploy-hf.yml` — **direct authenticated git push** (not `hub-sync`, which calls `hf repo create` and could hit the paywall). **Inherit the mechanics T-007a already proved**: credential-store auth (token never enters a remote URL), `runtime.stage` polling, and a HEAD-sha equality check as the pass condition. The retired probe is recoverable with `git show a10a634:.github/workflows/hf-probe.yml` | FR-21, ADR-0010 | T-006, T-007a ✅ | ⚪ | A push updates the Space; token never in logs; the unrelated Python history is force-overwritten deliberately (this also removes the probe's `DEPLOY_PROBE.md`). **Never delete the Space** |
+| **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | 🟡 | **Public ✅** — `private: False`, and both `api/spaces` and the running app return **200 anonymously** (verified unauthenticated). Q1 closed. Remaining: the *game* is not deployed yet, so "plays end-to-end on HF" waits on T-004/T-006/T-007 |
 | **T-008a** | Attach a Storage Bucket and **verify `/data` actually persists** — classic persistent storage no longer exists and the inherited `ln -s /data data` likely points at ephemeral disk | ADR-0010 B3, FR-22 | T-006 | ⚪ | A file written to `/data` survives a factory rebuild |
 
 ---
@@ -136,7 +138,7 @@ already proven by 2,519 tests (ADR-0004).
 | **T-027** | HTTP server: static assets + WebSocket + reserved `/mcp`, all on port 7860 | ADR-0005 | T-026 | ⚪ | One port serves all three; verified in the Docker image |
 | **T-028** | Per-seat fog-filtered state replication | FR-9, ADR-0009 | T-015, T-021 | ⚪ | Test: a client's payload contains **no** entity its seat cannot see |
 | **T-029** | Match worker process; parent relays sockets ↔ workers | ADR-0011 | T-016, T-027 | ⚪ | Two concurrent matches in one server replay independently and identically |
-| **T-029a** | **Match snapshot to disk + restore on boot** — every deploy restarts the Space and destroys in-memory state, so this is architectural, not hardening | ADR-0012, FR-22 | T-029 | ⚪ | Test: a match snapshotted mid-play, restored and continued yields the same `fingerprint(state)` as one that ran uninterrupted |
+| **T-029a** | **Match snapshot to disk + restore on boot** — every deploy restarts the Space and destroys in-memory state, so this is architectural, not hardening. Measured in T-007a: HF does a **rolling swap** (`RUNNING_BUILDING` keeps serving the old build), so the real outage is the app-start window — **~21 s**, not the whole build. Snapshot cadence should be chosen against that, not against a multi-minute worst case | ADR-0012, FR-22 | T-029 | ⚪ | Test: a match snapshotted mid-play, restored and continued yields the same `fingerprint(state)` as one that ran uninterrupted |
 | **T-029b** | Rejoin-by-match-id after a server restart, sharing the reconnect mechanism | ADR-0012, FR-5 | T-029a | ⚪ | Deploying mid-match costs seconds, not the match |
 | **T-030** | Client `localOwner` seam — **119 owner-literal sites** (68 comparisons, 29 owner arguments, 22 property paths); **110 collapse to one seam**, 9 are the harder "the enemy is `ai`" assertion and must be redesigned or scoped out. ⚠️ **Never `sed` this**: `data.js:124` defines a commodity whose id is literally `"ai"` — the rename must be site-by-site | ADR-0008 | T-012 | ⚪ | Client renders correctly as **either** seat; golden HUD/render tests updated; the 9 hard sites individually resolved |
 | **T-031** | Seat identity: display names, per-seat colours beyond the hardcoded two | FR-12 | T-030 | ⚪ | No `"player"`/`"ai"` string reaches the UI |
@@ -221,10 +223,10 @@ that would actually hurt, each owned by a task:
 | # | Assumption | Owned by |
 |---|---|---|
 | U3 | Whether `/data` persists with **no bucket attached** (docs imply not). Write a boot-timestamp file, force a rebuild, read it back — **before trusting any persistence** | T-008a |
-| U7/U11 | The git push itself, and whether overwriting (not creating) a Docker Space escapes the paid-plan rule. **Run the first deploy manually** | T-007a |
+| ~~U7/U11~~ | ~~The git push itself, and whether overwriting a Docker Space escapes the paid-plan rule~~ — **RESOLVED by T-007a.** Push works on a free account; the Space rebuilt in 41 s and served anonymously | ✅ T-007a |
 | U5 | Storage-bucket write latency for frequent small writes — it is object storage, not POSIX. Benchmark before choosing a snapshot interval | T-029a |
 | U12 | 2-vCPU headroom for N-player 20 Hz. The measured WebSocket result was one client against a trivial app | T-014, T-062 |
-| U2 | Cold-start time from sleep — undocumented. Time a cold visit after 48 h idle | T-060 |
+| U2 | Cold-start from a real 48 h sleep — still undocumented. (T-007a measured a *rebuild* at 41 s, which is a different path: no VM re-provisioning.) Time a cold visit after 48 h idle | T-060 |
 
 ---
 

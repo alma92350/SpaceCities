@@ -1,6 +1,6 @@
 # SpaceCities — Product Requirements Document
 
-**Status:** Draft v0.2 — pending review
+**Status:** Draft v0.3 — pending review
 **Owner:** alma92350
 **Last updated:** 2026-08-30
 **Related:** [`docs/adr/`](adr/) (architecture decisions) · [`TASKS.md`](../TASKS.md) (delivery tracking)
@@ -234,8 +234,8 @@ agent-seat match completion rate; desync events per 100 matches (target: 0).
 | Risk | Impact | Mitigation |
 |---|---|---|
 | **Every deploy destroys in-flight matches** — a Space rebuilds and restarts on *every git push* | High | **Confirmed.** Matches snapshot to disk and restore on boot ([ADR-0012](adr/0012-crash-tolerant-matches.md)), sharing the reconnect mechanism. Raised from a Phase 7 nicety to a Phase 3 architectural requirement. |
-| **The Space is private, so nobody can play** | High | **Confirmed blocker** — a private Space returns `404` for the running app, not just the source. Needs owner action (Q1). |
-| **A non-PRO account may not be able to rebuild an existing Docker Space** | High | **Unverified, and cheap to test.** T-007a pushes a trivial commit and watches it build, before any porting effort is spent. Escalation: PRO at $9/month. |
+| ~~The Space is private, so nobody can play~~ | ~~High~~ | **Closed.** The owner made it public; verified unauthenticated — `private: False`, and both the repo API and the running app return **200 anonymously**. |
+| ~~A non-PRO account may not be able to rebuild an existing Docker Space~~ | ~~High~~ | **Closed by T-007a.** A free account pushed to the Space and it rebuilt in **41 s**, serving anonymously afterwards. PRO is not a prerequisite. |
 | ~~WebSockets constrained on Spaces~~ | ~~High~~ | **Resolved, measured.** Through the real HF edge: **400/400 frames, 0% loss, p50 RTT 32.6 ms, max 48.8 ms** — 20 Hz is comfortable. A ~90-line zero-dependency server also round-tripped against real Chromium ([ADR-0005](adr/0005-transport.md)). |
 | **HF free hardware sleeps after 48 h idle** | Low | Tolerable for a game people play; snapshot/restore covers it. **No keep-alive pinger** — Spaces have been paused for abuse over exactly that. |
 | **Server-authority refactor breaks determinism** | High | Determinism guards run in CI on every commit; the loopback transport (Phase 1) forces single-player through the identical code path, so the existing suite tests the multiplayer path too. |
@@ -246,10 +246,9 @@ agent-seat match completion rate; desync events per 100 matches (target: 0).
 
 ## 11. Open questions
 
-- **Q1 — still open, and blocking.** Should the Space be made public (§6.4)? Now confirmed to be a
-  hard blocker rather than a preference: a private Space returns `404` for the running application,
-  so no anonymous player can reach the game at all. Requires an explicit owner decision, since it
-  makes the game world-readable. *(Blocks G1 and all of Phases 3–7 in production.)*
+- **Q1 — closed.** The Space is **public**, done by the owner on 2026-08-30 and verified
+  unauthenticated: `private: False`, with both the repo API and the running app returning `200`
+  to an anonymous request. G1's platform prerequisite is met.
 - **Q2 — answered.** Start on **free CPU Basic** ([ADR-0010](adr/0010-hf-deployment.md)). 48 hours of
   idle tolerance is ample, and `$0.03/hour` CPU Upgrade removes sleep later if the game gets
   traction. What remains is a *risk*, not a question: whether a non-PRO account can rebuild an
