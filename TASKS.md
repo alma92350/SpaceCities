@@ -14,13 +14,13 @@ Update this file in the same commit as the work it describes.
 |---|---|---:|---:|---|
 | **0** | Single-player game live on HF, deploying automatically | 10 | 3 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
-| **2** | Commands are data; a match replays bit-identically | 9 | 0 | ⚪ Not started |
+| **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
 | **4** | Multiplayer is pleasant: lobby, seats, reconnect | 8 | 0 | ⚪ Not started |
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **70** | **3** | |
+| | | **72** | **3** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -101,7 +101,7 @@ already proven by 2,519 tests (ADR-0004).
 | **T-010** | `server/session.js` — owns one match's state, applies commands, advances the loop | ADR-0003 | T-009 | ⚪ | A session plays a full AI-vs-AI match headlessly to a winner |
 | **T-011** | `net/loopback.js` — in-process transport | ADR-0004 | T-009 | ⚪ | Round-trips commands and state synchronously; unit-tested |
 | **T-012** | Port the single-player client onto session + loopback | G3 | T-010, T-011 | ⚪ | **Full inherited suite green**; browser smoke green; a human plays a full skirmish with no engine call from the client |
-| **T-013** | Fault-injection loopback: latency, reordering, drops | FR-11 | T-011 | ⚪ | Netcode behaviour under 150 ms RTT and 2% loss is covered by deterministic unit tests |
+| **T-013** | Fault-injection loopback: latency, reordering, drops. Covers the five client sites that resist loopback — chiefly `input.js:521`, which passes synchronously over loopback and **breaks over a socket**, so a sync-only path would pass every test and fail in production | FR-11 | T-011 | ⚪ | Netcode behaviour under 150 ms RTT and 2% loss covered by deterministic unit tests; no client path depends on a synchronous reply |
 | **T-014** | Commit `tools/bench.js`; re-run spikes 1–2 **on Space hardware**; measure memory per match | NFR-2, NFR-4 | T-006 | ⚪ | Measured p99 tick cost and memory per match recorded in `docs/analysis/00` |
 | **T-015** | Measure serialization + fog-filtering cost per client per tick, and **settle NFR-3**. Already measured: full state at 800v800 on a 4× map is **404 KB / 4.45 ms**, which at 20 Hz × 4 seats is 32 MB/s and 18 ms of a 50 ms budget; the fog-filtered equivalent is **55 KB / 0.69 ms**. Filtering is what makes replication affordable. But 55 KB/snapshot still **exceeds NFR-3's 32 KB/s** at the pathological end | NFR-3, ADR-0009 | T-010 | ⚪ | Snapshot rate and delta-encoding (ADR-0009 M3) chosen on measured numbers; NFR-3 either met or **deliberately restated** |
 
@@ -116,7 +116,8 @@ already proven by 2,519 tests (ADR-0004).
 | **T-017** | **Fix the three fairness asymmetries** — formation gate (`commands.js:155`), auto-repair gate (`sim.js:241`), kiting gate (`combat.js:94`) — via an `isHumanControlled` predicate | ADR-0008 | T-010 | ⚪ | Test: both seats get identical formation, auto-repair and kiting behaviour; existing 2-owner world byte-identical |
 | **T-018** | **Fix the fog desync landmine** — `gather.js:64`, `scout.js:42` → `state.fogs[unit.owner]`; `sim.js:70-71` iterate `state.owners` | ADR-0008 | T-010 | ⚪ | Test: a 3-owner state updates all three fogs; no engine line reads `state.fog`/`state.fogAI` |
 | **T-019** | Fix `issueRecycle`'s missing ownership check, its false comment (`recycle.js:87-89`), and friendly-fire on explicit attack (`combat.js:46`) | FR-10 | T-010 | ⚪ | Adversarial tests: cross-owner recycle and friendly-fire attack both rejected |
-| **T-019a** | **Close the two trust-boundary holes.** `hudSelection.js:1045` (`e.homeCC = null`) and `hudSelection.js:1722` (`e.electrified = v`) write simulation fields **directly**, bypassing `engine/` — the only two client lines that do. They have no command envelope, so they would be the first two ways around the codec. Add `issueClearHomeBase` / `issueSetElectrified` | FR-10, ADR-0006 | T-010 | ⚪ | Grep guard: no client line assigns to a sim field; both actions round-trip as commands |
+| **T-019a** | **Close the two trust-boundary holes.** `hudSelection.js:1045` (`e.homeCC = null`) and `hudSelection.js:1722` (`e.electrified = v`) write simulation fields **directly**, bypassing `engine/` — the only two client lines that do. `:1045` is free: `issueSetHomeBase` (`commands.js:281`) already accepts `null`, so the HUD is bypassing a command that would have done the job. `:1722` is a genuine gap — `electrified` has **two direct writers** (`hudSelection.js:1722`, `aiIndustry.js:172`) and **zero commands** — and today only a client-side `e.owner === "player"` filter stops it electrifying an opponent's Habitat | FR-10, ADR-0006 | T-010 | ⚪ | Grep guard: no client line assigns to a sim field; both actions round-trip as commands |
+| **T-019b** | Fix the under-attack alarm defect: `boot.js:684/704/712` fires **your** alarm on any `ev.owner === "ai"` hit | FR-9 | T-010 | ⚪ | Test: an alarm fires only for events owned by the local seat |
 | **T-020** | Wire command schema — versioned, id-based, server-stamped owner | ADR-0006 | T-009 | ⚪ | Schema documented; round-trip property test over all command types |
 | **T-021** | `net/commandCodec.js` — encode/decode/validate/apply; the **sole** wire→engine path | ADR-0006 | T-020 | ⚪ | Guard test (purity-test idiom) asserts no server module calls `issue*` outside the codec |
 | **T-022** | Extend the codec to the **economy** surface — the ~20 cost-bearing mutators `hudSelection.js` calls directly | FR-8, FR-10 | T-021 | ⚪ | Production, research, market, colony actions all validated server-side |
@@ -130,14 +131,14 @@ already proven by 2,519 tests (ADR-0004).
 
 | ID | Task | Serves | Depends | Status | Exit criteria |
 |---|---|---|---|---|---|
-| **T-025** | `net/ws.js` — RFC 6455: handshake, framing, **ping/pong**, continuation frames, size limits, close handshake | ADR-0005 | T-009 | ⚪ | Adversarial codec tests: malformed lengths, split frames, oversized payloads, **unmasked client frames rejected** |
+| **T-025** | `net/ws.js` — RFC 6455: handshake, framing, **~20–25 s ping** (an idle socket survived 10+ min through the HF edge, but only against a server already pinging every 20 s — so ship the ping rather than trust the timeout), continuation frames, size limits, `Origin` validation on upgrade, close handshake | ADR-0005 | T-009 | ⚪ | Adversarial codec tests: malformed lengths, split frames, oversized payloads, **unmasked client frames rejected** |
 | **T-026** | WebSocket transport implementing the Phase 1 interface (client + server) | ADR-0005 | T-025, T-011 | ⚪ | Swapping loopback→WebSocket changes no client code above the transport |
 | **T-027** | HTTP server: static assets + WebSocket + reserved `/mcp`, all on port 7860 | ADR-0005 | T-026 | ⚪ | One port serves all three; verified in the Docker image |
 | **T-028** | Per-seat fog-filtered state replication | FR-9, ADR-0009 | T-015, T-021 | ⚪ | Test: a client's payload contains **no** entity its seat cannot see |
 | **T-029** | Match worker process; parent relays sockets ↔ workers | ADR-0011 | T-016, T-027 | ⚪ | Two concurrent matches in one server replay independently and identically |
 | **T-029a** | **Match snapshot to disk + restore on boot** — every deploy restarts the Space and destroys in-memory state, so this is architectural, not hardening | ADR-0012, FR-22 | T-029 | ⚪ | Test: a match snapshotted mid-play, restored and continued yields the same `fingerprint(state)` as one that ran uninterrupted |
 | **T-029b** | Rejoin-by-match-id after a server restart, sharing the reconnect mechanism | ADR-0012, FR-5 | T-029a | ⚪ | Deploying mid-match costs seconds, not the match |
-| **T-030** | Client `localOwner` seam — replace the ~80 non-engine owner literals | ADR-0008 | T-012 | ⚪ | Client renders correctly as **either** seat; golden HUD/render tests updated |
+| **T-030** | Client `localOwner` seam — **119 owner-literal sites** (68 comparisons, 29 owner arguments, 22 property paths); **110 collapse to one seam**, 9 are the harder "the enemy is `ai`" assertion and must be redesigned or scoped out. ⚠️ **Never `sed` this**: `data.js:124` defines a commodity whose id is literally `"ai"` — the rename must be site-by-site | ADR-0008 | T-012 | ⚪ | Client renders correctly as **either** seat; golden HUD/render tests updated; the 9 hard sites individually resolved |
 | **T-031** | Seat identity: display names, per-seat colours beyond the hardcoded two | FR-12 | T-030 | ⚪ | No `"player"`/`"ai"` string reaches the UI |
 | **T-032** | Latency handling: local prediction of selection and camera, server-confirmed orders | FR-11 | T-013, T-026 | ⚪ | Playable at 150 ms simulated RTT; measured, not asserted |
 
@@ -152,7 +153,7 @@ already proven by 2,519 tests (ADR-0004).
 | **T-034** | Lobby UI, and a shareable join link | FR-1, FR-2 | T-033 | ⚪ | A stranger joins from a link in under 60 s |
 | **T-035** | Match lifecycle: start conditions, **AI fill for open seats**, end and score screen | FR-3, FR-4, FR-6 | T-033 | ⚪ | A solo arrival gets an immediately playable match against AI |
 | **T-036** | Disconnect → AI takeover → reclaim with the seat token | FR-5 | T-035 | ⚪ | Close the tab mid-match, rejoin, resume the same seat; the match never stops for others |
-| **T-037** | Spectator seats (full-map vision, read-only) | FR-7 | T-028 | ⚪ | A spectator cannot issue any command; host can disable spectators |
+| **T-037** | Spectator seats (full-map vision, read-only) — **repurpose Observer Mode** (`observer.js`, `observerPanel.js`), which is already exactly this client | FR-7 | T-028 | ⚪ | A spectator cannot issue any command; host can disable spectators |
 | **T-038** | In-match text chat | FR-12 | T-026 | ⚪ | Chat is rate-limited and length-capped |
 | **T-039** | Rate limiting and abuse guards on every client-driven path | FR-10 | T-021 | ⚪ | A flooding client is throttled, then disconnected, without affecting the match |
 | **T-040** | Desync detection via state fingerprint reporting | FR-20 | T-024 | ⚪ | An artificially divergent client is detected and logged |
@@ -209,6 +210,21 @@ announced, and confined to this phase**.
 | **T-063** | Security review: transport, codec, auth, rate limits | FR-10 | T-039, T-050 | ⚪ | `/security-review` clean; adversarial suite green |
 | **T-064** | Player-facing docs and the in-game help overlay updated for multiplayer | P1 | T-035 | ⚪ | A new player understands seats, AI fill and reconnect without asking |
 | **T-065** | Launch checklist: PRD §9 success criteria all demonstrated | §9 | all | ⚪ | All six criteria met and evidenced |
+
+---
+
+## Unverified assumptions being carried
+
+The platform dossier flags **13** items it could not verify, rather than guessing at them. The five
+that would actually hurt, each owned by a task:
+
+| # | Assumption | Owned by |
+|---|---|---|
+| U3 | Whether `/data` persists with **no bucket attached** (docs imply not). Write a boot-timestamp file, force a rebuild, read it back — **before trusting any persistence** | T-008a |
+| U7/U11 | The git push itself, and whether overwriting (not creating) a Docker Space escapes the paid-plan rule. **Run the first deploy manually** | T-007a |
+| U5 | Storage-bucket write latency for frequent small writes — it is object storage, not POSIX. Benchmark before choosing a snapshot interval | T-029a |
+| U12 | 2-vCPU headroom for N-player 20 Hz. The measured WebSocket result was one client against a trivial app | T-014, T-062 |
+| U2 | Cold-start time from sleep — undocumented. Time a cold visit after 48 h idle | T-060 |
 
 ---
 

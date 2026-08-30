@@ -21,24 +21,33 @@ runs the same path through an in-process loopback transport (ADR-0004).
    rewrite") is what makes this a re-seaming job.
 2. **Only two client lines write a simulation field directly, bypassing `engine/` entirely** —
    `hudSelection.js:1045` (`e.homeCC = null`) and `hudSelection.js:1722` (`e.electrified = v`).
-   Dossier 02's command table has no envelope for either. **They need two new engine commands**
-   (`issueClearHomeBase`, `issueSetElectrified`) or they become the first two holes in the trust
-   boundary. This is the single most actionable finding in this document.
+   Neither goes through `engine/commands.js` today. The first is nonetheless free to fix:
+   `issueSetHomeBase(units, ccId)` already exists (`engine/commands.js:281`) and accepts `null`, so
+   the HUD is bypassing a command that would have done the job. The second is a genuine gap —
+   **`electrified` has two direct writers and zero commands**, the HUD and `engine/aiIndustry.js:172`
+   (`engine/industry.js:38` documents the duplication outright). These are the only two holes in an
+   otherwise correctly-placed trust boundary, and closing them is the single most actionable item
+   in this document.
 3. **No client file writes `resources` or `credits`.** Verified by grep: every economic mutation
    goes through an engine function. The trust boundary is already drawn in the right place; it is
-   simply not enforced. What the client *does* do is **read** `state.players.player.resources`
-   at 12 sites in `hudSelection.js` alone — a read that filtering will have to keep serving.
+   simply not enforced. What the client *does* do is **read** the local seat's economy —
+   `state.players.player.resources` at 7 sites in `hudSelection.js` alone, 15 across the client —
+   a read that per-seat filtering must keep serving (it always can: your own economy is never fogged).
 4. **The renderers are already owner-generic where it counts.** Team colour is read as
    `state.players[owner].color` at all four draw sites (`renderUnits.js:66`, `renderBuildings.js:75`,
    `minimap.js:95`, `minimap.js:100`); `#4fd1ff`/`#f87171` live in `engine/state.js:179-180` as
    *data*, and every client occurrence of those literals is unrelated UI chrome. The fog rule is
    factored into one named predicate, `renderShared.js:253 hiddenByFog`. "Seat 3 of 5" does not
-   break rendering.
-5. **What "seat 3 of 5" actually breaks is the 80 owner literals outside `engine/`**, concentrated
-   in `inputCommands.js` (16), `hudSelection.js` (7), `renderBuildings.js` (6), `hud.js` (6),
-   `boot.js` (6), `input.js` (5). Nearly all are the *same* assertion — "`player` means me" — and
-   collapse to one `state.localOwner` seam. Roughly **9** are the harder assertion, "the enemy is
-   `ai`", and those are genuine 1v1 semantics that must be redesigned or scoped out.
+   break rendering — and neither does fog filtering: the frame interpolator is **already** safe
+   against entities appearing and vanishing between snapshots (§4.2 item 6), which is normally the
+   first thing that breaks when a client stops holding the whole world.
+5. **What "seat 3 of 5" actually breaks is 119 owner-literal sites outside `engine/`** — 68
+   comparisons, 29 owner arguments passed to already-parameterized engine functions, and 22
+   hardcoded `state.players.player`/`.ai` property paths. (Counting `tools/` and `competition.js`
+   too, the comparison total is 80, matching dossier 01's finding #5.) **110 of the 119 are the same
+   assertion — "`player` means me" — and collapse to one `state.localOwner` seam.** The remaining
+   **9** are the harder assertion, "the enemy is `ai`": genuine 1v1 semantics that must be
+   redesigned or scoped out. §3.2 lists all nine.
 6. **Broadcasting full state is not affordable, and the numbers are not close.** Measured on this
    machine with `engine/persist.js`: a 4× map with 800-vs-800 units serializes to **404 KB in
    4.45 ms**; at 20 Hz × 4 seats that is 32 MB/s and 18 ms of a 50 ms tick budget spent on
@@ -128,13 +137,18 @@ There are exactly four kinds, and they are not all the same severity.
 | `state.selection = …` | `inputCommands.js:147`, `:152`, `:154`, `:157`, `:177`; `input.js:318`, `:337`, `:382`, `:395`, `:411`, `:543` (**11**) | **Not sim state.** `engine/persist.js` resets it to `[]` on load and dossier 02 D6 moves it to the client session. Zero wire cost. |
 | `state.events.length = 0` | `boot.js:766` | **The client drains the sim's event queue.** In multiplayer, events must be produced server-side, fog-filtered per seat (`boot.js:675` already applies the fog rule), replicated, and drained *client-locally*. See §4.2. |
 | Galaxy notification drains | `boot.js:511` `pacifyNotes.length = 0`, `:517` `milestones.length = 0`, `:522` `reliefNote = false` | Odyssey-only ⇒ out of v1 (§7). Same pattern as the event drain. |
-| **Raw entity-field writes** | `hudSelection.js:1045` `e.homeCC = null`; `hudSelection.js:1722` `e.electrified = v` | **The only true trust-boundary holes.** Neither has an `engine/commands.js` envelope. Fix before the codec ships. |
+| **Raw entity-field writes** | `hudSelection.js:1045` `e.homeCC = null`; `hudSelection.js:1722` `e.electrified = v` | **The only true trust-boundary holes.** Neither goes through `engine/commands.js`. `:1045` is free to fix — `issueSetHomeBase(units, ccId)` (`engine/commands.js:281`) already accepts `null`. `:1722` needs a new command. Fix both before the codec ships. |
 
-`hudSelection.js:1722` is the worse of the two: it writes `electrified` on **every** building in the
-current selection, with only a client-side `e.owner === "player"` filter standing between it and
-electrifying an opponent's Habitat. Under server authority that filter disappears with the client.
+`hudSelection.js:1722` is the worse of the two, for two reasons. It writes `electrified` on
+**every** building in the current selection, with only a client-side `e.owner === "player"` filter
+standing between it and electrifying an opponent's Habitat — and under server authority that filter
+disappears along with the client that enforced it. And `electrified` has **no command anywhere**:
+`engine/aiIndustry.js:172` sets it directly too, which `engine/industry.js:38` documents as
+deliberate (*"engine/aiIndustry.js, which flips `electrified` on its buildings the same way the HUD
+does"*). A new `issueSetElectrified(state, buildingIds, on)` should become the single writer, with
+the AI routed through it as well.
 
-### 1.4 `state.players.player.…` — direct owner-keyed reads (26 sites)
+### 1.4 `state.players.player.…` — direct owner-keyed reads (22 sites + 1 optional-chained)
 
 No writes; all reads. They matter because each is a place that must be re-pointed at the local seat
 *and* must survive fog filtering (the local seat's own economy is always fully visible, so filtering
@@ -144,7 +158,9 @@ never strips these — but they hard-code the key).
   `:680`, `:1955`; `hudPanelSignature.js:146`, `:227`, `:228`, `:264`, `:272`, `:344`;
   `hud.js:99`, `:174`
 - **`.upgrades`** — `hudSelection.js:508`, `:1122`, `:1157`; `hudPanelSignature.js:180`
-- **`.color`** — `hudSelection.js:1941`; `landingPicker.js:149`
+- **`.color`** — `hudSelection.js:1941`; `landingPicker.js:149` (optional-chained:
+  `dest.players?.player?.color || "#4fd1ff"` — the one place a hardcoded owner *and* a hardcoded
+  colour appear on the same line; Odyssey-only, out of v1)
 - **`.faction`** — `overlays.js:34` (`st.players.player.faction` **and** `st.players.ai.faction` in
   one line — a 1v1 assumption, not just a local-seat one)
 - **Already owner-generic** — `techChart.js:138`, `:153`, `:196` via `const OWNER = "player"`
@@ -231,8 +247,8 @@ lobby:     null,   // pre-match lobby model (setup.js renders it)
 netStatus: "offline",  // offline | connecting | live | lagging | resyncing | dropped
 ```
 
-`localOwner` is the load-bearing one. `state.localOwner` (or `game.localOwner`) is what turns 71 of
-the 80 owner literals into one substitution.
+`localOwner` is the load-bearing one. `state.localOwner` (or `game.localOwner`) is what turns 110 of
+the 119 owner-literal sites (§3) into one substitution.
 
 ### 2.2 `boot.js` today — the lifecycle, one line each
 
@@ -312,13 +328,24 @@ with what, and who decides it is over**.
 
 ## 3. "You are the player" assumptions
 
-80 owner-literal comparisons outside `engine/` (`grep -rEc '(===|!==|==|!=)\s*"(player|ai)"'`),
-distributed: `inputCommands.js` 16, `tools/ailab.js` 9, `hudSelection.js` 7, `renderBuildings.js` 6,
-`hud.js` 6, `boot.js` 6, `input.js` 5, `renderEffects.js` 4, `landingPicker.js` 4,
-`hudPanelSignature.js` 4, `starmap.js` 2, `renderShared.js` 2, `overlays.js` 2, `minimap.js` 2,
-`competition.js` 2, `renderUnits.js` 1, `observerPanel.js` 1.
+Three counted forms, **119 sites** in the shipping client:
 
-They are **three different assertions** with three different costs.
+| Form | Count | Distribution |
+|---|---|---|
+| **Comparisons** — `owner === "player"`, `!== "ai"` | **68** | `inputCommands.js` 16 · `hudSelection.js` 7 · `renderBuildings.js` 6 · `hud.js` 6 · `boot.js` 6 · `input.js` 5 · `renderEffects.js` 4 · `hudPanelSignature.js` 4 · `landingPicker.js` 4 · `minimap.js` 2 · `overlays.js` 2 · `renderShared.js` 2 · `starmap.js` 2 · `renderUnits.js` 1 · `observerPanel.js` 1 |
+| **Owner arguments** — `prereqsMet(state,"player",…)`, `supplyUsed(state,"ai")` | **29** | `overlays.js` 12 · `hudSelection.js` 10 · `hud.js` 3 · `observer.js` 2 · `renderEffects.js` 1 · `techChart.js` 1 |
+| **Property paths** — `state.players.player.resources` | **22** | `hudSelection.js` 11 · `hudPanelSignature.js` 7 · `hud.js` 2 · `observer.js` 1 · `overlays.js` 1 (+ `landingPicker.js:149`, optional-chained) |
+
+Adding `tools/ailab.js` (9), `tools/duelCore.js` (1) and `competition.js` (2) brings the comparison
+total to the **80** dossier 01's finding #5 reports.
+
+The **owner-argument** form is the cheapest of the three and worth calling out: those 29 sites call
+engine functions that are *already* owner-parameterized (`prereqsMet`, `countUnits`,
+`hasCompletedBuilding`, `supplyUsed`/`supplyCap`, `powerCap`/`powerDraw`, `playerScore`,
+`scoreBreakdown`, `commodityAvailable`, `committedDoctrine`, `recycleFrac`, `powerEfficiency`). The
+engine is ready; only the caller hardcodes the seat.
+
+Across all three forms the sites are **three different assertions** with three different costs.
 
 ### 3.1 "Is this entity mine?" — the large, easy class
 
@@ -342,8 +369,14 @@ The dominant pattern. Mechanical substitution: `"player"` → `state.localOwner`
 | `landingPicker.js` | `:60`, `:61`, `:151`, `:160` |
 | `techChart.js` | `:36` (`const OWNER = "player"` — **already one seam**) |
 
-**Cost: one line each, plus one place to set `state.localOwner`.** `techChart.js:36` is the pattern
-to copy everywhere: name the seam once per module, then read the name.
+**110 of the 119 sites are this class. Cost: one line each, plus one place to set
+`state.localOwner`.** `techChart.js:36` is the pattern to copy everywhere — name the seam once per
+module, then read the name — and `hudPanelSignature.js:373` (`state.players[b.owner].upgrades`)
+shows the property-path form done right.
+
+**Do not sweep with `sed`.** `data.js:124` defines a commodity whose id is `"ai"` (AI cores), read as
+`state.players.player.resources.ai` at `hudPanelSignature.js:272`. Site-by-site, or the economy
+breaks silently.
 
 ### 3.2 "The enemy is `ai`" — the class that genuinely breaks at N seats
 
@@ -482,13 +515,30 @@ Six things. Five are already solved by how the codebase is built; one is a real 
    applies exactly the per-seat event filter the server needs. **Move that line to the server, per
    seat, verbatim.** The under-attack trigger (`boot.js:684`, `:704`, `:712`) and the supply-block
    beep (`:737`) then need the target-owner field from §3.2.
-6. **Interpolation continuity — the one real hazard.** `render.js` interpolates between
-   `snapshotPositions(game.state)` (`boot.js:501`) and live positions. Under filtering an entity can
-   *legitimately vanish* between snapshots (it walked into fog) or *appear mid-motion*. The renderer
-   must treat "absent this snapshot" as "stop drawing" rather than "interpolate to nowhere", and a
-   newly-appearing entity must be snapped, not lerped from a stale position. This is a real change to
-   `snapshotPositions`/`resetFacing` bookkeeping — small (tens of lines) but it is the one place
-   where filtering costs the renderer something.
+6. **Interpolation continuity — already safe, which is the surprise.** Under filtering an entity can
+   legitimately vanish between snapshots (it walked into fog) or appear mid-motion far from where it
+   was last seen. That is normally the first thing to break when a client stops holding the whole
+   world. Here all three cases are already handled, by code written for a different reason:
+
+   - **Appearing.** `lerpXY` (`renderShared.js:56-58`) returns the *live* entity when it has no
+     baseline — *"a unit spawned this tick"*. A newly-visible enemy snaps to its true position
+     instead of lerping from nowhere. ✔
+   - **Reappearing far away.** `TELEPORT_SQ = 60*60` (`renderShared.js:40`, applied at `:59-60`):
+     *"a one-tick move past this is a teleport, not motion — don't lerp it."* A unit re-sighted
+     across the map snaps rather than sliding. ✔
+   - **Vanishing.** `pruneFacing(state)` runs **every frame**, at the top of `drawFrame`
+     (`render.js:112`), dropping `prevPos` and `facing` entries for ids no longer in `state.units`
+     (`renderShared.js:69-76`). An entity that leaves the filtered view is cleaned up that frame;
+     if it comes back it has no baseline and takes the "appearing" path above. ✔
+
+   One cosmetic residue: a re-sighted enemy loses its remembered facing and re-derives from
+   `updateFacing`'s default (`renderShared.js:97`), so it may point "up" for a frame or two before
+   its next movement corrects it. A one-line fix if it ever reads badly (keep `facing` entries
+   longer than `prevPos`); not a blocker.
+
+   **`snapshotPositions` needs no change at all.** Called from `boot.js:501` immediately before each
+   `tick`, it becomes "immediately before applying each authoritative snapshot" — which is precisely
+   snapshot interpolation. The client already has the mechanism a networked renderer needs.
 
 ### 4.3 Measured payloads (this machine, `engine/persist.js` format)
 
@@ -543,7 +593,7 @@ Four reasons, in order of weight:
 | Cost of filtering | Mitigation |
 |---|---|
 | Server does N filter passes per tick instead of 1 serialize | Measured 0.24–0.69 ms per seat; the sim it accompanies is 0.2–22 ms. Noise. |
-| Interpolation must handle entities appearing/vanishing | §4.2 item 6 — tens of lines in `render.js`, done once. |
+| Interpolation must handle entities appearing/vanishing | **Already handled** — §4.2 item 6. Zero lines. |
 | Spectator/replay wants full state | Give the **spectator** a synthetic all-seeing seat (`observerMode` already bypasses `hiddenByFog`, `renderShared.js:254`). One extra filter config, not an extra path. |
 | Harder to debug ("why is the client missing X?") | A dev-only `--no-fog-filter` server flag, and a test that asserts a filtered snapshot contains no entity the seat cannot see. |
 
@@ -596,8 +646,8 @@ A `localOwner` substitution, one predicate, or an added parameter. **No restruct
 | `hud.js` | 452 | 6 owner literals + 2 `players.player.resources` reads + the 1v1 score chip (`:314`) |
 | `hudPanelSignature.js` | 380 | 4 owner literals + 6 `players.player` reads. The signature *mechanism* — repaint only when the panel's meaningful inputs change — is exactly right for a snapshot-driven client and should be kept. |
 | `techChart.js` | 366 | 1 line: `const OWNER = "player"` (`:36`) → `state.localOwner`. |
-| `observer.js` | 304 | Repurposed as the spectator client (§7); 3 sites |
-| `render.js` | 277 | `state.fog` (`:202`) + interpolation continuity (§4.2 item 6) |
+| `observer.js` | 304 | Repurposed as the spectator client (§7); 4 sites (`:116`, `:276`, `:290`, `:291`) |
+| `render.js` | 277 | `state.fog` (`:202`) only — the interpolator needs nothing (§4.2 item 6) |
 | `renderShared.js` | 255 | 1 predicate: `hiddenByFog` (`:253-255`) |
 | `observerPanel.js` | 246 | 1 site (`:89`) |
 | `main.js` | 168 | 2 `issue*` (`:149-150`) → transport sends. Everything else (canvas resize, DPR, panel folds, mute) verbatim. |
@@ -608,10 +658,10 @@ A `localOwner` substitution, one predicate, or an added parameter. **No restruct
 
 | Module | LOC | Touch points | Nature |
 |---|---|---|---|
-| `hudSelection.js` | 1,998 | **59** (7 literals + 12 `players.player` + 5 `issue*` + 33 mutators + 2 raw writes) | Every panel's *layout* is verbatim; only the click handlers change from "call the engine" to "send a command", and the affordability reads re-point at the local seat. **3% of the file.** Mechanical but wide. |
+| `hudSelection.js` | 1,998 | **67 distinct lines** (7 comparisons + 10 owner args + 11 property paths + 5 `issue*` + 33 mutators + 2 raw writes, one line double-counted) | Every panel's *layout* is verbatim; only the click handlers change from "call the engine" to "send a command", and the affordability reads re-point at the local seat. **3.4% of the file.** Mechanical but wide. |
 | `boot.js` | 788 | The lifecycle itself | §2.3. The genuinely architectural file. |
-| `input.js` | 588 | **17** (5 literals + 6 `issue*` + 6 selection writes) + `placeBuildingAt` (`:517-525`) going async | Gesture handling, camera, hotkeys, control groups all verbatim. |
-| `inputCommands.js` | 288 | **37** (16 literals + 13 `issue*` + 5 selection writes + 3 `state.fog`) — **13% of the file** | The densest coupling in the tree, and the most important to get right: it is the whole right-click dispatch. |
+| `input.js` | 588 | **18** (5 comparisons + 6 `issue*` + 6 selection writes + `map.bases.player` `:430`), plus `placeBuildingAt` (`:517-525`) going async | Gesture handling, camera, hotkeys, control groups all verbatim. **3% of the file.** |
+| `inputCommands.js` | 288 | **35 distinct lines** (16 comparisons + 13 `issue*` + 5 selection writes + `state.fog` `:69`) — **12% of the file** | The densest coupling in the tree, and the most important to get right: it is the whole right-click dispatch. |
 
 ### 5.4 Out of multiplayer v1 — 6,779 LOC (34.5%)
 
@@ -871,8 +921,8 @@ Verdicts: **verbatim** (no edits) · **light** (per-site substitution, no restru
 | `hud.js` | 452 | **light** | 6 literals + 2 `players.player` reads + 1v1 score chip `:314` |
 | `hudPanelSignature.js` | 380 | **light** | 4 literals + 6 `players.player` reads; the signature idea is *right* for snapshots |
 | `techChart.js` | 366 | **light** | one line: `:36` `const OWNER = "player"` |
-| `observer.js` | 304 | **light** | repurposed as spectator; `:116`, `:290`, `:291` |
-| `render.js` | 277 | **light** | `state.fog` `:202` + interpolation continuity (§4.2.6) |
+| `observer.js` | 304 | **light** | repurposed as spectator; `:116`, `:276`, `:290`, `:291` |
+| `render.js` | 277 | **light** | `state.fog` `:202`; interpolator already fog-safe (§4.2.6) |
 | `renderShared.js` | 255 | **light** | one predicate: `hiddenByFog` `:253-255` |
 | `observerPanel.js` | 246 | **light** | `:89` two-entrant naming → N seats |
 | `main.js` | 168 | **light** | 2 `issue*` `:149-150`; side-effect imports `:26-28` must survive |
@@ -901,9 +951,12 @@ heavy 3,662 (28%) · server-side/repurposed 402 (3%). **Verbatim + light = 68%.*
 
 ## 10. Ordered recommendations
 
-1. **Add two engine commands before the codec ships** — `issueClearHomeBase` and
-   `issueSetElectrified` — closing `hudSelection.js:1045` and `hudSelection.js:1722`, the only two
-   client writes with no envelope. Smallest change in this document, largest correctness payoff.
+1. **Close the two raw entity writes before the codec ships.** `hudSelection.js:1045` routes to the
+   existing `issueSetHomeBase([unit], null)` (`engine/commands.js:281`) — no engine change at all.
+   `hudSelection.js:1722` needs a new `issueSetElectrified(state, buildingIds, on)`, with
+   `engine/aiIndustry.js:172` routed through it too so the field has exactly one writer. Smallest
+   change in this document, largest correctness payoff: these are the only client mutations dossier
+   02's codec cannot see.
 2. **Fix `engine/gather.js:64` and `engine/scout.js:42` before anything rebinds `state.fog`.**
    Dossier 01 finding #6. Under the loopback this is a desync, not a render bug.
 3. **Introduce `state.localOwner` (or `game.localOwner`) and sweep the 71 "is this mine" literals
