@@ -12,7 +12,7 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 10 | 5 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 10 | 6 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
@@ -20,7 +20,7 @@ Update this file in the same commit as the work it describes.
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **72** | **5** | |
+| | | **72** | **6** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -83,7 +83,7 @@ ships, the pipeline is already boring.
 | **T-003** | Analysis dossiers: engine seams, command protocol, client coupling, HF platform, MCP | G4 | — | 🟡 | Five dossiers in `docs/analysis/`; each ADR they ground cites them |
 | **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, page title, and the in-game/dev-tooling name banners (`setup.js`, `update.js`, `tools/serve.js`) — **without touching engine internals**. `version.js`/`version.json` needed no change (already in sync at 1.1.0) | G5 | T-001 | ✅ | Suite green incl. `test/release-manifest.test.js` (22/22), `test/version.test.js`; full suite **2,519/2,519**; typecheck clean; browser smoke **20/20** (title assertion updated in lockstep in `tools/smoke.js`); `upstream/main..HEAD` diff stays semantically clean — no `engine/` file touched. In-universe lore references to "Stellar Frontier" (the sibling turn-based game) deliberately kept |
 | **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | 🟡 | Inherited `test.yml` has run **5×, all green** on this branch. Remaining: confirm all three job names, and document branch protection |
-| **T-006** | `Dockerfile` for Node 22 on HF: port 7860, `/data` mount point, **no npm install**. ⚠️ Do **not** copy the HF Python recipe's `RUN useradd -m -u 1000 user` — `node:*` images already ship a UID-1000 `node` user and the command fails with "UID 1000 is not unique" | G5, NFR-5 | T-004 | ⚪ | Image builds; container serves the game locally on 7860 as UID 1000 |
+| **T-006** | `Dockerfile` for Node 22 on HF: port 7860, `/data` mount point, **no npm install**. Uses the built-in `node` user (UID 1000) rather than HF's Python `useradd` recipe. **Phase 0's `CMD` runs `tools/serve.js`** — the multiplayer server doesn't exist yet; a later phase swaps only the `CMD` line. Also adds `.dockerignore` and the HF README front matter (`sdk: docker`, `app_port: 7860`, …) the Dockerfile's port depends on | G5, NFR-5 | T-004 | ✅ | **Built and run for real** (`dockerd` available this session). Verified: image builds clean; container runs as `uid=1000(node)`; `/data` owned by `node:node` and writable; listens on 7860; `.git`/`test/`/`.github` correctly excluded from the 333MB image; HTTP 200 on `/`, `/engine/state.js` (correct `Content-Type`), `/docs/player-handbook.html` (the in-game field-manual link). **Full page verified live in real Chromium**: title "SpaceCities", splash renders, version banner reads "SpaceCities v1.1.0", zero page/console errors |
 | **T-007a** | Push a trivial commit to the Space and watch it rebuild — proving a **non-PRO account can still rebuild an existing Docker Space** | ADR-0010 B2 | — | ✅ | **PASS** ([run 33337999794](https://github.com/alma92350/SpaceCities/actions/runs/33337999794)). `RUNNING_BUILDING → RUNNING_APP_STARTING → RUNNING` in **41 s**; Space HEAD advanced to the pushed commit `894b2c6`; app returned 200 anonymously. **PRO is not a prerequisite.** |
 | **T-007** | `.github/workflows/deploy-hf.yml` — **direct authenticated git push** (not `hub-sync`, which calls `hf repo create` and could hit the paywall). **Inherit the mechanics T-007a already proved**: credential-store auth (token never enters a remote URL), `runtime.stage` polling, and a HEAD-sha equality check as the pass condition. The retired probe is recoverable with `git show a10a634:.github/workflows/hf-probe.yml` | FR-21, ADR-0010 | T-006, T-007a ✅ | ⚪ | A push updates the Space; token never in logs; the unrelated Python history is force-overwritten deliberately (this also removes the probe's `DEPLOY_PROBE.md`). **Never delete the Space** |
 | **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | 🟡 | **Public ✅** — `private: False`, and both `api/spaces` and the running app return **200 anonymously** (verified unauthenticated). Q1 closed. Remaining: the *game* is not deployed yet, so "plays end-to-end on HF" waits on T-004/T-006/T-007 |

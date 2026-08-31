@@ -1,3 +1,23 @@
+---
+title: SpaceCities
+emoji: 🚀
+colorFrom: indigo
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+header: mini
+fullWidth: true
+short_description: Real-time multiplayer space RTS with an MCP endpoint for agent players.
+license: mit
+tags:
+  - game
+  - multiplayer
+  - rts
+  - websocket
+  - mcp
+---
+
 # SpaceCities
 
 A browser-based real-time strategy game set in the same universe as

@@ -1,0 +1,10 @@
+# Not needed at runtime — nothing in the running game imports from these.
+# Keep the image to source + real assets, not dev/CI machinery.
+.git
+.github
+.claude
+node_modules
+test
+
+*.log
+.DS_Store
