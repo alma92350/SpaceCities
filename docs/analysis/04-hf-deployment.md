@@ -838,3 +838,60 @@ It is also a partial answer to **U2 (cold start)**: a *rebuild* takes ~41 s. A w
 ### Housekeeping
 
 `DEPLOY_PROBE.md` is now on the Space. It is harmless and is overwritten when T-007 deploys the real tree.
+
+---
+
+## 14. T-008a result — `/data` persistence, measured across two real deploys
+
+**Confirmed, not inferred.** §4's reading of the docs — "almost certainly ephemeral without an
+attached bucket" — is now backed by a direct measurement, taken across two consecutive real
+production deploys of this Space.
+
+### Method
+
+`tools/dataProbe.js` (added for T-008a) writes a marker — a random boot id + timestamp — to
+`DATA_DIR` on every server start, and reports via `GET /__data-probe` whether a marker from a
+**different** boot was already there. Two deploys landed back to back:
+
+| Deploy | Commit | Landed | `/__data-probe` result |
+|---|---|---|---|
+| 1st real app deploy | `0d2ee80` | 2026-08-31 02:55:40 UTC | `persisted: false`, `bootId: mtgnbug3-tyluym53` (expected — nothing to find yet) |
+| 2nd real app deploy | `9bf0f04` | 2026-08-31 02:57:38 UTC | **`persisted: false`, `previousMarker: null`**, `bootId: mtgnedks-kftgw1el` |
+
+### Verdict
+
+**`/data` is ephemeral on this Space today.** The second boot, ~2 minutes after the first, found
+**no trace** of the first boot's marker — not a stale value, not a partial write, nothing. Whatever
+backs `/data` without an attached Storage Bucket does not survive a container restart, and a
+redeploy is exactly that: F4's "every push rebuilds and restarts" applies to disk state as much as
+to memory.
+
+### Why this matters more than a checkbox
+
+**ADR-0012's entire mechanism depends on the opposite being true.** "Snapshot authoritative match
+state to disk on a cadence... and restore on boot" only protects a match if the disk survives the
+restart it's protecting against. Today, it would not: a snapshot written to `/data` during a match
+would be gone by the time the next container booted to read it back — silently. The ADR's own
+"Follow-on work" line already named this ("Confirm `/data` persistence with a real Storage Bucket
+before relying on it") as something to verify before trusting it, not something it assumed. That
+follow-up has now returned a concrete, hard answer, and the answer requires action, not just noting.
+
+**The fix is well-understood and free.** Per §4's own citation of the Hub docs: *"Buckets are
+available to all users and organizations... buckets are free to create and have a free storage
+allowance."* This is not gated behind PRO. The path is exactly what §4 already documented:
+`hf buckets create SpaceCities-state`, then attach it at `/data` from the Space settings UI (or
+programmatically), read-write.
+
+**This session could not perform that step.** Attaching a bucket needs either the `hf` CLI with a
+write-scoped token (neither present in this session — confirmed absent at the start of the T-007a
+work) or the HF web UI, which is a Space-administration action outside this session's tool access.
+It is recorded here as the concrete next action rather than attempted blind.
+
+### What does NOT change
+
+- `tools/dataProbe.js` itself is proven correct: it detected non-persistence exactly as the ground
+  truth demanded, both boots wrote successfully (`writable: true`), and the mechanism needs no
+  further work to answer the same question again once a bucket is attached — the very next redeploy
+  after attaching one will show `persisted: true` if the fix worked, immediately.
+- ADR-0012's chosen approach (snapshot to disk, restore on boot) is not wrong — it is simply, now
+  provably, **incomplete without the bucket it always said it needed**.

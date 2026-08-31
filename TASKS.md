@@ -12,7 +12,7 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 10 | 8 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 11 | 9 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
@@ -20,7 +20,7 @@ Update this file in the same commit as the work it describes.
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **72** | **8** | |
+| | | **73** | **9** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -87,7 +87,8 @@ ships, the pipeline is already boring.
 | **T-007a** | Push a trivial commit to the Space and watch it rebuild — proving a **non-PRO account can still rebuild an existing Docker Space** | ADR-0010 B2 | — | ✅ | **PASS** ([run 33337999794](https://github.com/alma92350/SpaceCities/actions/runs/33337999794)). `RUNNING_BUILDING → RUNNING_APP_STARTING → RUNNING` in **41 s**; Space HEAD advanced to the pushed commit `894b2c6`; app returned 200 anonymously. **PRO is not a prerequisite.** |
 | **T-007** | `.github/workflows/deploy-hf.yml` — **direct authenticated git push** (not `hub-sync`, which calls `hf repo create` and could hit the paywall), gated on `test.yml` passing (`workflow_run`) so a red build never reaches the Space. Force-pushes this repo's **own full history** onto the Space's default branch (discovered via `git ls-remote --symref`, not assumed) — inherits the mechanics T-007a already proved: credential-store auth, `runtime.stage` polling, HEAD-sha equality as the pass condition | FR-21, ADR-0010 | T-006, T-007a ✅ | ✅ | **First real automated deploy succeeded** ([run 33352161332](https://github.com/alma92350/SpaceCities/actions/runs/33352161332), commit `0d2ee80`): all 11 steps green, `git ls-remote --symref` correctly found `main`, force-push landed, rebuild watched through to `RUNNING`, Space HEAD verified equal to the pushed sha, app confirmed 200 anonymously — all from the CI job itself. **Two real failures preceded it** and are part of this task's evidence, not separate from it: `hub-sync`-style creation risk was never hit, but HF's own push-time YAML validator twice rejected the front matter (`short_description` over 60 chars) — a real bug this task found and fixed, not a hypothetical the ADR merely anticipated |
 | **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | ✅ | **Public ✅** (Q1 closed — verified unauthenticated). **Live verification, independent of CI's own checks**: `curl` against `https://almaatla-spacecities.hf.space/` — index 200 with `<title>SpaceCities</title>`, `main.js`/`engine/state.js` served with correct `Content-Type: application/javascript`, `/docs/player-handbook.html` (the in-game field-manual link) 200, `version.json` intact, an unknown path correctly 404s rather than falling back to the old app. **Full real-Chromium Playwright verification** (title, splash render, version banner, zero console errors) was already run against this **exact, byte-identical Docker image** in T-006; a second live-browser pass against the public URL itself was attempted but blocked by a proxy tunnel limitation in this session (`ws_closed_mid_exchange` to `almaatla-spacecities.hf.space:443` — infrastructure, not app behavior) — the curl-based checks plus the identical-image Chromium run together cover the same ground |
-| **T-008a** | **Persistence probe built** (`tools/dataProbe.js` + `/__data-probe` route in `tools/serve.js`, gated entirely on `DATA_DIR` — a no-op in local dev): every boot writes a marker with a fresh boot id and reports whether a *different* boot's marker was already there. Remaining: attach a Storage Bucket (or deliberately don't) and read `/__data-probe` across two real deploys to get the actual verdict | ADR-0010 B3, FR-22 | T-006 | 🟡 | 10/10 unit tests green; manually verified end-to-end (two local boots against one dir → `persisted:true`; no `DATA_DIR` → route 404s, matching pre-existing local-dev behavior). **Verdict pending** a real two-deploy gap on the live Space |
+| **T-008a** | Persistence probe (`tools/dataProbe.js` + `/__data-probe`) built, tested, and **run against two real back-to-back production deploys** | ADR-0010 B3, FR-22 | T-006 | ✅ | **Verdict, measured, not inferred: `/data` is ephemeral without an attached Storage Bucket.** Deploy 1 (`0d2ee80`, 02:55:40 UTC) wrote a marker; deploy 2 (`9bf0f04`, 02:57:38 UTC, ~2 min later) found `previousMarker: null` — no trace survived. Full evidence in `docs/analysis/04-hf-deployment.md` §14. **Consequence for ADR-0012:** its snapshot/restore mechanism needs this bucket to do anything at all — a snapshot written today would vanish on the very restart it exists to survive. See **T-008b** |
+| **T-008b** | 🆕 **Attach a Storage Bucket at `/data`** (`hf buckets create SpaceCities-state`, then attach read-write from Space settings — confirmed **free**, not PRO-gated, per `docs/analysis/04-hf-deployment.md` §4). **Outside this session's tool access** — needs the `hf` CLI with a write-scoped token or the HF web UI, neither available here | ADR-0012 | T-008a ✅ | 🔴 | Owner action, or a session with `hf` CLI write access. Once attached: the *very next* redeploy's `/__data-probe` reads `persisted:true` — the probe needs no further work to confirm the fix |
 
 ---
 
@@ -222,7 +223,7 @@ that would actually hurt, each owned by a task:
 
 | # | Assumption | Owned by |
 |---|---|---|
-| U3 | Whether `/data` persists with **no bucket attached** (docs imply not). Write a boot-timestamp file, force a rebuild, read it back — **before trusting any persistence** | T-008a |
+| ~~U3~~ | ~~Whether `/data` persists with no bucket attached~~ — **RESOLVED by T-008a: it does not.** Measured across two real deploys, ~2 minutes apart: the second found no trace of the first's marker. See `docs/analysis/04-hf-deployment.md` §14 | ✅ T-008a → **T-008b** |
 | ~~U7/U11~~ | ~~The git push itself, and whether overwriting a Docker Space escapes the paid-plan rule~~ — **RESOLVED by T-007a.** Push works on a free account; the Space rebuilt in 41 s and served anonymously | ✅ T-007a |
 | U5 | Storage-bucket write latency for frequent small writes — it is object storage, not POSIX. Benchmark before choosing a snapshot interval | T-029a |
 | U12 | 2-vCPU headroom for N-player 20 Hz. The measured WebSocket result was one client against a trivial app | T-014, T-062 |
@@ -238,6 +239,7 @@ that would actually hurt, each owned by a task:
 | **Q2** | ~~Free tier or paid always-on?~~ **Answered by ADR-0010: start free.** 48 h idle tolerance is ample; `$0.03/h` CPU Upgrade removes sleep later if the game gets traction. Open only as a **risk**: whether a non-PRO account can rebuild an existing Docker Space — resolved by T-007a. | T-007a | — |
 | **Q3** | Is multiplayer **Odyssey** a wanted v2? Shapes how much generality Phase 5 builds. | T-041 scope | alma92350 |
 | **Q4** | Are agent seats visibly labelled to human opponents? (Recommendation: **yes**.) | T-031 | alma92350 |
+| **T-008b** | Attach a Storage Bucket at `/data` — confirmed **free**, not gated behind PRO. `hf buckets create SpaceCities-state`, then attach read-write from Space settings. This session has no `hf` CLI or write-scoped HF token to do it directly | ADR-0012, all of Phase 3's match-persistence work | alma92350, or a future session with `hf` CLI write access |
 
 ---
 
