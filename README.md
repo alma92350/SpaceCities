@@ -1,4 +1,4 @@
-# Stellar Frontier: RTS
+# SpaceCities
 
 A browser-based real-time strategy game set in the same universe as
 [Stellar Frontier](https://github.com/alma92350/SpaceExploration) (the turn-based space
@@ -6,6 +6,17 @@ trading/exploration game) — a separate, standalone game, not a mode bolted ont
 Vanilla JavaScript, ES modules, **no build step, no dependencies**. Play a 1v1 skirmish against a
 scripted AI, or an open-ended **Odyssey** that strings worlds together into a galaxy you settle,
 trade across, and conquer.
+
+This repository is a port of [Stellar Frontier: RTS](https://github.com/alma92350/SpaceExploration-RTS)
+into a **multiplayer** RTS deployed at
+[huggingface.co/spaces/Almaatla/SpaceCities](https://huggingface.co/spaces/Almaatla/SpaceCities),
+adding networked matches and an MCP server so AI agents can play as ordinary seats alongside
+humans. Everything below documents the game **as it plays today** — the single-player skirmish and
+Odyssey described in this README are unchanged and still run entirely offline (see
+[Architecture Decision Record 0004](docs/adr/0004-loopback-transport.md)). The multiplayer and
+agent-play work is tracked in [`docs/PRD.md`](docs/PRD.md) (what and why),
+[`docs/adr/`](docs/adr/) (the architecture decisions and their evolution), and
+[`TASKS.md`](TASKS.md) (where the port is and what's left).
 
 ## Running it
 

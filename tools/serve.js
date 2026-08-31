@@ -76,7 +76,7 @@ const server = createServer(async (req, res) => {
 // it's imported — e.g. by a test — for `resolveSafePath`.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   server.listen(PORT, () => {
-    console.log(`Stellar Frontier — serving ${ROOT}`);
+    console.log(`SpaceCities — serving ${ROOT}`);
     console.log(`  open  http://localhost:${PORT}/`);
     console.log("  stop  Ctrl+C");
   });

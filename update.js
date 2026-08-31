@@ -26,7 +26,7 @@ const writeDismissed = v => { try { localStorage.setItem(DISMISS_KEY, v); } catc
 // Show the running version in the topbar chip.
 function showVersionChip() {
   const el = document.getElementById("appVersion");
-  if (el) { el.textContent = "v" + APP_VERSION; el.title = `Stellar Frontier v${APP_VERSION}`; }
+  if (el) { el.textContent = "v" + APP_VERSION; el.title = `SpaceCities v${APP_VERSION}`; }
 }
 
 // Fetch the deployed manifest and, if it's a newer release than this build, raise the banner.

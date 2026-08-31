@@ -129,7 +129,7 @@ async function main() {
     await page.goto(URL_, { waitUntil: "networkidle" });
     await page.waitForTimeout(800);
 
-    check("the page loads and titles itself", (await page.title()) === "Stellar Frontier: RTS");
+    check("the page loads and titles itself", (await page.title()) === "SpaceCities");
     check("main.js's module graph actually executed",
       (await page.evaluate(() => performance.getEntriesByType("resource").filter(r => r.name.endsWith(".js")).length)) > 50);
     check("the setup screen offers a game mode", await page.isVisible("text=⚔ Skirmish"));

@@ -1,9 +1,9 @@
 {
-  "name": "stellar-frontier-rts",
+  "name": "spacecities",
   "version": "1.1.0",
   "private": true,
   "type": "module",
-  "description": "Real-time strategy game in the Stellar Frontier universe. No dependencies, no build step.",
+  "description": "Multiplayer real-time strategy game in the Stellar Frontier universe, with an MCP interface for AI agent players. No dependencies, no build step.",
   "scripts": {
     "start": "node tools/serve.js",
     "test": "node --test test/*.test.js",

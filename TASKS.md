@@ -12,7 +12,7 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 10 | 4 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 10 | 5 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
@@ -20,7 +20,7 @@ Update this file in the same commit as the work it describes.
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **72** | **4** | |
+| | | **72** | **5** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -81,7 +81,7 @@ ships, the pipeline is already boring.
 | **T-001** | Import upstream verbatim with full history; `upstream` remote configured | ADR-0002 | — | ✅ | 542 commits present; `npm test` green (2,519 tests); `git blame` reaches upstream authorship |
 | **T-002** | PRD, ADR log, feasibility spikes | G4 | — | ✅ | `docs/PRD.md`, `docs/adr/0001…0011`, `docs/analysis/00` committed |
 | **T-003** | Analysis dossiers: engine seams, command protocol, client coupling, HF platform, MCP | G4 | — | 🟡 | Five dossiers in `docs/analysis/`; each ADR they ground cites them |
-| **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, `version.js`/`version.json`, page title — **without touching engine internals** | G5 | T-001 | ⚪ | Suite green incl. `test/release-manifest.test.js`, `test/version.test.js`; `upstream/main..HEAD` diff stays semantically clean |
+| **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, page title, and the in-game/dev-tooling name banners (`setup.js`, `update.js`, `tools/serve.js`) — **without touching engine internals**. `version.js`/`version.json` needed no change (already in sync at 1.1.0) | G5 | T-001 | ✅ | Suite green incl. `test/release-manifest.test.js` (22/22), `test/version.test.js`; full suite **2,519/2,519**; typecheck clean; browser smoke **20/20** (title assertion updated in lockstep in `tools/smoke.js`); `upstream/main..HEAD` diff stays semantically clean — no `engine/` file touched. In-universe lore references to "Stellar Frontier" (the sibling turn-based game) deliberately kept |
 | **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | 🟡 | Inherited `test.yml` has run **5×, all green** on this branch. Remaining: confirm all three job names, and document branch protection |
 | **T-006** | `Dockerfile` for Node 22 on HF: port 7860, `/data` mount point, **no npm install**. ⚠️ Do **not** copy the HF Python recipe's `RUN useradd -m -u 1000 user` — `node:*` images already ship a UID-1000 `node` user and the command fails with "UID 1000 is not unique" | G5, NFR-5 | T-004 | ⚪ | Image builds; container serves the game locally on 7860 as UID 1000 |
 | **T-007a** | Push a trivial commit to the Space and watch it rebuild — proving a **non-PRO account can still rebuild an existing Docker Space** | ADR-0010 B2 | — | ✅ | **PASS** ([run 33337999794](https://github.com/alma92350/SpaceCities/actions/runs/33337999794)). `RUNNING_BUILDING → RUNNING_APP_STARTING → RUNNING` in **41 s**; Space HEAD advanced to the pushed commit `894b2c6`; app returned 200 anonymously. **PRO is not a prerequisite.** |

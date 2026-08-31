@@ -1,6 +1,6 @@
 # Contributing
 
-Stellar Frontier: RTS is a vanilla-JavaScript, ES-module game with **no build step** and **no
+SpaceCities is a vanilla-JavaScript, ES-module game with **no build step** and **no
 runtime dependencies**. The files in the repo are exactly what the browser loads. That simplicity
 is a feature — please keep it. A few rules are load-bearing; the test suite enforces them, so a
 change that breaks one fails `npm test` rather than shipping.

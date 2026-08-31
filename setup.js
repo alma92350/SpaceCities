@@ -321,7 +321,7 @@ export function renderMapSelect() {
 
   const ver = document.createElement("p");
   ver.className = "setup-version";
-  ver.textContent = `Stellar Frontier v${APP_VERSION}`;
+  ver.textContent = `SpaceCities v${APP_VERSION}`;
   mapSelectEl.appendChild(ver);
 
   // Mode toggle: skirmish, the open-world Odyssey, or a scripted scenario.
