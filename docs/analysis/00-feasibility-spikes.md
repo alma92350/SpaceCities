@@ -7,7 +7,7 @@ executable evidence rather than argument.
 Both spikes were run on the session container: **4 × Intel Xeon @ 2.10 GHz, 16.9 GB RAM, Node
 v22.22.2** — deliberately modest hardware, in the same class as a Hugging Face free-tier Space
 (2 vCPU). Numbers below should be read as *indicative of*, not measured on, the real target; the
-Space-hardware re-run is task **T-013** in [`TASKS.md`](../../TASKS.md).
+Space-hardware re-run is task **T-014** in [`TASKS.md`](../../TASKS.md).
 
 ---
 
@@ -111,7 +111,7 @@ At 20 Hz the wall-clock budget is **50 ms per tick**. A match consuming *x* ms p
   (see ADR-0009), and where the next measurement should go.
 
 ### Follow-on measurements needed
-- **T-013:** re-run both spikes on the actual Space hardware.
+- **T-014:** re-run both spikes on the actual Space hardware.
 - Cost of `serializeGame`/fog-filtering per client per tick — likely dominant; measure before
   choosing a replication strategy.
 - Memory per match (drives the concurrent-match ceiling as much as CPU does).
@@ -121,4 +121,4 @@ At 20 Hz the wall-clock budget is **50 ms per tick**. A match consuming *x* ms p
 ## Reproducing
 Both spikes live in the session scratchpad rather than the repo, because they are throwaway
 evidence, not shipped code. The stress harness is worth re-creating as a committed benchmark under
-`tools/` once the server exists — task **T-013**.
+`tools/` once the server exists — task **T-014**.

@@ -133,12 +133,24 @@ test("the tech bot climbs past the Barracks and fields more than Skiffs — the 
 test("an overrides row reaches the sim — a strategy that never initiates commits no waves", () => {
   // The seam the whole search loop rests on: STRATEGIES is a plain object read through
   // strategyFor(), so writing a row into it before a run IS the experiment.
-  applyOverrides({ strategies: { labPacifist: { neverInitiates: true } } });
-  assert.ok(STRATEGIES.labPacifist, "applyOverrides must add the row to the live table");
-  const pacifist = run(short({ strategy: "labPacifist", world: "korrath", minutes: 12 }));
-  const baseline = run(short({ strategy: "default", world: "korrath", minutes: 12 }));
-  assert.equal(pacifist.waves, 0, "a neverInitiates strategy must commit zero waves");
-  assert.ok(baseline.waves > 0, "the korrath baseline should commit at least one wave in 12 minutes");
+  //
+  // snapshotTables/restoreTables, same as the very next test below: applyOverrides writes
+  // straight into the LIVE shipped table with no undo of its own, and this test used to have
+  // none either — labPacifist stayed in STRATEGIES for the rest of the file, an inert but real
+  // leak (nothing else selects strategy "labPacifist", so no other test's result was affected —
+  // unlike the aggressive.garrisonMult leak the next test's own comment documents, which DID
+  // corrupt 21 later tests before it was caught).
+  const snap = snapshotTables();
+  try {
+    applyOverrides({ strategies: { labPacifist: { neverInitiates: true } } });
+    assert.ok(STRATEGIES.labPacifist, "applyOverrides must add the row to the live table");
+    const pacifist = run(short({ strategy: "labPacifist", world: "korrath", minutes: 12 }));
+    const baseline = run(short({ strategy: "default", world: "korrath", minutes: 12 }));
+    assert.equal(pacifist.waves, 0, "a neverInitiates strategy must commit zero waves");
+    assert.ok(baseline.waves > 0, "the korrath baseline should commit at least one wave in 12 minutes");
+  } finally {
+    restoreTables(snap);
+  }
 });
 
 test("applyOverrides merges into an existing row rather than replacing it", () => {
