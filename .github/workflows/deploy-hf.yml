@@ -1,0 +1,196 @@
+# T-007 — deploy to the Hugging Face Space on every push, after tests pass.
+#
+# Runs only once the "tests" workflow (test.yml) has completed on a deploy branch, and only
+# deploys if that run succeeded — so a red build never reaches the Space (PRD G5, milestone M0:
+# "CI green, deploying on push"). `workflow_dispatch` is also available for a manual re-deploy
+# (e.g. after only a Space-side config change) without needing a new commit.
+#
+# The mechanics here — credential-store auth, runtime.stage polling, and a HEAD-sha equality
+# check as the pass condition — are exactly what T-007a proved live against this Space
+# (github.com/alma92350/SpaceCities/actions/runs/33337999794): a non-PRO account CAN push to and
+# rebuild an existing Docker Space. See docs/adr/0010-hf-deployment.md.
+#
+# UNLIKE the retired probe (recoverable at `git show a10a634:.github/workflows/hf-probe.yml`),
+# this pushes THIS REPOSITORY'S OWN HISTORY onto the Space — force-pushing our checkout directly
+# onto the Space's default branch, per ADR-0010's decision: "force-pushes the built tree to the
+# Space remote, which cleanly overwrites the unrelated Python history already there." This is
+# deliberate and expected: the Space's prior app and this repo share no history, so a merge would
+# be meaningless. NEVER DELETE THE SPACE — a force-push replaces its git history, not the Space
+# itself, and the Space may not be recreatable on a non-PRO account (ADR-0010 §3.1).
+
+name: deploy to hugging face
+
+on:
+  workflow_run:
+    workflows: ["tests"]
+    types: [completed]
+    branches:
+      - main
+      - claude/spacecities-multiplayer-rts-port-hp9195
+  workflow_dispatch:
+
+# Only one deploy at a time — the Space rebuilds on every push, so two concurrent deploys would
+# race each other's builds. A later push supersedes an earlier one, so cancel rather than queue:
+# only the latest commit is worth deploying, and a cancelled `git push` never partially moves the
+# remote ref (git pushes are atomic at the ref level), so cancelling mid-deploy is safe.
+concurrency:
+  group: hf-space-deploy
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # Skip entirely on a failed/cancelled test run — a manual dispatch always proceeds.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    name: push to the Space and watch it rebuild
+    env:
+      SPACE: Almaatla/SpaceCities
+      SPACE_URL: https://huggingface.co/spaces/Almaatla/SpaceCities
+      APP_URL: https://almaatla-spacecities.hf.space/
+    steps:
+      - name: Check the HF_TOKEN secret is present
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN secret is not set on this repository."
+            echo "Add it under Settings -> Secrets and variables -> Actions."
+            echo "The token needs WRITE access to the Space (a fine-grained token scoped to"
+            echo "$SPACE, or a write token)."
+            exit 1
+          fi
+          echo "HF_TOKEN is present (${#HF_TOKEN} characters)."
+
+      # fetch-depth: 0 — the whole point is to push our FULL history (upstream's 542 commits plus
+      # everything since) onto the Space, so `git blame`/`git log` on the deployed repo tell the
+      # same story this GitHub repo does. A shallow checkout would force-push over the Space's
+      # history with a single orphan commit, discarding that provenance for no reason.
+      #
+      # Check out the exact commit the upstream "tests" run validated, not just whatever HEAD is
+      # by the time this job starts — closes the race where a newer push lands on the branch
+      # between the test run finishing and this job checking out.
+      - name: Check out the tested commit
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Capture the Space's state before the push
+        run: |
+          before=$(curl -sS "https://huggingface.co/api/spaces/$SPACE")
+          echo "$before" | python3 -c "
+          import sys, json
+          d = json.load(sys.stdin)
+          rt = d.get('runtime') or {}
+          print('sha        :', d.get('sha'))
+          print('private    :', d.get('private'))
+          print('sdk        :', d.get('sdk'))
+          print('stage      :', rt.get('stage'))
+          print('hardware   :', (rt.get('hardware') or {}).get('current'))
+          "
+          echo "SHA_BEFORE=$(echo "$before" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sha',''))")" >> "$GITHUB_ENV"
+
+      # Credentials go in the credential store, never into a remote URL or a command line, so the
+      # token cannot surface in `git remote -v`, a trace, or a process listing. Actions also masks
+      # secrets in logs, but that is a backstop, not the mechanism.
+      - name: Configure git credentials for huggingface.co
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          git config --global credential.helper store
+          printf 'https://user:%s@huggingface.co\n' "$HF_TOKEN" > "$HOME/.git-credentials"
+          chmod 600 "$HOME/.git-credentials"
+          git config --global user.email "almaatla@gmail.com"
+          git config --global user.name  "alma92350"
+
+      # Discover the Space's actual default branch rather than assuming `main` — `git ls-remote
+      # --symref` answers this with no clone needed (T-007a proved the analogous "don't assume"
+      # choice mattered enough to write down; this is the zero-cost way to keep it honest here).
+      - name: Discover the Space's default branch
+        run: |
+          symref=$(git ls-remote --symref "$SPACE_URL" HEAD | awk '/^ref:/ {print $2}')
+          branch="${symref#refs/heads/}"
+          if [ -z "$branch" ]; then
+            echo "::error::Could not resolve the Space's default branch from ls-remote."
+            exit 1
+          fi
+          echo "Space default branch: $branch"
+          echo "SPACE_BRANCH=$branch" >> "$GITHUB_ENV"
+
+      - name: Add the Space as a git remote
+        run: git remote add space "$SPACE_URL"
+
+      # THE deploy step. Force-push is deliberate (see the file header and ADR-0010): the Space's
+      # existing history is unrelated to this repo's, so there is nothing to merge. This does not
+      # touch the GitHub repo or the branch this workflow runs on — only the remote Space ref moves.
+      - name: Force-push this repo's tree and history to the Space
+        run: |
+          git push --force space "HEAD:refs/heads/$SPACE_BRANCH"
+          echo "SHA_AFTER=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+
+      # A push that lands but never builds is not a deploy. Watch the runtime stage until the
+      # Space is serving again, and fail loudly on a build error rather than reporting a green
+      # tick. T-007a measured a rolling swap (RUNNING_BUILDING keeps serving the OLD build while
+      # the new image builds) taking ~41s end to end on a trivial one-file change; a real image
+      # build is slower, so this budgets 15 minutes rather than assuming that number holds.
+      - name: Wait for the Space to rebuild
+        run: |
+          echo "before: $SHA_BEFORE"
+          echo "after : $SHA_AFTER"
+          deadline=$(( $(date +%s) + 900 ))
+          last=""
+          saw_build=0
+          while [ "$(date +%s)" -lt "$deadline" ]; do
+            stage=$(curl -sS "https://huggingface.co/api/spaces/$SPACE" \
+              | python3 -c "import sys,json; print(((json.load(sys.stdin).get('runtime') or {}).get('stage')) or 'UNKNOWN')")
+            if [ "$stage" != "$last" ]; then
+              echo "$(date -u +%H:%M:%S)  stage=$stage"
+              last="$stage"
+            fi
+            case "$stage" in
+              BUILDING|APP_STARTING|RUNNING_BUILDING|RUNNING_APP_STARTING) saw_build=1 ;;
+              RUNTIME_ERROR|BUILD_ERROR|CONFIG_ERROR)
+                echo "::error::Space entered $stage — the rebuild failed. Check the Space's build"
+                echo "logs at https://huggingface.co/spaces/$SPACE?logs=build"
+                exit 1 ;;
+              RUNNING)
+                if [ "$saw_build" = "1" ]; then
+                  echo "Space is RUNNING again after rebuilding."
+                  break
+                fi ;;
+            esac
+            sleep 10
+          done
+          if [ "$saw_build" != "1" ]; then
+            echo "::warning::Never observed a build stage. The push may not have triggered a rebuild,"
+            echo "or the build completed between polls. Verifying by commit sha below."
+          fi
+
+      # The decisive check: does the Space's HEAD now equal what we pushed? A stage transition
+      # could be coincidental (another push racing this one); a matching sha could not.
+      - name: Verify the Space's HEAD advanced to our commit
+        run: |
+          sha_now=$(curl -sS "https://huggingface.co/api/spaces/$SPACE" \
+            | python3 -c "import sys,json; print(json.load(sys.stdin).get('sha',''))")
+          echo "Space HEAD before deploy : $SHA_BEFORE"
+          echo "Pushed commit            : $SHA_AFTER"
+          echo "Space HEAD now           : $sha_now"
+          if [ "$sha_now" = "$SHA_AFTER" ]; then
+            echo "PASS: the Space is running this commit."
+          else
+            echo "::error::Space HEAD did not advance to the pushed commit."
+            exit 1
+          fi
+
+      - name: Confirm the app still serves anonymously
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 30 "$APP_URL" || echo 000)
+            echo "attempt $i: HTTP $code"
+            [ "$code" = "200" ] && { echo "PASS: the app is serving anonymously after the deploy."; exit 0; }
+            sleep 15
+          done
+          echo "::error::App did not return 200 after the deploy."
+          exit 1
