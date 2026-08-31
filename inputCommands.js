@@ -24,7 +24,6 @@
 "use strict";
 
 import { game } from "./session.js";
-import { issueMove, issueGather, issueAttack, issueAttackMove, issueAssistBuild, issueSetRally, issueEscort, issueServiceBuilding, issueFerryFreighter, issueRepair, issueSetHomeBase } from "./engine/commands.js";
 import { UNITS, BUILDINGS, storeCapOf, canGatherType, canLogisticsType, canBuildCategory } from "./engine/entities.js";
 import { recipeOf } from "./engine/industry.js";
 import { isVisibleAt, isNodeDiscovered } from "./engine/fog.js";
@@ -40,9 +39,19 @@ const NODE_PICK_RADIUS = 14;
 
 /**
  * Bind the stateless click-interpretation helpers to one input controller's collaborators.
- * @param {{ canvas: Object, state: Object, camera: Object, onChange: Function }} deps
+ *
+ * `transport` is the ADR-0004 seam (net/transport.js) — every order below goes out as a
+ * net/commandShapes.js WireCommand via transport.submitCommand(cmd), never a direct
+ * engine/commands.js issue* call, so this file (and everything downstream of it) no longer
+ * touches engine/ mutation at all. None of these call sites await or branch on the returned
+ * CommandResult (nothing here ever did check an issue* return value either) — fire, play the
+ * sound, onChange(). submitCommand's mutation is synchronous-underneath for both the real
+ * loopback transport and boot.js's directTransport shim (proven in test/loopback.test.js), so
+ * sound.playOrder()/onChange() right after still see the post-command state, unchanged from
+ * before this file went through a transport at all.
+ * @param {{ canvas: Object, state: Object, camera: Object, transport: Object, onChange: Function }} deps
  */
-export function createInputCommands({ canvas, state, camera, onChange }) {
+export function createInputCommands({ canvas, state, camera, transport, onChange }) {
     function viewport() {
       return { vw: canvas.clientWidth, vh: canvas.clientHeight };
     }
@@ -91,8 +100,8 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
       const combatants = units.filter(u => UNITS[u.type].role === "combat");
       const others = units.filter(u => UNITS[u.type].role !== "combat");
       const formation = currentFormation(heading);
-      if (combatants.length) issueAttackMove(combatants, x, y, queue, formation);
-      if (others.length) issueMove(others, x, y, queue, formation);
+      if (combatants.length) transport.submitCommand({ t: "attackMove", ids: combatants.map(u => u.id), x, y, q: queue, f: formation });
+      if (others.length) transport.submitCommand({ t: "move", ids: others.map(u => u.id), x, y, q: queue, f: formation });
     }
 
     function alivePlayerUnitIds(ids) {
@@ -196,7 +205,7 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
         const building = state.buildings.get(state.selection[0]);
         if (building && building.owner === "player" && BUILDINGS[building.type].produces) {
           const node = nodeAt(p.x, p.y);
-          issueSetRally(building, p.x, p.y, node ? node.id : null);
+          transport.submitCommand({ t: "setRally", building: building.id, x: p.x, y: p.y, node: node ? node.id : null });
           sound.playOrder();
           onChange();
           return;
@@ -209,7 +218,7 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
       const target = entityAt(p.x, p.y);
       if (target && target.owner === "player" && target.kind === "building" && target.constructing) {
         const workers = selected.filter(u => canBuildCategory(u.type, BUILDINGS[target.type]?.category));
-        if (workers.length) { issueAssistBuild(workers, target.id, target.type, queue); sound.playOrder(); onChange(); }
+        if (workers.length) { transport.submitCommand({ t: "assistBuild", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); }
         return;
       }
       // A completed friendly building with logistics buffers (a factory, the Rig) OR a fuel-burning
@@ -223,7 +232,7 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
       if (target && target.owner === "player" && target.kind === "building" && !target.constructing
           && (recipeOf(target) || storeCapOf(target.type) > 0 || BUILDINGS[target.type]?.combust)) {
         const workers = selected.filter(u => canLogisticsType(u.type));
-        if (workers.length) { issueServiceBuilding(workers, target.id, queue); sound.playOrder(); onChange(); return; }
+        if (workers.length) { transport.submitCommand({ t: "service", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       // A completed friendly building below full HP, and not already claimed by the logistics-service
       // branch above (a damaged factory keeps its existing "service" behaviour): selected workers
@@ -232,7 +241,7 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
       if (target && target.owner === "player" && target.kind === "building" && !target.constructing
           && target.hp < target.maxHp) {
         const workers = selected.filter(u => canLogisticsType(u.type));
-        if (workers.length) { issueRepair(workers, target.id, queue); sound.playOrder(); onChange(); return; }
+        if (workers.length) { transport.submitCommand({ t: "repair", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       // A completed, undamaged (or damage-repair-less) friendly Command Center: selected eligible units
       // (workers, Menders, freighters) are pinned to it as their assigned HOME BASE (engine/commands.js
@@ -242,11 +251,11 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
       if (target && target.owner === "player" && target.kind === "building" && target.type === "command"
           && !target.constructing) {
         const eligible = selected.filter(u => canLogisticsType(u.type) || UNITS[u.type]?.role === "support" || UNITS[u.type]?.role === "freighter");
-        if (eligible.length) { issueSetHomeBase(eligible, target.id); sound.playOrder(); onChange(); return; }
+        if (eligible.length) { transport.submitCommand({ t: "setHomeBase", ids: eligible.map(u => u.id), target: target.id }); sound.playOrder(); onChange(); return; }
       }
       if (target && target.owner !== "player") {
         const attackers = selected.filter(u => UNITS[u.type].attack);
-        if (attackers.length) { issueAttack(attackers, target.id, queue); sound.playOrder(); onChange(); }
+        if (attackers.length) { transport.submitCommand({ t: "attack", ids: attackers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); }
         return;
       }
       // A friendly, landed FREIGHTER as the target: selected WORKERS are assigned to FERRY it — carry
@@ -256,30 +265,30 @@ export function createInputCommands({ canvas, state, camera, onChange }) {
       // e.g. combat ships still escort a freighter through hostile space.
       if (target && target.owner === "player" && target.kind === "unit" && UNITS[target.type]?.role === "freighter") {
         const workers = selected.filter(u => canLogisticsType(u.type));
-        if (workers.length) { issueFerryFreighter(workers, target.id, queue); sound.playOrder(); onChange(); return; }
+        if (workers.length) { transport.submitCommand({ t: "ferry", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       // A damaged friendly UNIT as the target (not claimed by the ferry branch above — a freighter
       // needing ferried always wins that click): selected workers patch it up directly instead of
       // escorting it (engine/commands.js issueRepair) — the same worker repair job a building gets.
       if (target && target.owner === "player" && target.kind === "unit" && target.hp < target.maxHp) {
         const workers = selected.filter(u => canLogisticsType(u.type) && u.id !== target.id);
-        if (workers.length) { issueRepair(workers, target.id, queue); sound.playOrder(); onChange(); return; }
+        if (workers.length) { transport.submitCommand({ t: "repair", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       // A friendly SHIP as the target: the selection forms a protective escort ring around it and
       // follows it wherever it's ordered (engine/commands.js issueEscort). The target itself is
       // excluded, so right-clicking a ship that's part of the selection escorts it with the rest.
       if (target && target.owner === "player" && target.kind === "unit") {
         const escorts = selected.filter(u => u.id !== target.id);
-        if (escorts.length) { issueEscort(escorts, target.id, queue); sound.playOrder(); onChange(); return; }
+        if (escorts.length) { transport.submitCommand({ t: "escort", ids: escorts.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       const node = nodeAt(p.x, p.y);
       if (node) {
         const workers = selected.filter(u => canGatherType(u.type));
-        if (workers.length) { issueGather(workers, node.id, queue); sound.playOrder(); onChange(); }
+        if (workers.length) { transport.submitCommand({ t: "gather", ids: workers.map(u => u.id), node: node.id, q: queue }); sound.playOrder(); onChange(); }
         return;
       }
       if (queue) aggressiveMove(selected, p.x, p.y, true, heading);
-      else issueMove(selected, p.x, p.y, false, currentFormation(heading));
+      else transport.submitCommand({ t: "move", ids: selected.map(u => u.id), x: p.x, y: p.y, q: false, f: currentFormation(heading) });
       sound.playOrder();
       onChange();
     }

@@ -61,6 +61,7 @@ const { UNITS, UPGRADES } = await import("../engine/entities.js");
 const { createMarket, TRADE_LOT, quoteSell, updateMarket } = await import("../engine/market.js");
 const { researchTech, TECHS } = await import("../engine/techtree.js");
 const { createDiplomacy, GOODWILL_CAP } = await import("../engine/diplomacy.js");
+const { createDirectTransport } = await import("../net/directTransport.js");
 
 // Mirrors hudSelection.js's own module-private costText() (hudSelection.js:1509) — kept local so
 // a button's label is matched against UNITS' REAL cost, not a hand-typed "50 ore" that could
@@ -117,6 +118,14 @@ function setup(seed) {
   resetSelectionSignature();
   const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
   game.state = state;
+  // Every production/research/recycle/logistics button now issues its command through
+  // game.transport.submitCommand(cmd) (T-012) instead of calling the engine directly — this test
+  // file has no server/session.js session behind its fixture state (nothing here needs a real
+  // match loop or ownership/fog validation), so net/directTransport.js's adapter is exactly what
+  // boot.js itself falls back to for a not-yet-session-backed state. Synchronous underneath (its
+  // own header + test/directTransport.test.js), so every assertion below that reads state right
+  // after a button click keeps working unchanged.
+  game.transport = createDirectTransport(state);
   game.input = { building: null, attackArmed: false, focusIdleWorker() {}, selectAllArmy() {} };
   game.galaxy = null;
   game.collapsedSections = new Set();
@@ -1071,6 +1080,7 @@ function setupOdyssey(seed = 61) {
   const g = jumpReadyGalaxy(seed);
   const state = activeState(g);
   game.state = state;
+  game.transport = createDirectTransport(state);   // same reasoning as setup() above
   game.galaxy = g;
   game.input = { building: null, attackArmed: false, focusIdleWorker() {}, selectAllArmy() {} };
   game.collapsedSections = new Set();

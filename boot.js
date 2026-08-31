@@ -11,10 +11,20 @@
 
 import { game } from "./session.js";
 import { canvas, ctx, minimapCtx, mapSelectEl, gameOverEl, underAttackEl, pauseBtn, MINIMAP_W, MINIMAP_H } from "./dom.js";
-import { createGameState } from "./engine/state.js";
 import { mulberry32 } from "./engine/rng.js";
 import { createLoop } from "./engine/loop.js";
 import { tick } from "./engine/sim.js";
+// ADR-0003/ADR-0004 (T-012): an ordinary skirmish, a live competition fixture, and a loaded
+// skirmish save now run their sim behind a real server/session.js session, reached over
+// net/loopback.js exactly like multiplayer will reach it over a socket — see startGame and
+// startCompetitionMatch below. Odyssey, a scenario/raider/bounty, and a spectated match are
+// deliberately NOT ported by this pass (TASKS.md T-012's own scoping: they keep ticking on
+// their existing stepGalaxy/tickSelfPlay/tick path); createDirectTransport is what still lets
+// their OWN input handling and HUD buttons call transport.submitCommand(cmd) uniformly, same as
+// every other boot path, without a session behind them.
+import { createSession } from "./server/session.js";
+import { createLoopbackTransport } from "./net/loopback.js";
+import { createDirectTransport } from "./net/directTransport.js";
 // The self-play core (docs/competitions-and-elo.md Phase 0 made it browser-importable): the ONE
 // way a spectated match gets both of its seats driven by the real AI — createSelfPlayState builds
 // the state with a second controller for owner "player", tickSelfPlay runs it before the ordinary
@@ -116,12 +126,16 @@ export function startGame(planetId) {
   // The player picks their faction; the AI's comes from this world's archetype
   // (aiArchetypes.js), so the opponent's identity is part of the world's character.
   const aiFaction = archetypeFor(planetId).faction || "neutral";
-  const fresh = createGameState({ planetId, seed, rng: mulberry32(seed),
+  // ADR-0003/ADR-0004 (T-012): an ordinary skirmish runs behind a real session now, reached
+  // through net/loopback.js exactly as multiplayer will reach one over a socket — see boot.js's
+  // own header comment. session.getState() is the SAME object bootState hands to game.state
+  // (no copy), so every render/HUD read downstream is unchanged.
+  const session = createSession({ planetId, seed, rng: mulberry32(seed),
     aiApm: diff.aiApm, aiMicro: diff.aiMicro, aiStrategy: setup.aiStrategy, difficulty: setup.difficulty,
     sizeMult: setup.sizeMult, resourceMult: setup.resourceMult, swapAsym: setup.swapAsym,
     matchTimeLimit: setup.matchTimeLimit, popCap: setup.popCap,
     playerFaction: setup.faction, aiFaction });
-  bootState(fresh, { intro: true });
+  bootState(session.getState(), { intro: true, transport: createLoopbackTransport(session) });
 }
 
 // Start one COMPETITION fixture as a real, live skirmish (docs/competitions-and-elo.md Phase 4 —
@@ -166,14 +180,16 @@ export function startCompetitionMatch(fixture) {
   // match has no faction dial at all, so every AI-vs-AI rating in this bracket was earned without
   // one. Giving the human's opponents a faction edge here alone would break that comparison.
   const aiFaction = archetypeFor(world).faction || "neutral";
-  const fresh = createGameState({
+  // Same session/loopback path startGame builds above — this IS an ordinary skirmish (see this
+  // function's own header comment) sharing the exact same ADR-0003/ADR-0004 machinery.
+  const session = createSession({
     planetId: world, seed: resolved, rng: mulberry32(resolved),
     aiApm: diff.aiApm, aiMicro: diff.aiMicro, aiStrategy, difficulty, aiArchetype,
     sizeMult: 1, resourceMult: 1, popCap: null,
     swapAsym: !!swapAsym, matchTimeLimit,
     playerFaction: playerFaction || setup.faction, aiFaction,
   });
-  bootState(fresh, { intro: true });
+  bootState(session.getState(), { intro: true, transport: createLoopbackTransport(session) });
   game.competition = competition;   // after bootState, which clears it (see its own line)
 }
 
@@ -365,8 +381,12 @@ function resetWorldUiBookkeeping() {
 function focusActivePlanet() {
   const state = activeState(game.galaxy);
   game.state = state;
+  // A fresh directTransport per jump: each planet in the galaxy owns its own `state` object, and
+  // this adapter just closes over one (see net/directTransport.js's header) — it has no session
+  // to carry across a jump, unlike the loopback path startGame/startCompetitionMatch build below.
+  game.transport = createDirectTransport(state);
   if (game.input) game.input.destroy();
-  game.input = attachInput(canvas, state, () => renderHUD());
+  game.input = attachInput(canvas, state, game.transport, () => renderHUD());
   const cc = [...state.buildings.values()].find(b => b.owner === "player" && b.type === "command");
   const openAt = cc || state.map.bases.player;
   const cam = game.input.getCamera();
@@ -440,7 +460,14 @@ const PLAY_HZ = 20;
 // something already simulated — a watched or replayed AI-vs-AI match — because a fixed step is the
 // simulation, not a tuning knob: same seed, different step, different game (see SELFPLAY_DT's own
 // comment for the measured proof). Every other boot path is untouched and still runs at PLAY_HZ.
-export function bootState(newState, { intro, selfPlay = false }) {
+// `transport` (T-012): the real session-backed loopback transport, when the caller already built
+// one from a server/session.js session (startGame, startCompetitionMatch, and saveload.js's
+// skirmish load — see each). Every OTHER boot path (Odyssey's own bootGalaxy->bootState, a
+// scenario/raider/bounty, a spectated match) leaves this null: bootState then falls back to
+// wrapping `newState` in a directTransport for input/HUD routing only, and — critically — the
+// loop below keeps ticking `newState` on its OWN existing path (galaxy/spectate/tick) instead of
+// calling transport.tick(dt), because a directTransport owns no ticking at all (net/directTransport.js).
+export function bootState(newState, { intro, selfPlay = false, transport = null }) {
   if (loop) loop.stop();
   if (game.input) game.input.destroy();
   exitObserverMode();   // fresh/loaded game → fresh session, same reasoning as game.groups/colonyAlerts below
@@ -456,6 +483,10 @@ export function bootState(newState, { intro, selfPlay = false }) {
   game.groups = {};     // fresh game → fresh control groups (entity ids reset per game, so stale groups would mis-select)
   game.colonyAlerts = {};   // fresh game → fresh starmap alert ledger (a previous game's background-colony alerts are meaningless here)
   game.state = newState;
+  // Every input/HUD command site calls game.transport.submitCommand(cmd) unconditionally now
+  // (T-012) — give it the real one when the caller built a session, else a directTransport
+  // wrapping this same newState (see this function's own header comment above).
+  game.transport = transport || createDirectTransport(newState);
   const state = newState;   // alias for the synchronous setup below (identical to the original)
   // A scenario shows the scenario bar at the top-center; the body class drops the
   // under-attack banner below it (style.css) so a raid alert isn't hidden behind the bar.
@@ -463,7 +494,7 @@ export function bootState(newState, { intro, selfPlay = false }) {
   showSeedChip(state.seed);
   showFactionChip(state);
   if (intro) showObjectives(state.endless);
-  game.input = attachInput(canvas, state, () => renderHUD());
+  game.input = attachInput(canvas, state, game.transport, () => renderHUD());
   const input = game.input;
   // Open on the player's own ships — the escort/convoy start station, the raider
   // fleet's ambush point, or the player's base in a skirmish — never the map
@@ -528,6 +559,16 @@ export function bootState(newState, { intro, selfPlay = false }) {
         // tools/selfplay.js entry point every simulated duel already runs through, so a match you
         // watch and the identical match the Worker would have simulated advance the same way.
         tickSelfPlay(game.state, dt);
+      } else if (transport) {
+        // The ADR-0003/ADR-0004 path (T-012): transport.tick(dt) is net/loopback.js's own
+        // session.tick(dt) — aiSeats (empty for an ordinary human-played match) then
+        // engine/sim.js's tick(state, dt), the SAME call the plain branch below makes, on the
+        // SAME game.state object (session.getState() returned it by reference at boot) — so this
+        // is a routing change, not a behavior change. Bound to the `transport` OPTION, not
+        // game.transport: only a caller that actually built a session (startGame,
+        // startCompetitionMatch, a loaded skirmish) reaches here; every other boot path's
+        // game.transport is a directTransport with no tick() of its own, and keeps ticking below.
+        transport.tick(dt);
       } else tick(game.state, dt);
     },
     render: (alpha) => {

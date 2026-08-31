@@ -33,3 +33,4 @@ Use [`_template.md`](_template.md) for new records.
 | [0010](0010-hf-deployment.md) | Deploy by direct git push, on free CPU Basic | Accepted | — |
 | [0011](0011-one-match-per-process.md) | One match per worker process | Accepted | — |
 | [0012](0012-crash-tolerant-matches.md) | Matches are crash-tolerant, snapshotted to disk | Accepted | — |
+| [0013](0013-direct-transport-for-unported-boot-paths.md) | A minimal direct-apply Transport for boot paths T-012 doesn't port | Accepted | — |

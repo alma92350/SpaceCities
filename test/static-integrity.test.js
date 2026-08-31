@@ -139,15 +139,18 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // engine/types.js above: pure JSDoc typedefs with no runtime code, never imported by design —
   // each file's own header comment says so.
   //
-  // server/session.js and net/loopback.js are TEMPORARY exemptions (TASKS.md T-010/T-011 land
-  // them; T-012 wires boot.js to import net/loopback.js, which itself imports session.js, at
-  // which point both lines come out together) — the same "module lands ahead of its UI wiring"
-  // pattern elo.js/competitionLedger.js/pairing.js went through historically, per the comments
-  // above.
+  // server/session.js, net/loopback.js, and net/directTransport.js are gone from the exemption
+  // list on schedule too: T-010/T-011 landed them ahead of their UI wiring (TEMPORARILY exempt,
+  // same "module lands ahead of its UI wiring" pattern elo.js/competitionLedger.js/pairing.js
+  // went through, per the comments above), and T-012 is that wiring — boot.js now imports
+  // createSession (server/session.js) and createLoopbackTransport (net/loopback.js) directly in
+  // startGame/startCompetitionMatch (saveload.js's loadGame/importSave do too, for a resumed
+  // skirmish), and createDirectTransport (net/directTransport.js) for every boot path T-012
+  // deliberately leaves off a real session (Odyssey, a scenario/raider/bounty, a spectated
+  // match) — so an import chain from index.html reaches all three for real now.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
-    "server/session.js", "net/loopback.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

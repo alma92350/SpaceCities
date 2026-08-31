@@ -27,6 +27,12 @@ import { isGalaxySave, resumableMode } from "./saveShape.js";
 import { showGalaxyToast } from "./overlays.js";
 import { liveCompetitionFixture, forfeitLiveCompetitionMatch } from "./competition.js";
 import * as sound from "./sound.js";
+// ADR-0003/ADR-0004 (T-012): a resumed skirmish runs behind a real session too, exactly like a
+// freshly started one (boot.js's startGame) — createSession({state}) wraps the ALREADY-
+// deserialized state as-is instead of building a fresh one (server/session.js's own header on
+// that option), since there is no seed/rng left to rebuild it from.
+import { createSession } from "./server/session.js";
+import { createLoopbackTransport } from "./net/loopback.js";
 
 const SAVE_KEY = "stellarfrontier.save.v1";
 const ODYSSEY_KEY = "stellarfrontier.odyssey.v1";
@@ -141,7 +147,8 @@ export function loadGame() {
   const state = tryDeserialize(primaryRaw, deserializeGame) || tryDeserialize(prevRaw, deserializeGame);
   if (!state) { flashButton(loadBtn, "Load failed"); return; }
   sound.unlockAudio();
-  bootState(state, { intro: false });
+  const session = createSession({ state });
+  bootState(session.getState(), { intro: false, transport: createLoopbackTransport(session) });
 }
 
 /* ---------- file: the explicit backup/transfer (Save / Load buttons) ---------- */
@@ -178,7 +185,10 @@ function saveToFile() {
 function importSave(parsed) {
   sound.unlockAudio();
   if (isGalaxySave(parsed)) bootGalaxy(deserializeGalaxy(parsed), { intro: false });
-  else bootState(deserializeGame(parsed), { intro: false });
+  else {
+    const session = createSession({ state: deserializeGame(parsed) });
+    bootState(session.getState(), { intro: false, transport: createLoopbackTransport(session) });
+  }
 }
 
 // Load button — open a file picker and import the chosen .json save.

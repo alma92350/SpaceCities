@@ -15,6 +15,16 @@
 export const game = {
   state: null,   // the current engine game state (engine/state.js), or null on the splash screen
   input: null,   // the current input controller (input.js attachInput), or null before a game
+  // The ADR-0004 seam every command-issuing UI module (input.js, inputCommands.js,
+  // hudSelection.js) submits through — never null once a game is running, though which kind it
+  // is varies with boot.js's own T-012 scoping: a real, server/session.js-backed
+  // net/loopback.js transport for an ordinary skirmish, a live competition fixture, or a
+  // loaded skirmish save; a net/directTransport.js adapter (ADR-0013) with no session behind it
+  // — applying commands straight to `state`, no ownership/fog validation, no tick of its own —
+  // for every boot path T-012 doesn't port yet (Odyssey, a scenario/raider/bounty, a spectated
+  // match). Set by bootState/focusActivePlanet next to `state`/`input` above; UI code never
+  // branches on which kind this is, by design (see ADR-0013).
+  transport: null,
   // The Odyssey galaxy (engine/galaxy.js) when in open-world mode, else null. In
   // Odyssey `state` is the active planet's state = galaxy.planets.get(activeId);
   // credits + the other planets live on the galaxy. Read at call time like the rest.

@@ -4,6 +4,7 @@ import * as sound from "../sound.js";
 import { makeUnit, makeBuilding } from "../engine/state.js";
 import { createFog, FOG_CELL_SIZE } from "../engine/fog.js";
 import { game } from "../session.js";   // control groups + hotkeyActions live here, not on `state` — see setup()
+import { createDirectTransport } from "../net/directTransport.js";
 
 // input.js is one big attachInput() closure that wires real DOM listeners (canvas +
 // window), so exercising it under plain `node --test` (no browser, no jsdom — see
@@ -85,9 +86,18 @@ function ev(type, props = {}) {
 
 // A large, empty, all-unrevealed map centred at (2000, 2000) — plenty of room to pan or
 // place a click without clampCamera's edges ever getting involved.
+//
+// `players` is a minimal stand-in for engine/state.js's own createGameState shape — enough for
+// canAfford/payCost/prereqsMet (engine/entities.js), which issueBuild always reads regardless of
+// what's actually being built. Every other test in this file never touches it; only the
+// build-placement test below (transport.submitCommand({t:"build",...})) needs it for real.
 function makeState() {
   const map = { width: 4000, height: 4000, nodes: [], bases: {} };
-  return { map, units: new Map(), buildings: new Map(), selection: [], fog: createFog(map), planetId: "test" };
+  const players = {
+    player: { resources: { ore: 99999, crystals: 99999, radioactives: 99999 }, upgrades: {} },
+    ai: { resources: { ore: 99999, crystals: 99999, radioactives: 99999 }, upgrades: {} },
+  };
+  return { map, units: new Map(), buildings: new Map(), selection: [], fog: createFog(map), planetId: "test", players };
 }
 
 function reveal(fog, x, y) {
@@ -112,8 +122,17 @@ function setup() {
   game.hotkeyActions = null;
   game.lastAttackAt = null;   // Backspace jump-to-last-alert reads this live off the shared session
   let calls = 0;
-  const controller = attachInput(canvas, state, () => { calls++; });
-  return { canvas, window: globalThis.window, state, controller, calls: () => calls };
+  // input.js now issues every command as a net/commandShapes.js WireCommand over a Transport
+  // (T-012) instead of calling engine/commands.js directly — this bare fixture `state` has no
+  // server/session.js session behind it (nothing here needs ownership/fog validation or a real
+  // match loop), so net/directTransport.js's adapter is exactly what boot.js itself falls back to
+  // for the same reason on its own not-yet-session-backed boot paths (Odyssey, a scenario,
+  // spectate — see that file). It resolves synchronously underneath (net/directTransport.js's own
+  // header + test/directTransport.test.js), so every existing assertion below that reads
+  // state/unit fields immediately after dispatching an event keeps working unchanged.
+  const transport = createDirectTransport(state);
+  const controller = attachInput(canvas, state, transport, () => { calls++; });
+  return { canvas, window: globalThis.window, state, transport, controller, calls: () => calls };
 }
 
 // The world point at (wx, wy) as canvas-local client coordinates, inverting the same
@@ -373,6 +392,50 @@ test("dblclick with neither mode active still does the normal select-all-of-type
 
   assert.deepEqual([...state.selection].sort(), [a.id, b.id].sort(),
     "with no build/attack-move mode active, dblclick still grabs every same-type unit on screen");
+});
+
+// ============================================================================
+// placeBuildingAt (T-012): the one command-issuing call site in this file that checks a
+// CommandResult instead of firing-and-forgetting (TASKS.md T-013's own flag) — buildMode must
+// stay armed until transport.submitCommand's promise actually resolves ok, never optimistically
+// cleared before that. See input.js's own comment on placeBuildingAt for the full reasoning.
+// ============================================================================
+
+test("placing a building resolves asynchronously: buildMode stays armed until the promise settles, then clears on success and the building exists", async () => {
+  const { state, canvas, controller } = setup();
+  const worker = makeUnit("worker", "player", 500, 500);
+  state.units.set(worker.id, worker);
+  state.selection = [worker.id];
+  controller.startBuild("barracks");
+  const before = state.buildings.size;
+
+  const { clientX, clientY } = clientFor(controller, 900, 900);   // open ground, nothing to collide with
+  canvas.dispatchEvent(ev("mousedown", { button: 0, clientX, clientY }));
+
+  // Not yet — transport.submitCommand's mutation already happened (it's synchronous underneath,
+  // like every other transport in this codebase), but placeBuildingAt only reads the result and
+  // clears buildMode inside its .then(), which is still a queued microtask at this point.
+  assert.ok(controller.building, "build mode is still armed — the .then() callback hasn't run yet");
+
+  await Promise.resolve();   // let that microtask run
+
+  assert.equal(state.buildings.size, before + 1, "the building was actually placed");
+  assert.equal(controller.building, null, "build mode cleared now that the result resolved ok");
+});
+
+test("placing a building with no eligible worker selected is rejected synchronously — no transport round trip needed, so no async gap to wait out", () => {
+  const { state, canvas, controller, calls } = setup();
+  const skiff = makeUnit("skiff", "player", 500, 500);   // can't build anything (canBuildCategory)
+  state.units.set(skiff.id, skiff);
+  state.selection = [skiff.id];
+  controller.startBuild("barracks");
+
+  const { clientX, clientY } = clientFor(controller, 900, 900);
+  canvas.dispatchEvent(ev("mousedown", { button: 0, clientX, clientY }));
+
+  assert.ok(controller.building, "no eligible worker — build mode stays armed so the player can try again");
+  assert.equal(state.buildings.size, 0);
+  assert.equal(calls(), 1, "onChange still fires once, for the audible-denial feedback");
 });
 
 // ============================================================================

@@ -9,7 +9,6 @@
 "use strict";
 
 import { game } from "./session.js";
-import { issueBuild, issueStop, issueScout, issueHold, issueHoldFormation, issuePatrol } from "./engine/commands.js";
 import { UNITS, BUILDINGS, canBuildCategory } from "./engine/entities.js";
 
 import { createCamera, zoomAt, panCamera, pinchZoomPan } from "./camera.js";
@@ -33,7 +32,13 @@ const PAN_KEYS = {
   arrowdown: [0, 1], s: [0, 1],
 };
 
-export function attachInput(canvas, state, onChange) {
+// `transport` is the ADR-0004 seam (net/transport.js) this controller and every command it
+// issues routes through — boot.js hands in either the real session-backed loopback transport
+// (an ordinary skirmish/competition/loaded game, T-012) or, for the boot paths T-012
+// deliberately leaves untouched (Odyssey, scenario, a spectated match), its directTransport
+// shim, which applies the same WireCommand straight to this `state` with no session behind it.
+// Either way this file never calls an engine/commands.js issue* function itself.
+export function attachInput(canvas, state, transport, onChange) {
   const controller = new AbortController();
   const { signal } = controller;
   const camera = createCamera(state.map);
@@ -43,7 +48,7 @@ export function attachInput(canvas, state, onChange) {
   // Bound once to this controller's collaborators, so every call below reads unchanged.
   const { viewport, toWorld, entityAt, nodeAt, currentFormation, aggressiveMove, alivePlayerUnitIds,
           selectedUnits, centerCamera, applyBoxSelection, selectSameTypeAt, commandAt } =
-    createInputCommands({ canvas, state, camera, onChange });
+    createInputCommands({ canvas, state, camera, transport, onChange });
 
   let dragBox = null;
   let rightDragStart = null;   // world-space {x,y} where a right-button drag began, or null between drags
@@ -343,16 +348,19 @@ export function attachInput(canvas, state, onChange) {
     lastGroupDigit = digit; lastGroupAt = now;
   }
   function stopSelected() {
-    issueStop(selectedUnits());
+    const ids = selectedUnits().map(u => u.id);
+    if (ids.length) transport.submitCommand({ t: "stop", ids });
   }
   // Send every selected Ranger off to chart the map on its own (see scout.js).
   // A no-op if nothing scout-role is selected.
   function scoutSelected() {
-    issueScout(selectedUnits());
+    const ids = selectedUnits().map(u => u.id);
+    if (ids.length) transport.submitCommand({ t: "scout", ids });
   }
   // Put selected combat units into the Hold-position stance.
   function holdSelected() {
-    issueHold(selectedUnits());
+    const ids = selectedUnits().map(u => u.id);
+    if (ids.length) transport.submitCommand({ t: "hold", ids });
   }
   // R: convert the selection's EXISTING move/attack-move waypoint chain into a looping patrol
   // (engine/commands.js issuePatrol) — the same points already laid down by right-click /
@@ -369,14 +377,15 @@ export function attachInput(canvas, state, onChange) {
       const points = [u.order, ...(u.orderQueue || [])]
         .filter(o => o && (o.type === "move" || o.type === "attack-move"))
         .map(o => ({ x: o.x, y: o.y }));
-      if (points.length) issuePatrol([u], points);
+      if (points.length) transport.submitCommand({ t: "patrol", ids: [u.id], pts: points });
     }
   }
   // Form up right where the selection stands, in the player's chosen shape, and hold there —
   // the "protect a formation" stance (engine/commands.js issueHoldFormation), the group-scale
   // sibling of Escort (which protects one external ship instead).
   function formSelected() {
-    issueHoldFormation(selectedUnits(), game.formation.shape, game.formation.leaderPos);
+    const ids = selectedUnits().map(u => u.id);
+    if (ids.length) transport.submitCommand({ t: "holdFormation", ids, s: game.formation.shape, l: game.formation.leaderPos });
   }
   function selectAllArmy() {
     state.selection = [...state.units.values()]
@@ -514,14 +523,25 @@ export function attachInput(canvas, state, onChange) {
   // leaves the ghost up so the player can click again without having to
   // re-open the build menu. The ghost itself (drawBuildGhost in
   // render.js) already shows red/green before they even click.
+  //
+  // The one call site in this file that genuinely needs the CommandResult, not just fire-and-
+  // forget (TASKS.md T-013's own flag): buildMode must stay armed on a rejection so the player
+  // can click again, so it can only be cleared once transport.submitCommand's promise actually
+  // resolves ok — never optimistically before that. Under loopback/directTransport the
+  // mutation (and so the result) is ready before the promise's .then() microtask even runs, so
+  // this resolves within the same frame exactly as the old synchronous check did; a real network
+  // transport (Phase 3) just makes that gap real, which is exactly what this await-shaped code
+  // already tolerates and T-013 will exercise on purpose.
   function placeBuildingAt(p) {
     const buildingType = buildMode.buildingType;
     const worker = state.selection.map(id => state.units.get(id))
       .find(u => u && canBuildCategory(u.type, BUILDINGS[buildingType]?.category));
-    const built = worker && issueBuild(state, worker.id, buildingType, p.x, p.y);
-    if (built) buildMode = null;
-    else sound.playProductionBlocked();   // rejected (invalid spot, or no eligible worker) — audibly denied, not silent
-    onChange();
+    if (!worker) { sound.playProductionBlocked(); onChange(); return; }
+    transport.submitCommand({ t: "build", worker: worker.id, b: buildingType, x: p.x, y: p.y }).then(result => {
+      if (result.ok) buildMode = null;
+      else sound.playProductionBlocked();   // rejected (invalid spot) — audibly denied, not silent
+      onChange();
+    });
   }
 
   return {

@@ -18,7 +18,6 @@ import {
 } from "./dom.js";
 import { clampCamera } from "./camera.js";
 import { minimapToWorld } from "./minimap.js";
-import { issueMove, issueAttackMove } from "./engine/commands.js";
 import { UNITS } from "./engine/entities.js";
 import * as sound from "./sound.js";
 import { buildHelpOverlay } from "./overlays.js";
@@ -146,8 +145,8 @@ if (minimapCanvas) minimapCanvas.addEventListener("contextmenu", e => {
   if (!selected.length) return;
   const combatants = selected.filter(u => UNITS[u.type].role === "combat");
   const others = selected.filter(u => UNITS[u.type].role !== "combat");
-  if (combatants.length) issueAttackMove(combatants, world.x, world.y);
-  if (others.length) issueMove(others, world.x, world.y);
+  if (combatants.length) game.transport.submitCommand({ t: "attackMove", ids: combatants.map(u => u.id), x: world.x, y: world.y });
+  if (others.length) game.transport.submitCommand({ t: "move", ids: others.map(u => u.id), x: world.x, y: world.y });
 });
 
 // Touch mode: the first finger anywhere grows the tap targets (style.css) and

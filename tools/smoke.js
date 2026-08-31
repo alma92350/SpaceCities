@@ -218,6 +218,18 @@ async function main() {
     await page.waitForTimeout(500);
     check("a right-click order is dispatched", true);
 
+    // Right-click the MINIMAP: a separate handler in main.js (not input.js/inputCommands.js),
+    // issuing move/attack-move for the current selection via game.transport.submitCommand
+    // straight from a raw DOM listener — the one command-issuing call site T-012 almost missed
+    // entirely (it was never covered by any unit test before or after). No devtools hook exists
+    // to read game.state back out of the page, so the real signal this check can give is the one
+    // that matters most for a path with zero other coverage: it doesn't throw.
+    const errorsBeforeMinimap = errors.length;
+    const minimapBox = await (await page.$("#minimap")).boundingBox();
+    await page.mouse.click(minimapBox.x + minimapBox.width / 2, minimapBox.y + minimapBox.height / 2, { button: "right" });
+    await page.waitForTimeout(300);
+    check("a minimap right-click order is dispatched with no new console errors", errors.length === errorsBeforeMinimap);
+
     // Keyboard routes through input.js's own handler, which kept the stateful half.
     await page.keyboard.press("q");
     await page.waitForTimeout(300);

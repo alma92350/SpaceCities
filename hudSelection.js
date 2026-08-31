@@ -17,15 +17,22 @@
 
 import { game } from "./session.js";
 import { panelEl, isTouchMode, loadBtn } from "./dom.js";
-import { queueProduction, cancelProduction, researchUpgrade } from "./engine/production.js";
-import { issueSetAILogistics, issueSetCollectPoint, issueSetLogiPriority, issueRecycle, issueCancelRecycle } from "./engine/commands.js";
+// queueProduction: still called directly for ONE deliberately-untouched site (the Star Dock's
+// odysseyOnly production, line ~1198 below — TASKS.md T-012 only ports skirmish-relevant command
+// issuing onto game.transport; Odyssey's own mutators, this one included, stay as they were).
+// Every OTHER production/research/logistics/recycle/bomb command this file used to call directly
+// (cancelProduction, researchUpgrade, researchTech, cancelResearch, issueSetAILogistics,
+// issueSetCollectPoint, issueSetLogiPriority, issueRecycle, issueCancelRecycle, lightFuse) now
+// goes out as a net/commandShapes.js WireCommand via game.transport.submitCommand(cmd) instead —
+// see each call site below.
+import { queueProduction } from "./engine/production.js";
 import { canRecycle, recycleFrac, recycleValue } from "./engine/recycle.js";
 import { FREIGHTER_AI_TECH, aiUpkeepRate, LOGI_PRIORITIES } from "./engine/haul.js";
 import { recipeOf, powerEfficiency, onPowerGrid, electrifyBoost, ELECTRIFY_POWER, iceCoolantMult } from "./engine/industry.js";
 import { storeTotal, storeCapOf, storeRoom, inputCapOf, isElectrifiable } from "./engine/entities.js";
 import { rigInfo } from "./engine/rig.js";
-import { lightFuse, BOMB_BLAST_RADIUS, BOMB_CORE_RADIUS, BOMB_DETECT_RANGE, BOMB_FUSE_DELAY } from "./engine/bomb.js";
-import { TECHS, researchTech, cancelResearch } from "./engine/techtree.js";
+import { BOMB_BLAST_RADIUS, BOMB_CORE_RADIUS, BOMB_DETECT_RANGE, BOMB_FUSE_DELAY } from "./engine/bomb.js";
+import { TECHS } from "./engine/techtree.js";
 import { BUILDINGS, UNITS, UPGRADES, canAfford, prereqsMet, committedDoctrine, canBuildCategory } from "./engine/entities.js";
 import { jumpCost, jumpManifest, jumpManifestAll, jumpCapacity, spaceportTier, upgradeSpaceport, SPACEPORT_MAX_TIER, SPACEPORT_UPGRADE_COST, FUEL_DISCOUNT_BY_TIER, cargoManifest, freightCapacity, loadFreighter, unloadFreighter, freightUsed, freightRoom, JUMP_LOAD_RADIUS, CARGO_GOODS, createLane, deleteLane, assignShipToLane, unassignShipFromLane, upgradeToCapital, jumpVessel, CAPITAL_UPGRADE_COST, CAPITAL_HP_MULT } from "./engine/galaxy.js";
 import { setColonyPolicy, getColonyPolicy } from "./engine/colonyPolicy.js";
@@ -194,7 +201,7 @@ function renderQueueRows(building) {
     cancelBtn.className = "queue-cancel";
     cancelBtn.textContent = "×";
     cancelBtn.title = "Cancel (full refund)";
-    cancelBtn.addEventListener("click", () => { cancelProduction(state, building.id, i); renderHUD(); });
+    cancelBtn.addEventListener("click", () => { game.transport.submitCommand({ t: "cancelProduction", building: building.id, i }); renderHUD(); });
     row.appendChild(cancelBtn);
 
     panelEl.appendChild(row);
@@ -232,7 +239,7 @@ function renderResearchQueueRows(building, table) {
     cancelBtn.className = "queue-cancel";
     cancelBtn.textContent = "×";
     cancelBtn.title = "Cancel (full refund)";
-    cancelBtn.addEventListener("click", () => { cancelResearch(state, building.id, i); renderHUD(); });
+    cancelBtn.addEventListener("click", () => { game.transport.submitCommand({ t: "cancelResearch", building: building.id, i }); renderHUD(); });
     row.appendChild(cancelBtn);
 
     panelEl.appendChild(row);
@@ -515,7 +522,7 @@ function renderAILogistics(state, f) {
   }
   const on = !!f.aiLogistics;
   panelEl.appendChild(makeButton(on ? "🤖 AI Logistics: ON" : "🤖 AI Logistics: OFF",
-    () => { issueSetAILogistics([f], !on, state); renderHUD(); },
+    () => { game.transport.submitCommand({ t: "setAILogistics", ids: [f.id], on: !on }); renderHUD(); },
     { tip: on ? "Stand down — it stops auto-hauling and waits for your orders"
               : `Put it to work in the local haul/service chain like a worker, at its full ${UNITS[f.type].cargoHold} cargo hold per trip` }));
   if (on) {
@@ -539,7 +546,7 @@ function renderAILogistics(state, f) {
 function renderCollectPoint(state, f) {
   const on = !!f.collectPoint;
   panelEl.appendChild(makeButton(on ? "📍 Collection Point: ON" : "📍 Collection Point: OFF",
-    () => { issueSetCollectPoint([f], !on); renderHUD(); },
+    () => { game.transport.submitCommand({ t: "setCollectPoint", ids: [f.id], on: !on }); renderHUD(); },
     { tip: on ? "Stand down — it stops shuttling to the Command Center on its own"
               : "Anchor it here: once its hold fills up, it drives itself to the nearest Command Center, unloads, and comes back" }));
   if (on) {
@@ -597,7 +604,7 @@ const LOGI_PRIORITY_LABEL = { high: "▲ High", normal: "● Normal", low: "▽ 
 function renderLogiPriority(state, b) {
   const cur = LOGI_PRIORITIES.includes(b.logiPriority) ? b.logiPriority : "normal";
   panelEl.appendChild(makeButton(`Logistics priority: ${LOGI_PRIORITY_LABEL[cur]}`,
-    () => { issueSetLogiPriority(state, b.id, LOGI_PRIORITY_NEXT[cur]); renderHUD(); },
+    () => { game.transport.submitCommand({ t: "setLogiPriority", building: b.id, p: LOGI_PRIORITY_NEXT[cur] }); renderHUD(); },
     { tip: cur === "high" ? "Draws haulers from further away and gets one extra hauler/server slot — click to drop to Low"
         : cur === "low" ? "Only served once nothing higher-priority needs the worker — click to reset to Normal"
         : "Even weight with every other building — click to raise to High" }));
@@ -1095,13 +1102,13 @@ function renderCommandCenter(state, cc) {
       const def = UNITS[t];
       const locked = !prereqsMet(state, "player", def);
       panelEl.appendChild(prodButton(`Produce ${def.name} (${costText(def.cost)})`,
-        () => queueProduction(state, cc.id, t),
+        () => game.transport.submitCommand({ t: "queueProduction", building: cc.id, u: t }),
         { cost: def.cost, tip: unitTip(def), locked, lockTip: locked ? lockTipFor(def) : null, icon: { kind: "unit", type: t } }));
       // A unit with an alternative price (the Worker, buildable on biomass instead of ore) gets a
       // second button paying that cost — so a biomass-rich, ore-poor claim can still grow its labour.
       if (def.altCost) {
         panelEl.appendChild(prodButton(`Produce ${def.name} (${costText(def.altCost)})`,
-          () => queueProduction(state, cc.id, t, true),
+          () => game.transport.submitCommand({ t: "queueProduction", building: cc.id, u: t, alt: true }),
           { cost: def.altCost, tip: `${def.name} paid in ${costText(def.altCost)} instead of ore`, locked,
             lockTip: locked ? lockTipFor(def) : null, icon: { kind: "unit", type: t } }));
       }
@@ -1146,7 +1153,7 @@ function renderRefinery(state, refinery) {
       const lockTip = doctrineLocked ? `Locked — committed to the ${label[chosen]} doctrine`
         : tierLocked ? `Requires ${UPGRADES[(u.requires || [])[0]]?.name || "its Tier 1"}` : null;
       panelEl.appendChild(makeButton(`Research ${u.name} · ${label[u.doctrine]} (${costText(u.cost)})`,
-        () => researchUpgrade(state, refinery.id, u.id),
+        () => game.transport.submitCommand({ t: "researchUpgrade", building: refinery.id, up: u.id }),
         { cost: u.cost, tip: u.desc, locked, lockTip, icon: u.ico ? { emoji: u.ico } : null }));
     });
   }
@@ -1176,7 +1183,7 @@ function renderDatacenter(state, datacenter) {
       // Available if every prereq is researched, a completed building, or queued ahead.
       const ready = (t.requires || []).every(r => queued.has(r) || prereqsMet(state, "player", { requires: [r] }));
       panelEl.appendChild(makeButton(`Research ${t.name} (${costText(t.cost)})`,
-        () => researchTech(state, datacenter.id, t.id),
+        () => game.transport.submitCommand({ t: "researchTech", building: datacenter.id, tech: t.id }),
         { cost: t.cost, tip: t.desc, locked: !ready, lockTip: !ready ? lockTipFor(t) : null, icon: t.ico ? { emoji: t.ico } : null }));
     });
   }
@@ -1452,7 +1459,7 @@ function renderBomb(state, bomb, sel) {
                           : "Stand down — safe again until re-armed")
                  : "Arm it: from now on a hit detonates it instantly; proximity or your command lights a fuse" }));
   if (armed && !fused) {
-    panelEl.appendChild(makeButton("💥 Detonate Now", () => lightFuse(state, bomb),
+    panelEl.appendChild(makeButton("💥 Detonate Now", () => game.transport.submitCommand({ t: "lightFuse", unit: bomb.id }),
       { tip: `Light the fuse — detonates in ${BOMB_FUSE_DELAY}s` }));
   }
 }
@@ -1626,7 +1633,7 @@ function rebuildSelectionPanel(sel) {
         const def = UNITS[t];
         const locked = !prereqsMet(state, "player", def);
         panelEl.appendChild(prodButton(`Produce ${def.name} (${costText(def.cost)})`,
-          () => queueProduction(state, barracks.id, t),
+          () => game.transport.submitCommand({ t: "queueProduction", building: barracks.id, u: t }),
           { cost: def.cost, tip: unitTip(def), locked, lockTip: locked ? lockTipFor(def) : null, icon: { kind: "unit", type: t } }));
       }
     }
@@ -1818,7 +1825,7 @@ function rebuildSelectionPanel(sel) {
       row.textContent = recycleRowText(e);
       panelEl.appendChild(row);
     });
-    panelEl.appendChild(makeButton("Cancel Recycle", () => { issueCancelRecycle(recyclingNow); renderHUD(); },
+    panelEl.appendChild(makeButton("Cancel Recycle", () => { game.transport.submitCommand({ t: "cancelRecycle", ids: recyclingNow.map(e => e.id) }); renderHUD(); },
       { tip: "Stand it back down — free, nothing was spent or lost" }));
   }
   const recyclable = sel.filter(e => canRecycle(e));
@@ -1832,7 +1839,7 @@ function rebuildSelectionPanel(sel) {
     const label = one
       ? `♻ Recycle (+${Object.entries(recycleValue(state, one)).map(([com, qty]) => `${Math.round(qty)} ${com}`).join(", ")})`
       : `♻ Recycle Selected (${Math.round(frac * 100)}%)`;
-    panelEl.appendChild(makeButton(label, () => { issueRecycle(recyclable); renderHUD(); },
+    panelEl.appendChild(makeButton(label, () => { game.transport.submitCommand({ t: "recycle", ids: recyclable.map(e => e.id) }); renderHUD(); },
       { tip: `Scrap it for ${Math.round(frac * 100)}% of its cost back, plus everything in its larder/hold right now — takes a little time in place, and a Command Center can't be recycled` }));
   }
 

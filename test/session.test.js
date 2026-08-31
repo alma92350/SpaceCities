@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createSession } from "../server/session.js";
+import { createGameState } from "../engine/state.js";
 import { mulberry32 } from "../engine/rng.js";
 
 // server/session.js is the ADR-0003/ADR-0004 seam: a session owns one match's
@@ -147,6 +148,16 @@ test("submitCommand(recycle) works on a real owned unit", () => {
   const result = session.submitCommand({ t: "recycle", ids: [worker.id] });
   assert.equal(result.ok, true);
   assert.ok(worker.recycling, "issueRecycle should mark the unit as recycling");
+});
+
+test("createSession wraps an ALREADY-BUILT state as-is (opts.state) instead of building a fresh one — boot.js's loaded-game path needs this: a deserialized save is not re-creatable from gameOpts", () => {
+  const prebuilt = createGameState(baseOpts(42));
+  const worker = [...prebuilt.units.values()].find(u => u.owner === "player");
+  worker.hp = 1;   // a mutation only visible if the session really is THIS object, not a fresh one
+  const session = createSession({ state: prebuilt });
+
+  assert.equal(session.getState(), prebuilt, "no copy — the exact object handed in");
+  assert.equal(session.getState().units.get(worker.id).hp, 1, "the caller's own state, not a freshly re-created one");
 });
 
 test("a session with both seats AI-driven plays a full match headlessly to a winner", () => {

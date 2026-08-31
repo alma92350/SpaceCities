@@ -46,14 +46,21 @@
 
 /**
  * @typedef {Object} Transport
- * @property {(command: WireCommand) => void} submitCommand
- *   Client -> session. Fire-and-forget from the caller's perspective — the
- *   outcome arrives later as a CommandResultEvent via onEvent, never as a
- *   return value, so client code behaves identically whether the session is
- *   in the same tab (synchronous underneath) or across a socket (genuinely
- *   asynchronous). Relying on a synchronous return here is the exact trap
- *   TASKS.md T-013 exists to catch (input.js:521) — see that task and
- *   test/loopbackFaults.test.js.
+ * @property {(command: WireCommand) => Promise<CommandResult>} submitCommand
+ *   Client -> session. The SAME outcome is also broadcast as a
+ *   CommandResultEvent via onEvent — most call sites are genuinely
+ *   fire-and-forget and never touch the returned promise at all, since
+ *   nothing about ordinary order-issuing needs to react to its own result.
+ *   The promise exists for the minority that do (input.js's placeBuildingAt,
+ *   T-012: a build's ghost/placement-mode must not clear until the command
+ *   is actually known to have succeeded). Never assume it resolves
+ *   SYNCHRONOUSLY, even though it genuinely does under both of today's
+ *   implementations (net/loopback.js, net/directTransport.js) — proven by a
+ *   dedicated test in each of their suites, not just assumed, and relied on
+ *   nowhere: every call site either ignores the promise or awaits/`.then()`s
+ *   it properly. That is the exact trap TASKS.md T-013 exists to catch —
+ *   see that task and test/loopbackFaults.test.js — for a real
+ *   WebSocketTransport (Phase 3), where the gap is real, not just possible.
  * @property {(handler: (event: TransportEvent) => void) => void} onEvent
  *   Subscribe to session -> client events. A transport delivers events to
  *   every subscriber that registered before the event was produced; it does

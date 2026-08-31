@@ -335,10 +335,15 @@ export function applyCommand(state, cmd) {
  *   on every tick, beyond the engine's own built-in "ai" seat. Empty for an
  *   ordinary human-vs-AI skirmish; ["player"] for a fully headless AI-vs-AI
  *   match (T-010's exit criterion, tools/selfplay.js's own pattern).
+ * @param {State} [opts.state] - wrap this ALREADY-BUILT state instead of building a fresh one
+ *   from the rest of opts (which are ignored when this is given). For boot.js's loaded-game
+ *   path (T-012): a deserialized save is reconstructed by engine/persist.js, not by
+ *   createGameState(gameOpts) — there is no seed/rng to rebuild it from — so the session has to
+ *   be able to wrap whatever state the caller already has in hand.
  */
 export function createSession(opts = {}) {
-  const { aiSeats = [], ...gameOpts } = opts;
-  const state = createGameState(gameOpts);
+  const { aiSeats = [], state: providedState, ...gameOpts } = opts;
+  const state = providedState || createGameState(gameOpts);
 
   return {
     getState() {
