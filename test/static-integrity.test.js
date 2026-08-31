@@ -134,7 +134,20 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // by design (see that walk's own IMPORT_SPEC comment for exactly which syntaxes it recognises).
   // It genuinely does run in the browser (every "Run Duel" click constructs one for real; the live
   // browser verification for this stage confirms it), the walker just has no way to see the edge.
-  const EXEMPT = new Set(["engine/types.js", "competitionWorker.js"]);
+  //
+  // net/commandShapes.js and net/transport.js are PERMANENT exemptions, the same class as
+  // engine/types.js above: pure JSDoc typedefs with no runtime code, never imported by design —
+  // each file's own header comment says so.
+  //
+  // server/session.js is a TEMPORARY exemption (TASKS.md T-010/T-011 land it; T-012 wires
+  // boot.js to import it via net/loopback.js, at which point this line comes out) — the same
+  // "module lands ahead of its UI wiring" pattern elo.js/competitionLedger.js/pairing.js went
+  // through historically, per the comments above.
+  const EXEMPT = new Set([
+    "engine/types.js", "competitionWorker.js",
+    "net/commandShapes.js", "net/transport.js",
+    "server/session.js",
+  ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
     .filter(f => !EXEMPT.has(f) && !reached.has(join(root, f)));
