@@ -8,7 +8,7 @@ app_port: 7860
 pinned: false
 header: mini
 fullWidth: true
-short_description: Real-time multiplayer space RTS with an MCP endpoint for agent players.
+short_description: Multiplayer space RTS with an MCP endpoint for AI agents.
 license: mit
 tags:
   - game
