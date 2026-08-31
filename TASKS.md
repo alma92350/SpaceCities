@@ -12,7 +12,7 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 11 | 9 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 11 | 10 | 🟡 In progress |
 | **1** | Single-player runs through the multiplayer code path | 7 | 0 | ⚪ Not started |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
@@ -20,7 +20,7 @@ Update this file in the same commit as the work it describes.
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **73** | **9** | |
+| | | **73** | **10** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -76,11 +76,18 @@ This project is **test-driven**, inheriting `CONTRIBUTING.md`'s rules unchanged.
 Deployment is de-risked *before* any multiplayer complexity, so that when the first networked build
 ships, the pipeline is already boring.
 
+**Finalized 2026-08-31.** M0 is achieved: [almaatla-spacecities.hf.space](https://almaatla-spacecities.hf.space/)
+serves the game, CI has run green repeatedly on this branch, and two consecutive pushes have now
+each triggered a fully automated, independently-verified deploy. 10 of 11 tasks are done — the one
+exception, **T-008b** (attaching a Storage Bucket), is a deliberate deferral, not an oversight: it
+needs `hf` CLI write access or the HF web UI, neither available to this session, and it blocks
+nothing in Phase 0 itself — only Phase 3's match-persistence work depends on it.
+
 | ID | Task | Serves | Depends | Status | Exit criteria |
 |---|---|---|---|---|---|
 | **T-001** | Import upstream verbatim with full history; `upstream` remote configured | ADR-0002 | — | ✅ | 542 commits present; `npm test` green (2,519 tests); `git blame` reaches upstream authorship |
 | **T-002** | PRD, ADR log, feasibility spikes | G4 | — | ✅ | `docs/PRD.md`, `docs/adr/0001…0011`, `docs/analysis/00` committed |
-| **T-003** | Analysis dossiers: engine seams, command protocol, client coupling, HF platform, MCP | G4 | — | 🟡 | Five dossiers in `docs/analysis/`; each ADR they ground cites them |
+| **T-003** | Analysis dossiers: feasibility spikes, engine seams, command protocol, client coupling, HF platform, MCP | G4 | — | ✅ | **All six** dossiers present in `docs/analysis/` (00–05); each is cited by at least one ADR it grounds — verified by direct grep across `docs/adr/*.md`, not assumed |
 | **T-004** | Rebrand to SpaceCities — `package.json`, `README.md`, page title, and the in-game/dev-tooling name banners (`setup.js`, `update.js`, `tools/serve.js`) — **without touching engine internals**. `version.js`/`version.json` needed no change (already in sync at 1.1.0) | G5 | T-001 | ✅ | Suite green incl. `test/release-manifest.test.js` (22/22), `test/version.test.js`; full suite **2,519/2,519**; typecheck clean; browser smoke **20/20** (title assertion updated in lockstep in `tools/smoke.js`); `upstream/main..HEAD` diff stays semantically clean — no `engine/` file touched. In-universe lore references to "Stellar Frontier" (the sibling turn-based game) deliberately kept |
 | **T-005** | CI on this repo: inherited suite (Node 20 + 22), typecheck, browser smoke | NFR-7 | T-001 | ✅ | Inherited `test.yml` has run **10×, all green** on this branch. Job names confirmed exactly matching `CONTRIBUTING.md`'s required-checks list (`tests (node 20)`, `tests (node 22)`, `browser smoke test`). Branch protection **documented, deliberately not yet applied**: this repo has no `main` yet — its only branch is also its default branch, and turning on force-push blocking now would lock out the direct-push workflow Phase 0 is using. `CONTRIBUTING.md`'s "Protecting the default branch" section updated with the reasoning and exact steps for when a real `main` exists |
 | **T-006** | `Dockerfile` for Node 22 on HF: port 7860, `/data` mount point, **no npm install**. Uses the built-in `node` user (UID 1000) rather than HF's Python `useradd` recipe. **Phase 0's `CMD` runs `tools/serve.js`** — the multiplayer server doesn't exist yet; a later phase swaps only the `CMD` line. Also adds `.dockerignore` and the HF README front matter (`sdk: docker`, `app_port: 7860`, …) the Dockerfile's port depends on | G5, NFR-5 | T-004 | ✅ | **Built and run for real** (`dockerd` available this session). Verified: image builds clean; container runs as `uid=1000(node)`; `/data` owned by `node:node` and writable; listens on 7860; `.git`/`test/`/`.github` correctly excluded from the 333MB image; HTTP 200 on `/`, `/engine/state.js` (correct `Content-Type`), `/docs/player-handbook.html` (the in-game field-manual link). **Full page verified live in real Chromium**: title "SpaceCities", splash renders, version banner reads "SpaceCities v1.1.0", zero page/console errors |
