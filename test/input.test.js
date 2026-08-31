@@ -5,6 +5,7 @@ import { makeUnit, makeBuilding } from "../engine/state.js";
 import { createFog, FOG_CELL_SIZE } from "../engine/fog.js";
 import { game } from "../session.js";   // control groups + hotkeyActions live here, not on `state` — see setup()
 import { createDirectTransport } from "../net/directTransport.js";
+import { createFaultyTransport } from "../net/loopbackFaults.js";
 
 // input.js is one big attachInput() closure that wires real DOM listeners (canvas +
 // window), so exercising it under plain `node --test` (no browser, no jsdom — see
@@ -108,7 +109,11 @@ function reveal(fog, x, y) {
 // Fresh canvas/window/state/controller for one test, plus an onChange call counter.
 // commandAt/setArmed/etc. don't pass onChange any arguments worth asserting on — only
 // whether, and how often, it fired.
-function setup() {
+// `wrapTransport` (default: identity) lets one test swap in a fault-injecting transport
+// (net/loopbackFaults.js, T-013) around the same bare fixture state, to prove the async call
+// sites here don't secretly depend on a same-tick reply — every other call site keeps passing
+// the plain, always-synchronous-underneath directTransport unchanged.
+function setup(wrapTransport = t => t) {
   globalThis.window = new FakeWindow();
   const canvas = new FakeCanvas();
   const state = makeState();
@@ -130,7 +135,7 @@ function setup() {
   // spectate — see that file). It resolves synchronously underneath (net/directTransport.js's own
   // header + test/directTransport.test.js), so every existing assertion below that reads
   // state/unit fields immediately after dispatching an event keeps working unchanged.
-  const transport = createDirectTransport(state);
+  const transport = wrapTransport(createDirectTransport(state));
   const controller = attachInput(canvas, state, transport, () => { calls++; });
   return { canvas, window: globalThis.window, state, transport, controller, calls: () => calls };
 }
@@ -436,6 +441,26 @@ test("placing a building with no eligible worker selected is rejected synchronou
   assert.ok(controller.building, "no eligible worker — build mode stays armed so the player can try again");
   assert.equal(state.buildings.size, 0);
   assert.equal(calls(), 1, "onChange still fires once, for the audible-denial feedback");
+});
+
+test("placing a building through a REAL injected delay (net/loopbackFaults.js): buildMode survives the whole gap, not just a microtask — the concrete proof T-013 exists to produce", async () => {
+  const { state, canvas, controller } = setup(t => createFaultyTransport(t, { latencyMs: 20 }));
+  const worker = makeUnit("worker", "player", 500, 500);
+  state.units.set(worker.id, worker);
+  state.selection = [worker.id];
+  controller.startBuild("barracks");
+  const before = state.buildings.size;
+
+  const { clientX, clientY } = clientFor(controller, 900, 900);
+  canvas.dispatchEvent(ev("mousedown", { button: 0, clientX, clientY }));
+
+  await new Promise(r => setTimeout(r, 10));
+  assert.ok(controller.building, "10ms into a 20ms-latency command, build mode must still be armed");
+  assert.equal(state.buildings.size, before, "and the building genuinely hasn't been placed yet either");
+
+  await new Promise(r => setTimeout(r, 20));
+  assert.equal(state.buildings.size, before + 1, "past the injected delay, the command actually landed");
+  assert.equal(controller.building, null, "and only now does build mode clear");
 });
 
 // ============================================================================

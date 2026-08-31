@@ -148,9 +148,20 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // skirmish), and createDirectTransport (net/directTransport.js) for every boot path T-012
   // deliberately leaves off a real session (Odyssey, a scenario/raider/bounty, a spectated
   // match) — so an import chain from index.html reaches all three for real now.
+  // net/loopbackFaults.js (T-013) is a PERMANENT exemption too, but for a third reason distinct
+  // from either class above: it is genuine runtime code (not a typedef file) that IS reached by a
+  // real import — just never from index.html. It is test-only infrastructure by design (its own
+  // header: it exists to make the promise-resolves-later gap real inside the deterministic unit
+  // suite), imported only by test/loopbackFaults.test.js and test/input.test.js. The browser game
+  // itself has no use for a transport that deliberately delays and drops its own commands, so
+  // unlike server/session.js/net/loopback.js/net/directTransport.js above, there is no future
+  // wiring step that will ever remove this line — the same standing reason tools/ailab.js,
+  // tools/selfplay-cli.js and tools/serve.js are excluded from this check entirely (browserJs()'s
+  // own comment), just for one file that happens to live in net/ instead of tools/.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
+    "net/loopbackFaults.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
