@@ -7,6 +7,12 @@
    load) and opens the door on http://localhost:8080.
 
    Usage:  node tools/serve.js [port]   (or: npm start)
+
+   Also Phase 0's production entrypoint (see Dockerfile) for deploying the existing
+   single-player game to the Hugging Face Space, ahead of the real multiplayer server
+   (TASKS.md Phase 1+). The one production-only addition is the /data persistence
+   probe below, gated entirely on DATA_DIR being set — unset in local dev, so this
+   file's behavior there is unchanged.
    ============================================================ */
 
 "use strict";
@@ -16,9 +22,23 @@ import { readFile } from "node:fs/promises";
 import { join, normalize, extname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { runProbe } from "./dataProbe.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
+
+// Run once at boot, not per-request — a fresh bootId on every request would make every request
+// its own "first boot" and the persistence signal (docs/adr/0012, TASKS.md T-008a) would never
+// fire. null in local dev (DATA_DIR unset), so /__data-probe 404s there exactly as before this
+// existed. Logged immediately too, so the answer is visible in the Space's own boot logs even
+// before anyone hits the endpoint.
+const dataProbeResult = process.env.DATA_DIR ? runProbe(process.env.DATA_DIR) : null;
+if (dataProbeResult) {
+  console.log(dataProbeResult.persisted
+    ? `/data persistence probe: PERSISTED — found a marker from a previous boot (${dataProbeResult.previousMarker.bootId})`
+    : `/data persistence probe: no earlier marker found (first boot, or storage is ephemeral — a second deploy will tell which)`);
+  if (!dataProbeResult.writable) console.log(`/data persistence probe: NOT WRITABLE — ${dataProbeResult.writeError}`);
+}
 
 // Content types for everything the game actually serves. The .js entry is the whole point —
 // a browser will only run an ES module the server labels as JavaScript.
@@ -55,9 +75,20 @@ export function resolveSafePath(root, pathname) {
 
 const server = createServer(async (req, res) => {
   try {
+    const pathname = new URL(req.url, "http://localhost").pathname;
+
+    // The boot-time probe result, if DATA_DIR is set — 404s exactly like any other unknown path
+    // in local dev, where dataProbeResult is null. See docs/adr/0012, TASKS.md T-008a.
+    if (pathname === "/__data-probe") {
+      if (!dataProbeResult) { res.writeHead(404).end("Not found"); return; }
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(dataProbeResult, null, 2));
+      return;
+    }
+
     // Strip the query string, default "/" to index.html, and resolve WITHIN the root — a
     // request can't escape the project directory via "../" traversal.
-    const filePath = resolveSafePath(ROOT, new URL(req.url, "http://localhost").pathname);
+    const filePath = resolveSafePath(ROOT, pathname);
     if (!filePath) { res.writeHead(403).end("Forbidden"); return; }
 
     const body = await readFile(filePath);
