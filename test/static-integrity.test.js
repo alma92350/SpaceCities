@@ -139,14 +139,15 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // engine/types.js above: pure JSDoc typedefs with no runtime code, never imported by design —
   // each file's own header comment says so.
   //
-  // server/session.js is a TEMPORARY exemption (TASKS.md T-010/T-011 land it; T-012 wires
-  // boot.js to import it via net/loopback.js, at which point this line comes out) — the same
-  // "module lands ahead of its UI wiring" pattern elo.js/competitionLedger.js/pairing.js went
-  // through historically, per the comments above.
+  // server/session.js and net/loopback.js are TEMPORARY exemptions (TASKS.md T-010/T-011 land
+  // them; T-012 wires boot.js to import net/loopback.js, which itself imports session.js, at
+  // which point both lines come out together) — the same "module lands ahead of its UI wiring"
+  // pattern elo.js/competitionLedger.js/pairing.js went through historically, per the comments
+  // above.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
-    "server/session.js",
+    "server/session.js", "net/loopback.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

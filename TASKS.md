@@ -13,14 +13,14 @@ Update this file in the same commit as the work it describes.
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
 | **0** | Single-player game live on HF, deploying automatically | 11 | 10 | 🟡 In progress |
-| **1** | Single-player runs through the multiplayer code path | 7 | 2 | 🟡 In progress |
+| **1** | Single-player runs through the multiplayer code path | 7 | 3 | 🟡 In progress |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
 | **4** | Multiplayer is pleasant: lobby, seats, reconnect | 8 | 0 | ⚪ Not started |
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **73** | **12** | |
+| | | **73** | **13** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
@@ -109,7 +109,7 @@ already proven by 2,519 tests (ADR-0004).
 |---|---|---|---|---|---|
 | **T-009** | Define the transport interface and session protocol shapes (tests first) | ADR-0004 | T-005 | ✅ | `net/transport.js` (Transport/TransportEvent JSDoc, no runtime code — same convention as `engine/types.js`) and `net/commandShapes.js` (the full `WireCommand` union for skirmish, adopted verbatim from `docs/analysis/02-command-wire-protocol.md` §3 so Phase 2's codec is additive, not a rewrite). "Tests fail for the right reason": `test/session.test.js` written first, failed on `ERR_MODULE_NOT_FOUND` before `server/session.js` existed |
 | **T-010** | `server/session.js` — owns one match's state, applies commands, advances the loop | ADR-0003 | T-009 | ✅ | **11/11 new tests green**, full suite **2,540/2,540**, typecheck clean. A session with both seats AI-driven (`aiSeats:["player"]`, mirroring `tools/selfplay.js`'s own proven pattern) plays a full match headlessly to a winner. `submitCommand` covers the full skirmish command surface — all of `engine/commands.js`'s `issue*` plus production/research (`queueProduction`, `researchUpgrade`, `researchTech`, …) — resolving ids and dropping dead ones gracefully, **not yet validating ownership/fog** (deliberately deferred to Phase 2's `net/commandCodec.js`, an additive layer on top of this file, not a rewrite). Found and worked around, without touching the engine: `engine/state.js`'s module-global `nextEntityId` (ADR-0011, T-016) makes two sessions ticked *interleaved* in one process mint colliding ids — confirmed live by a failing test, fixed by making the determinism test sequential instead, with the defect explained inline so it isn't "fixed" again by mistake. `test/static-integrity.test.js`'s reachability check correctly flagged the three new files as orphans; fixed properly, not silenced: `net/commandShapes.js`/`net/transport.js` are **permanent** exemptions (pure typedefs, same class as `engine/types.js`), `server/session.js` is a **temporary** one removed when T-012 wires `boot.js` to it — the exact "module lands ahead of its UI wiring" convention the file already uses for `elo.js`/`competitionLedger.js`/`pairing.js` |
-| **T-011** | `net/loopback.js` — in-process transport | ADR-0004 | T-009 | ⚪ | Round-trips commands and state synchronously; unit-tested |
+| **T-011** | `net/loopback.js` — in-process transport | ADR-0004 | T-009 | ✅ | **8/8 new tests green**, full suite **2,548/2,548**, typecheck clean. Implements `net/transport.js`'s generic contract (`submitCommand`/`onEvent`/`close`) plus two loopback-specific extensions T-012 can choose to use (`tick`, `getState`) that a real remote transport could never offer. `submitCommand` returns a `Promise` — genuinely resolved synchronously underneath (proven by a test asserting the mutation is visible **before** `await`), so client code written against it is already correct once a real async transport replaces it in Phase 3, and T-013 has a real gap to inject faults into. Same static-integrity exemption pattern as T-010, extended to this file |
 | **T-012** | Port the single-player client onto session + loopback | G3 | T-010, T-011 | ⚪ | **Full inherited suite green**; browser smoke green; a human plays a full skirmish with no engine call from the client |
 | **T-013** | Fault-injection loopback: latency, reordering, drops. Covers the five client sites that resist loopback — chiefly `input.js:521`, which passes synchronously over loopback and **breaks over a socket**, so a sync-only path would pass every test and fail in production | FR-11 | T-011 | ⚪ | Netcode behaviour under 150 ms RTT and 2% loss covered by deterministic unit tests; no client path depends on a synchronous reply |
 | **T-014** | Commit `tools/bench.js`; re-run spikes 1–2 **on Space hardware**; measure memory per match | NFR-2, NFR-4 | T-006 | ⚪ | Measured p99 tick cost and memory per match recorded in `docs/analysis/00` |
