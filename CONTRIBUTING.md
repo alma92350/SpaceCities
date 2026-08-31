@@ -134,19 +134,29 @@ writing the implementation:
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   ```
 
-## Protecting `main` (one-time repo setup — not yet done)
+## Protecting the default branch (one-time repo setup — not yet done)
 
 Everything above is enforced by tests, and the tests run in CI on every push and pull request. But
 nothing stops a red build being merged anyway, and that is not hypothetical: `npm run typecheck`
-failed on every commit from 2026-08-05 to 2026-08-08, and PRs #90 and #91 both merged to `main`
-straight through it. A gate nobody is required to pass is a gate that eventually gets walked past.
+failed on every commit from 2026-08-05 to 2026-08-08 in the upstream repo this one is ported from,
+and two PRs there both merged straight through it. A gate nobody is required to pass is a gate that
+eventually gets walked past.
+
+**Not yet applied here, deliberately.** This repository doesn't have a `main` branch yet — its only
+branch, `claude/spacecities-multiplayer-rts-port-hp9195`, is also its default branch, and
+development is still direct-push rather than PR-based (see `TASKS.md` T-005). Turning on **Block
+force pushes** or **Require a pull request before merging** against the *only* branch that exists
+would lock out the very push-based workflow the port is using to land Phase 0. Apply this once a
+real `main` exists and day-to-day work moves onto PRs — the required-checks list below stays
+correct as written for whichever branch that ends up being; only `Target branch` needs updating.
 
 This is a repository setting, so it cannot live in a file here. It takes about two minutes:
 
 **Settings → Branches → Add branch ruleset** (or *Add rule* on the classic UI)
 
-- Target branch: `main`
-- ☑ **Require status checks to pass before merging**, and add all three by name:
+- Target branch: `main` (or whichever branch this applies to, once it exists)
+- ☑ **Require status checks to pass before merging**, and add all three by name — **confirmed
+  present and correctly named in `.github/workflows/test.yml` as of this port** (2026-08-31):
   - `tests (node 20)`
   - `tests (node 22)`
   - `browser smoke test`
