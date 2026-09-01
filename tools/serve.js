@@ -23,6 +23,7 @@ import { join, normalize, extname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { runProbe } from "./dataProbe.js";
+import { runBenchSuite } from "./bench.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -83,6 +84,26 @@ const server = createServer(async (req, res) => {
       if (!dataProbeResult) { res.writeHead(404).end("Not found"); return; }
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
       res.end(JSON.stringify(dataProbeResult, null, 2));
+      return;
+    }
+
+    // TEMPORARY — TASKS.md T-014: re-runs the tools/bench.js suite (the feasibility spikes plus a
+    // memory-per-match measurement) synchronously and returns the JSON scoreboard, so the numbers
+    // in docs/analysis/00-feasibility-spikes.md can be measured on the real Space instead of just
+    // the session container the original spike ran on. Gated the same way /__data-probe is (DATA_DIR
+    // set = production), and MUST be removed or re-gated once that re-run has actually happened —
+    // it blocks this single-threaded server's event loop for its whole duration (the full suite:
+    // tens of seconds), which is fine for a one-off self-triggered measurement on an otherwise-idle
+    // dev Space and would not be fine left standing. `?full=1` runs the complete suite (docs/
+    // analysis/00's own three natural-match scenarios + three stress sizes + memory); the bare
+    // endpoint defaults to `quick: true` (one short scenario each) so an accidental or automated
+    // hit — a health check, a crawler — costs milliseconds, not a real block.
+    if (pathname === "/__bench") {
+      if (!dataProbeResult) { res.writeHead(404).end("Not found"); return; }   // same gate as /__data-probe: production only
+      const full = new URL(req.url, "http://localhost").searchParams.get("full") === "1";
+      const result = runBenchSuite({ quick: !full });
+      res.writeHead(200, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(JSON.stringify(result, null, 2));
       return;
     }
 
