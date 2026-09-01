@@ -12,7 +12,7 @@ Update this file in the same commit as the work it describes.
 
 | Phase | Milestone | Tasks | Done | Status |
 |---|---|---:|---:|---|
-| **0** | Single-player game live on HF, deploying automatically | 11 | 10 | 🟡 In progress |
+| **0** | Single-player game live on HF, deploying automatically | 12 | 10 | 🔴 Blocked — Space paused by HF (T-008c) |
 | **1** | Single-player runs through the multiplayer code path | 7 | 5 | 🟡 In progress |
 | **2** | Commands are data; a match replays bit-identically | 12 | 0 | ⚪ Not started |
 | **3** | Two humans play a full match over the network | 10 | 0 | ⚪ Not started |
@@ -20,13 +20,13 @@ Update this file in the same commit as the work it describes.
 | **5** | 4-seat free-for-all with AI fill | 8 | 0 | ⚪ Not started |
 | **6** | An agent plays a human to a finish over MCP | 11 | 0 | ⚪ Not started |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
-| | | **73** | **15** | |
+| | | **74** | **15** | |
 
 **Legend:** ✅ done · 🟡 in progress · ⚪ not started · 🔴 blocked · ⏸️ deferred
 
 ### What the evidence changed
 
-The plan is not the one drafted before the codebase and platform were investigated. Six findings
+The plan is not the one drafted before the codebase and platform were investigated. Seven findings
 moved it, and each is worth knowing before reading the phases:
 
 1. **The engine is nearly N-player already.** Combat, movement, gather, supply and fog are
@@ -48,6 +48,11 @@ moved it, and each is worth knowing before reading the phases:
 6. **The MCP spec moved.** Revision `2026-07-28` **removed** the `initialize` handshake,
    `Mcp-Session-Id`, the GET SSE endpoint and resumability. A server written from memory or from any
    pre-2026 tutorial would not conform.
+7. **The Space is currently paused by Hugging Face itself** (`runtime.errorMessage: "Flagged as
+   abusive"`), discovered 2026-09-01 chasing a string of failing deploy health-checks that turned
+   out not to be a code problem at all — see **T-008c**. The pipeline built in Phase 0 has kept
+   working correctly the whole time; the thing it deploys to has not been reachable since sometime
+   around T-011.
 
 ---
 
@@ -76,12 +81,15 @@ This project is **test-driven**, inheriting `CONTRIBUTING.md`'s rules unchanged.
 Deployment is de-risked *before* any multiplayer complexity, so that when the first networked build
 ships, the pipeline is already boring.
 
-**Finalized 2026-08-31.** M0 is achieved: [almaatla-spacecities.hf.space](https://almaatla-spacecities.hf.space/)
-serves the game, CI has run green repeatedly on this branch, and two consecutive pushes have now
-each triggered a fully automated, independently-verified deploy. 10 of 11 tasks are done — the one
-exception, **T-008b** (attaching a Storage Bucket), is a deliberate deferral, not an oversight: it
-needs `hf` CLI write access or the HF web UI, neither available to this session, and it blocks
-nothing in Phase 0 itself — only Phase 3's match-persistence work depends on it.
+**Finalized 2026-08-31; currently blocked at the platform level — see T-008c below, discovered
+2026-09-01.** M0's engineering is done — CI has run green repeatedly, every deploy this session has
+force-pushed and rebuilt the Space to the exact tested commit — but **the Space itself is paused by
+Hugging Face** (`runtime.stage: "PAUSED"`, `errorMessage: "Flagged as abusive"`), so
+[almaatla-spacecities.hf.space](https://almaatla-spacecities.hf.space/) does not currently serve the
+game to anyone, this session included. 10 of 11 tasks are done — **T-008b** (attaching a Storage
+Bucket) is a deliberate deferral needing `hf` CLI/web-UI access this session doesn't have, and
+**T-008c** (this pause) needs the account owner directly; neither blocks the *code* in Phase 0
+itself, but T-008c blocks *anyone actually playing the deployed game* until resolved.
 
 | ID | Task | Serves | Depends | Status | Exit criteria |
 |---|---|---|---|---|---|
@@ -96,6 +104,7 @@ nothing in Phase 0 itself — only Phase 3's match-persistence work depends on i
 | **T-008** | Make the Space **public**; verify the single-player game plays end-to-end on HF | §6.4, Q1 | T-007 | ✅ | **Public ✅** (Q1 closed — verified unauthenticated). **Live verification, independent of CI's own checks**: `curl` against `https://almaatla-spacecities.hf.space/` — index 200 with `<title>SpaceCities</title>`, `main.js`/`engine/state.js` served with correct `Content-Type: application/javascript`, `/docs/player-handbook.html` (the in-game field-manual link) 200, `version.json` intact, an unknown path correctly 404s rather than falling back to the old app. **Full real-Chromium Playwright verification** (title, splash render, version banner, zero console errors) was already run against this **exact, byte-identical Docker image** in T-006; a second live-browser pass against the public URL itself was attempted but blocked by a proxy tunnel limitation in this session (`ws_closed_mid_exchange` to `almaatla-spacecities.hf.space:443` — infrastructure, not app behavior) — the curl-based checks plus the identical-image Chromium run together cover the same ground |
 | **T-008a** | Persistence probe (`tools/dataProbe.js` + `/__data-probe`) built, tested, and **run against two real back-to-back production deploys** | ADR-0010 B3, FR-22 | T-006 | ✅ | **Verdict, measured, not inferred: `/data` is ephemeral without an attached Storage Bucket.** Deploy 1 (`0d2ee80`, 02:55:40 UTC) wrote a marker; deploy 2 (`9bf0f04`, 02:57:38 UTC, ~2 min later) found `previousMarker: null` — no trace survived. Full evidence in `docs/analysis/04-hf-deployment.md` §14. **Consequence for ADR-0012:** its snapshot/restore mechanism needs this bucket to do anything at all — a snapshot written today would vanish on the very restart it exists to survive. See **T-008b** |
 | **T-008b** | 🆕 **Attach a Storage Bucket at `/data`** (`hf buckets create SpaceCities-state`, then attach read-write from Space settings — confirmed **free**, not PRO-gated, per `docs/analysis/04-hf-deployment.md` §4). **Outside this session's tool access** — needs the `hf` CLI with a write-scoped token or the HF web UI, neither available here | ADR-0012 | T-008a ✅ | 🔴 | Owner action, or a session with `hf` CLI write access. Once attached: the *very next* redeploy's `/__data-probe` reads `persisted:true` — the probe needs no further work to confirm the fix |
+| **T-008c** | 🆕 **The Space is paused by Hugging Face** — `GET https://huggingface.co/api/spaces/Almaatla/SpaceCities` returns `runtime.stage: "PAUSED"`, `runtime.errorMessage: "Flagged as abusive"`. Discovered 2026-09-01 while chasing why every deploy since T-011 had been failing its final health check: the push/rebuild steps all genuinely succeed (`git` HEAD on the Space advances to the exact tested commit, every time — confirmed for run [33442741317](https://github.com/alma92350/SpaceCities/actions/runs/33442741317) and others), but the container the Space would run never starts, so `https://almaatla-spacecities.hf.space/` serves Hugging Face's own generic community page (HTTP 206, 4.2 KB, `<title>Hugging Face – …</title>`) instead of the game, for every visitor — not a health-check false negative, not this session's proxy, not anything in the app's own code. **Squarely outside this session's tool access and outside any code fix**: this is an account-level moderation flag only the owner can see the reason for and appeal, via the Space's settings page or Hugging Face support | — | — | 🔴 | Owner action: check the Space's settings/notifications for the flag reason and appeal or resolve it with Hugging Face. Once lifted, the *next* already-green deploy (or a manual re-trigger, `workflow_dispatch` on `deploy-hf.yml`) should pass its health check with no code change needed — the pipeline itself has kept working correctly throughout |
 
 ---
 
