@@ -1,9 +1,15 @@
-# T-007 — deploy to the Hugging Face Space on every push, after tests pass.
+# T-007 — deploy to the Hugging Face Space, on manual dispatch only.
 #
-# Runs only once the "tests" workflow (test.yml) has completed on a deploy branch, and only
-# deploys if that run succeeded — so a red build never reaches the Space (PRD G5, milestone M0:
-# "CI green, deploying on push"). `workflow_dispatch` is also available for a manual re-deploy
-# (e.g. after only a Space-side config change) without needing a new commit.
+# Deploys ONLY on workflow_dispatch — a human explicitly running this workflow. It used to also
+# auto-deploy on every green "tests" run via a workflow_run trigger; that, combined with routine
+# TDD commit cadence (a push after nearly every completed task) and a bug in the "Wait for the
+# Space to rebuild" step below (no early exit for a PAUSED Space, so once the account got flagged,
+# every subsequent run burned its full 15-minute polling budget instead of failing in seconds),
+# produced a burst of automated Hub API activity that got the account locked ("Flagged as abusive")
+# on 2026-08-31. See TASKS.md T-008c for the full writeup. Deploying is a deliberate action you
+# take after confirming CI is green yourself, not a side effect of pushing a commit. This file also
+# refuses to deploy on its own if the Space is PAUSED or changed too recently — see the "Capture
+# the Space's state" and "Wait for the Space to rebuild" steps below.
 #
 # The mechanics here — credential-store auth, runtime.stage polling, and a HEAD-sha equality
 # check as the pass condition — are exactly what T-007a proved live against this Space
@@ -21,12 +27,6 @@
 name: deploy to hugging face
 
 on:
-  workflow_run:
-    workflows: ["tests"]
-    types: [completed]
-    branches:
-      - main
-      - claude/spacecities-multiplayer-rts-port-hp9195
   workflow_dispatch:
 
 # Only one deploy at a time — the Space rebuilds on every push, so two concurrent deploys would
@@ -39,10 +39,6 @@ concurrency:
 
 jobs:
   deploy:
-    # Skip entirely on a failed/cancelled test run — a manual dispatch always proceeds.
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     name: push to the Space and watch it rebuild
     env:
@@ -67,17 +63,20 @@ jobs:
       # everything since) onto the Space, so `git blame`/`git log` on the deployed repo tell the
       # same story this GitHub repo does. A shallow checkout would force-push over the Space's
       # history with a single orphan commit, discarding that provenance for no reason.
-      #
-      # Check out the exact commit the upstream "tests" run validated, not just whatever HEAD is
-      # by the time this job starts — closes the race where a newer push lands on the branch
-      # between the test run finishing and this job checking out.
-      - name: Check out the tested commit
+      - name: Check out the commit to deploy
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ github.sha }}
 
-      - name: Capture the Space's state before the push
+      # The single early-exit gate: refuse to push at all if the Space isn't in a state a push can
+      # help, or if it changed too recently. Both checks exist because of TASKS.md T-008c — a PAUSED
+      # Space is an account/Space-level admin action that a push cannot fix and should not be
+      # retried against, and the cooldown is a direct guard against the rapid-rebuild pattern that
+      # caused it (a burst of ~8-10 deploys in 35 minutes).
+      - name: Capture the Space's state before the push, and refuse to deploy if it isn't safe to
+        env:
+          DEPLOY_COOLDOWN_SECONDS: "600"
         run: |
           before=$(curl -sS "https://huggingface.co/api/spaces/$SPACE")
           echo "$before" | python3 -c "
@@ -89,8 +88,34 @@ jobs:
           print('sdk        :', d.get('sdk'))
           print('stage      :', rt.get('stage'))
           print('hardware   :', (rt.get('hardware') or {}).get('current'))
+          print('lastModified:', d.get('lastModified'))
           "
           echo "SHA_BEFORE=$(echo "$before" | python3 -c "import sys,json; print(json.load(sys.stdin).get('sha',''))")" >> "$GITHUB_ENV"
+
+          stage=$(echo "$before" | python3 -c "import sys,json; print(((json.load(sys.stdin).get('runtime') or {}).get('stage')) or 'UNKNOWN')")
+          if [ "$stage" = "PAUSED" ]; then
+            echo "::error::The Space is PAUSED. That's an account- or Space-level admin/moderation"
+            echo "action (e.g. an abuse flag) — pushing to it will not fix that, and retrying this"
+            echo "workflow will not either. Check https://huggingface.co/spaces/$SPACE and the"
+            echo "account status before trying again."
+            exit 1
+          fi
+
+          stale_seconds=$(echo "$before" | python3 -c "
+          import sys, json
+          from datetime import datetime, timezone
+          d = json.load(sys.stdin)
+          lm = d.get('lastModified')
+          print(999999 if not lm else int((datetime.now(timezone.utc) - datetime.fromisoformat(lm.replace('Z', '+00:00'))).total_seconds()))
+          ")
+          echo "Seconds since the Space last changed: $stale_seconds"
+          if [ "$stale_seconds" -lt "$DEPLOY_COOLDOWN_SECONDS" ]; then
+            echo "::error::The Space changed ${stale_seconds}s ago, inside the ${DEPLOY_COOLDOWN_SECONDS}s"
+            echo "cooldown. Deploying again this soon reproduces the rapid-rebuild pattern that got"
+            echo "this account flagged before (TASKS.md T-008c). Wait, or re-run this workflow"
+            echo "manually once the cooldown has passed if this is genuinely intentional."
+            exit 1
+          fi
 
       # Credentials go in the credential store, never into a remote URL or a command line, so the
       # token cannot surface in `git remote -v`, a trace, or a process listing. Actions also masks
@@ -151,6 +176,11 @@ jobs:
             fi
             case "$stage" in
               BUILDING|APP_STARTING|RUNNING_BUILDING|RUNNING_APP_STARTING) saw_build=1 ;;
+              PAUSED)
+                echo "::error::Space transitioned to PAUSED mid-deploy — an account- or Space-level"
+                echo "admin/moderation action happened during this run. Waiting will not resolve"
+                echo "this; check https://huggingface.co/spaces/$SPACE and the account status."
+                exit 1 ;;
               RUNTIME_ERROR|BUILD_ERROR|CONFIG_ERROR)
                 echo "::error::Space entered $stage — the rebuild failed. Check the Space's build"
                 echo "logs at https://huggingface.co/spaces/$SPACE?logs=build"
