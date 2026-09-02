@@ -27,6 +27,12 @@
    `?seat=<owner>` on the upgrade URL; that is deliberately the simplest possible binding that
    makes the TRANSPORT itself provable end to end, not a claim that it is how a real deployment
    picks a seat.
+
+   opts.path (T-027): when set, only an upgrade whose URL pathname matches exactly is accepted —
+   everything else is refused the same way an unknown seat already is. tools/serve.js's own HTTP
+   server uses this to keep its reserved /mcp namespace (T-049's future job) from also silently
+   being a valid way in to this match; omitted, every pathname is accepted, unchanged from before
+   this option existed.
    ============================================================ */
 
 "use strict";
@@ -56,7 +62,7 @@ function toCommandResult(recResult) {
  * @returns {{broadcastState: () => void, close: () => void}}
  */
 export function attachWsMatch(httpServer, match, opts = {}) {
-  const { allowedOrigins } = opts;
+  const { allowedOrigins, path } = opts;
   const bySeat = new Map();   // owner -> live connection, at most one per seat at a time
 
   function welcomePayload(seat) {
@@ -66,6 +72,7 @@ export function attachWsMatch(httpServer, match, opts = {}) {
 
   function onUpgrade(req, socket, head) {
     const url = new URL(req.url, "http://localhost");
+    if (path && url.pathname !== path) { socket.destroy(); return; }
     const seat = url.searchParams.get("seat");
     if (!seat || !match.state.owners.includes(seat)) { socket.destroy(); return; }
 

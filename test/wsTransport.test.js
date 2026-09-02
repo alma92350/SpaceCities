@@ -179,6 +179,40 @@ test("a connection naming an unknown seat is refused at the upgrade, not silentl
   } finally { server.close(); }
 });
 
+test("attachWsMatch's optional `path` restricts which upgrade pathname it accepts — T-027 uses this to keep a reserved /mcp namespace from also being the game socket", async () => {
+  const match = makeMatch();
+  const server = createServer();
+  attachWsMatch(server, match, { path: "/game" });
+  const port = await listen(server);
+  try {
+    // Deliberately NOT assert.rejects: if this unexpectedly resolved (the option silently doing
+    // nothing), the connection it hands back would otherwise never be closed, leaking an open
+    // socket that hangs the whole file past this test — the exact class of bug T-025/T-026 each
+    // hit once already. Catching it explicitly means a regression here fails LOUD, not by hanging.
+    let leaked = null;
+    await createWsClientTransport(`ws://localhost:${port}/?seat=player`).then(
+      t => { leaked = t; },
+      () => {},
+    );
+    if (leaked) leaked.close();
+    assert.equal(leaked, null, "an upgrade at a pathname other than the configured one must be refused");
+
+    const transport = await createWsClientTransport(`ws://localhost:${port}/game?seat=player`);
+    transport.close();
+  } finally { server.close(); }
+});
+
+test("attachWsMatch's `path` is undefined by default — every path is accepted, unchanged from before this option existed", async () => {
+  const match = makeMatch();
+  const server = createServer();
+  attachWsMatch(server, match);
+  const port = await listen(server);
+  try {
+    const transport = await createWsClientTransport(`ws://localhost:${port}/anything?seat=player`);
+    transport.close();
+  } finally { server.close(); }
+});
+
 test("attachWsMatch(...).close() stops accepting new upgrades and closes every live connection", async () => {
   const match = makeMatch();
   const server = createServer();
