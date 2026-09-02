@@ -61,7 +61,7 @@ const doc = installFakeDom({ context: fakeCtx });
 doc.addEventListener = () => {};
 doc.removeEventListener = () => {};
 
-const { pauseLoop, resumeLoop, togglePause, startGame, startOdyssey, initiateJump, notifyColony } = await import("../boot.js");
+const { pauseLoop, resumeLoop, togglePause, startGame, startOdyssey, initiateJump, notifyColony, isUnderAttackEvent } = await import("../boot.js");
 // dom.js is already loaded (boot.js imports it statically) — re-importing it here just returns
 // the SAME cached module, i.e. the SAME `pauseBtn` object boot.js's syncPause() mutates. A
 // second, independent observable of the same `manual` boolean: the topbar button's label.
@@ -812,4 +812,17 @@ test("an ORDINARY skirmish keeps its own sim rate — the self-play step is for 
   game.input = null;
   hideObjectives();
   resetPause();
+});
+
+// T-019b: isUnderAttackEvent used to be `ev.owner === "ai"` inlined at three call sites — correct
+// only because exactly two owners exist today. Pure, so testable directly with plain objects; no
+// game/DOM state needed at all.
+test("T-019b: isUnderAttackEvent fires for anyone else's event, not just a hardcoded owner \"ai\"", () => {
+  assert.equal(isUnderAttackEvent({ owner: "ai" }), true, "unchanged from before: the AI hitting you is still an alert");
+  assert.equal(isUnderAttackEvent({ owner: "rebels" }), true,
+    "a third owner's hit must alarm you too - the old ===\"ai\" check would have silently missed this");
+});
+
+test("T-019b: isUnderAttackEvent never fires for the local seat's own event", () => {
+  assert.equal(isUnderAttackEvent({ owner: "player" }), false, "you attacking someone is not you being attacked");
 });

@@ -27,6 +27,7 @@ import { UNITS, BUILDINGS, canLogisticsType } from "./entities.js";
 import { getEntity } from "./state.js";
 import { checkWinCondition, checkEndlessLoss, checkEndlessWin } from "./victory.js";
 import { runAI } from "./ai.js";
+import { isHumanControlled } from "./aiCommon.js";
 import { updateScenario } from "./scenarios.js";
 import { updateMarket } from "./market.js";
 import { updateDiplomacy } from "./diplomacy.js";
@@ -67,8 +68,10 @@ export function tick(state, dt) {
 
   for (const unit of state.units.values()) updateUnit(state, unit, dt);
   applySeparation(state, dt);
-  updateFog(state, state.fog, "player");
-  updateFog(state, state.fogAI, "ai");   // the AI sees only what its own units/buildings reveal, same as the player
+  // T-018/ADR-0008: this used to be two hardcoded calls (player/ai) — a 3rd owner spliced into
+  // state.owners would silently never get its fog updated, a desync landmine no error would catch.
+  // Iterating state.owners is what engine/state.js's own createGameState already does at creation.
+  for (const owner of state.owners) updateFog(state, state.fogs[owner], owner);   // each side sees only what its own units/buildings reveal
   for (const building of state.buildings.values()) {
     updateBuildingConstruction(state, building, dt);
     updateProductionQueue(state, building, dt);
@@ -195,7 +198,7 @@ function updateUnit(state, unit, dt) {
   // idle and full offers itself a SHUTTLE run: drive to the Command Center, bank the whole hold,
   // drive back to its anchor (engine/haul.js assignShuttle/updateFreighterShuttle). Checked before
   // the AI-logistics offer below so a full collection-point freighter always empties itself first.
-  if (!unit.order && def.role === "freighter" && unit.owner === "player" && unit.collectPoint) {
+  if (!unit.order && def.role === "freighter" && isHumanControlled(state, unit.owner) && unit.collectPoint) {
     assignShuttle(state, unit);
   }
   // Toggling collection-point mode off mid-run stands the freighter down immediately, same as
@@ -210,8 +213,10 @@ function updateUnit(state, unit, dt) {
   // to it would never actually get fed — exactly the "workers don't see it" gap this priority
   // avoids. THEN it clears a pure producer's backed-up output to a Command Center (haul — the Rig,
   // the drop-offs), else it runs a factory a round-trip service (carry inputs in, output back).
-  // Player-only — the AI builds no producers/factories, so its workers never do this and its
-  // replay is unchanged.
+  // Human-controlled seats only (T-017/ADR-0008 — isHumanControlled, never a hardcoded owner
+  // literal): the scripted AI builds no producers/factories and runs its own dedicated economy
+  // logic elsewhere, so it never needs this idle-worker self-assignment convenience, but ANY
+  // seat a human is actually driving gets it, not just literally "player".
   //
   // A freighter the player has toggled into AI-logistics mode (`aiLogistics`, HUD button — requires
   // the FREIGHTER_AI_TECH research) offers itself the haul/service way too (never ferry — a
@@ -222,13 +227,13 @@ function updateUnit(state, unit, dt) {
   // can't afford to move shouldn't still reserve one of a producer's scarce ≤MAX_HAULERS slots
   // doing nothing — an already-running job is a separate case, handled by the upkeep check below,
   // which pauses it in place rather than dropping it the instant the treasury dips dry.
-  const aiFreighter = def.role === "freighter" && unit.owner === "player" && unit.aiLogistics
+  const aiFreighter = def.role === "freighter" && isHumanControlled(state, unit.owner) && unit.aiLogistics
     && !!state.players[unit.owner].upgrades[FREIGHTER_AI_TECH]
     && (state.players[unit.owner].resources.ai || 0) > 0;
-  if (!unit.order && canLogisticsType(unit.type) && unit.owner === "player") {
+  if (!unit.order && canLogisticsType(unit.type) && isHumanControlled(state, unit.owner)) {
     assignFerry(state, unit);
   }
-  if (!unit.order && (canLogisticsType(unit.type) || aiFreighter) && unit.owner === "player") {
+  if (!unit.order && (canLogisticsType(unit.type) || aiFreighter) && isHumanControlled(state, unit.owner)) {
     assignHaul(state, unit);
     if (!unit.order) assignService(state, unit);
     if (unit.order && aiFreighter) unit.order.aiJob = true;
@@ -237,8 +242,10 @@ function updateUnit(state, unit, dt) {
   // itself to REPAIR the own damaged building most in need, zone-first like haul/service (engine/
   // repair.js assignRepair). Checked last so an economy job always outranks a repair, matching the
   // ferry > haul > service priority above — a stalled factory needs labour more urgently than a
-  // building that's merely below full HP.
-  if (!unit.order && canLogisticsType(unit.type) && unit.owner === "player") {
+  // building that's merely below full HP. Fixed by T-017 (ADR-0008): this used to be gated on
+  // unit.owner === "player", so a human driving the OTHER seat never got auto-repair at all — a
+  // material economic edge in a skirmish where base damage is routine.
+  if (!unit.order && canLogisticsType(unit.type) && isHumanControlled(state, unit.owner)) {
     assignRepair(state, unit);
   }
 

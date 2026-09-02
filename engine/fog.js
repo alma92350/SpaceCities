@@ -2,10 +2,14 @@
 /* ============================================================
    Fog of war: a coarse grid tracks which cells are currently in sight of
    an owner's unit/building (recomputed fresh every tick) and which have
-   ever been seen (permanent, once set). Both sides get their own grid —
-   state.fog for the player, state.fogAI for the AI — so neither is
-   omniscient; the same createFog/updateFog serves both (updateFog takes
-   the owner). See engine/ai.js for how the AI's grid gates its decisions.
+   ever been seen (permanent, once set). Every owner gets its own grid,
+   state.fogs[owner] (engine/sim.js updates all of state.owners' fogs each
+   tick, not two hardcoded sides — T-018/ADR-0008) — so no side is
+   omniscient; the same createFog/updateFog serves all of them (updateFog
+   takes the owner). state.fog/state.fogAI remain as aliases into
+   state.fogs.player/state.fogs.ai for the many pre-existing consumers, but
+   no engine line reads them directly any more (test/ownerScaffold.test.js).
+   See engine/ai.js for how the AI's grid gates its decisions.
 
    Deliberately scoped to units/buildings only — charted surface deposits
    (data.js) stay visible regardless, treated as known map knowledge, not

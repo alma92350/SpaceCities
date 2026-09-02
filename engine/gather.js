@@ -61,7 +61,7 @@ function orbitSpot(node, unitId) {
 // as before, when nothing qualifies.
 /** @param {State} state @param {Unit} unit @param {ResourceNode} node */
 function nextNodeAfterDepletion(state, unit, node) {
-  const fog = unit.owner === "player" ? state.fog : state.fogAI;
+  const fog = state.fogs[unit.owner];
   const cap = UNITS[unit.type].minerSoftCap ?? Infinity;
   let best = null, bestUnderCap = false, bestDist = Infinity;
   for (const n of state.map.nodes) {

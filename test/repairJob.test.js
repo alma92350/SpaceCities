@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createGameState, makeBuilding, makeUnit } from "../engine/state.js";
 import { assignRepair, updateRepairJob, NEEDS_REPAIR } from "../engine/repair.js";
 import { issueRepair } from "../engine/commands.js";
+import { tick } from "../engine/sim.js";
 
 function base() {
   const s = createGameState({ planetId: "ferros" });
@@ -20,6 +21,22 @@ test("assignRepair sends an idle worker to a damaged own building below the NEED
   assignRepair(s, worker);
 
   assert.ok(worker.order, "the worker took a job");
+  assert.equal(worker.order.type, "repair");
+  assert.equal(worker.order.targetId, turret.id);
+});
+
+test("T-017: the per-tick auto-repair gate applies to ANY human-controlled seat, not just literally \"player\"", () => {
+  const s = createGameState({ planetId: "ferros" });
+  const cc = [...s.buildings.values()].find(b => b.owner === "ai" && b.type === "command");
+  const worker = [...s.units.values()].find(u => u.owner === "ai" && u.type === "worker");
+  worker.x = cc.x; worker.y = cc.y; worker.order = null;
+  const turret = makeBuilding("turret", "ai", cc.x + 100, cc.y, { hp: 100 });   // 100/350 ≈ 29%, below NEEDS_REPAIR
+  s.buildings.set(turret.id, turret);
+
+  s.ai = null;   // simulate a human actually driving the "ai" seat — no AI controller
+  tick(s, 0.1);
+
+  assert.ok(worker.order, "a human-controlled seat's idle worker must get the same auto-repair assist \"player\" always got");
   assert.equal(worker.order.type, "repair");
   assert.equal(worker.order.targetId, turret.id);
 });

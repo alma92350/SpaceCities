@@ -189,9 +189,11 @@ test("a worker given a scout order actually scouts once tick() dispatches to it,
 test("a worker with an explicit attack order damages its target once tick() dispatches to updateWorkerCombat", () => {
   const state = createGameState({ planetId: "ferros", rng: () => 0.5 });
   const worker = makeUnit("worker", "player", 700, 300);
-  // Player-owned (not "ai") so the AI's own think-cycle — which runs on this very first tick —
-  // never touches it; the only thing that can explain a change in its hp is the worker's swing.
-  const target = makeUnit("skiff", "player", 708, 300);   // within the worker's short reach
+  // The worker stays player-owned so the AI's own think-cycle — which runs on this very first
+  // tick — never reassigns its explicit order out from under this test. The target is "ai"-owned
+  // (T-019/FR-10: an explicit attack order naming a same-owner entity is now rejected as friendly
+  // fire, so a real target is required) — its own order doesn't matter here, only its hp.
+  const target = makeUnit("skiff", "ai", 708, 300);   // within the worker's short reach
   state.units.set(worker.id, worker);
   state.units.set(target.id, target);
   worker.order = { type: "attack", targetId: target.id };

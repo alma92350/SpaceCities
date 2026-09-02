@@ -24,6 +24,7 @@ import { UPHILL_FRAC } from "./fog.js";
 import { hashStr } from "./rng.js";
 import { detonateIfAttacked } from "./bomb.js";
 import { depositWreckage } from "./wreckage.js";
+import { controllerFor } from "./aiCommon.js";
 
 export function updateCombat(state, unit, dt) {
   const def = UNITS[unit.type];
@@ -44,7 +45,16 @@ export function updateCombat(state, unit, dt) {
   }
 
   let targetId = unit.order && unit.order.type === "attack" ? unit.order.targetId : null;
-  if (targetId && !isAlive(state, targetId)) { unit.order = null; targetId = null; }
+  // T-019/FR-10: a dead target clears the order (unchanged); so, now, does a FRIENDLY one (same
+  // owner as the attacker) — an explicit attack order naming your own side was never rejected
+  // here before. issueAttack (commands.js) has no state to check ownership against at issue time,
+  // so this execution-time check is where friendly-fire actually gets stopped, whatever put the
+  // order there — a client bug today, or an untrusted network client once T-021's codec is the
+  // only thing standing between a wire command and this engine.
+  if (targetId) {
+    const target = getEntity(state, targetId);
+    if (!target || target.hp <= 0 || target.owner === unit.owner) { unit.order = null; targetId = null; }
+  }
   // AI focus-fire (engine/ai.js sets focusId when the Tactical AI is directing a
   // squad onto one target): concentrate on it while it's a live enemy inside this
   // unit's aggro. If it's dead or out of reach we fall straight through to the
@@ -91,7 +101,15 @@ export function updateCombat(state, unit, dt) {
         // that already reaches structures too (reinforcedPlating's own comment, entities.js).
         unit.attackTimer = def.cooldown * upgradeMult(state.players[unit.owner]?.upgrades, "attackCooldownMult");
         if (died && unit.order && unit.order.targetId === target.id) unit.order = null;
-      } else if (state.ai?.micro && unit.owner === "ai" && def.range >= KITE_MIN_RANGE) {
+      } else if (controllerFor(state, unit.owner)?.micro && def.range >= KITE_MIN_RANGE) {
+        // T-017/ADR-0008: this used to be state.ai?.micro && unit.owner === "ai" — kiting followed
+        // a hardcoded owner literal, so seat B always kited (or never did) regardless of who was
+        // actually driving it. Now it follows the unit's OWN controller: Tactical AI kites, and
+        // (once a match can actually populate state.playerAi for a live human vs. Tier-1-self-play
+        // pairing) so would a micro-enabled controller on the OTHER seat. Behaviour-preserving for
+        // every match today — state.playerAi is null outside self-play/duels — but fingerprint-
+        // changing wherever it isn't, so self-play/duel fixtures were re-baselined in this same
+        // change (test/ai-selfplay.test.js, test/duelCore.test.js), not silently.
         maybeKite(state, unit, def, dt);   // in range but reloading — a Tactical ranged unit stutter-steps back
       }
       return;
@@ -266,9 +284,10 @@ function applySplash(state, attacker, target, dmg, splash) {
 export function updateWorkerCombat(state, unit, def, dt) {
   unit.attackTimer = Math.max(0, unit.attackTimer - dt);
   const targetId = unit.order.targetId;
-  if (!isAlive(state, targetId)) { unit.order = null; return; }
-
   const target = getEntity(state, targetId);
+  // T-019/FR-10: same friendly-fire check as updateCombat above — an explicit attack order naming
+  // your own side is rejected here too, not just a dead target.
+  if (!target || target.hp <= 0 || target.owner === unit.owner) { unit.order = null; return; }
   const dist = Math.hypot(target.x - unit.x, target.y - unit.y);
   if (dist > def.range) {
     // No chaseSpeedMult here — Overcharged Core's "combat drive" is scoped to updateCombat's own
@@ -351,11 +370,6 @@ function anvilAura(state, target) {
 // shooters alive longer, so engagements trade instead of ending in a near-wipe
 // from a slight edge (Lanchester's square law relaxed toward a linear one).
 const SPREAD_TARGETS = 3;
-
-function isAlive(state, id) {
-  const e = getEntity(state, id);
-  return !!e && e.hp > 0;
-}
 
 // Still worth holding onto: a live enemy inside this unit's aggro range.
 function stillEngageable(state, unit, def, id) {

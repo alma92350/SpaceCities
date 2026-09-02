@@ -510,7 +510,18 @@ test("duel winner detection: a strong candidate beats a deliberately crippled on
     name: "crippled", strategy: "labCrippledDuel",
     overrides: { strategies: { labCrippledDuel: { neverInitiates: true, standingArmyCap: 0 } } },
   };
-  const res = runDuel(normal, crippled, { worlds: ["korrath", "ferros"], difficulty: "medium", seeds: 2, seedBase: 7, minutes: 20 });
+  // minutes: 30, not 20 (T-017/ADR-0008). runDuel always plays candidate A as owner "player", and
+  // duelCore.js populates state.playerAi for every duel — a duel candidate is never a human, no
+  // matter which seat it plays. Before T-017, sim.js's idle-worker auto-assist (ferry/haul/service/
+  // repair) was gated on the literal owner==="player", so "normal" got it unconditionally, same as
+  // a real human would; after T-017 it's correctly gated on isHumanControlled, which duelCore's
+  // playerAi makes false — so "normal" now mops up ferros/3009028770 in ~23min instead of ~10min,
+  // matching what "crippled" (owner "ai") already experienced. This is the fix working — every
+  // PRIOR A-as-player-vs-B-as-ai duel comparison was quietly biased toward whichever candidate
+  // landed on "player" — not a flake; 20min was already the tightest margin among these four
+  // (world, seed) pairs even before this fix (615s of a 1200s budget), so it was always the one
+  // likely to need headroom first. 30min gives verified margin on all four.
+  const res = runDuel(normal, crippled, { worlds: ["korrath", "ferros"], difficulty: "medium", seeds: 2, seedBase: 7, minutes: 30 });
   assert.equal(res.n, 4, "fixture: 2 worlds x 2 seeds");
   assert.equal(res.aWins, res.n, `the normal candidate must win every match (got ${JSON.stringify(res.rows.map(r => r.winner))})`);
   assert.equal(res.bWins, 0);

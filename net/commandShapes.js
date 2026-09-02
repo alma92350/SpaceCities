@@ -93,7 +93,7 @@
 /** @typedef {Object} FerryCommand - assign workers to ferry a friendly freighter
  * @property {"ferry"} t @property {Ids} ids @property {string} target @property {boolean} [q] */
 /** @typedef {Object} SetHomeBaseCommand
- * @property {"setHomeBase"} t @property {Ids} ids @property {string} target */
+ * @property {"setHomeBase"} t @property {Ids} ids @property {string|null} target - null clears it (T-019a) */
 /** @typedef {Object} AssistBuildCommand - no buildingType: the session reads it off the resolved site
  * @property {"assistBuild"} t @property {Ids} ids @property {string} target @property {boolean} [q] */
 
@@ -108,6 +108,8 @@
  * @property {"setAILogistics"} t @property {Ids} ids @property {boolean} on */
 /** @typedef {Object} SetCollectPointCommand
  * @property {"setCollectPoint"} t @property {Ids} ids @property {boolean} on */
+/** @typedef {Object} SetElectrifiedCommand - Odyssey grid toggle (T-019a)
+ * @property {"setElectrified"} t @property {Ids} ids @property {boolean} on */
 /** @typedef {"high"|"normal"|"low"} LogiPriority - engine/haul.js LOGI_PRIORITIES */
 /** @typedef {Object} SetLogiPriorityCommand
  * @property {"setLogiPriority"} t @property {string} building @property {LogiPriority} p */
@@ -134,9 +136,9 @@
  *   |HoldCommand|ScoutCommand|AttackCommand|EscortCommand|RepairCommand|GatherCommand
  *   |ServiceCommand|FerryCommand|SetHomeBaseCommand|AssistBuildCommand|BuildCommand
  *   |RecycleCommand|CancelRecycleCommand|SetAILogisticsCommand|SetCollectPointCommand
- *   |SetLogiPriorityCommand|SetRallyCommand|QueueProductionCommand|CancelProductionCommand
- *   |ResearchUpgradeCommand|ResearchTechCommand|CancelResearchCommand|LightFuseCommand
- *   |BatchCommand} WireCommand */
+ *   |SetElectrifiedCommand|SetLogiPriorityCommand|SetRallyCommand|QueueProductionCommand
+ *   |CancelProductionCommand|ResearchUpgradeCommand|ResearchTechCommand|CancelResearchCommand
+ *   |LightFuseCommand|BatchCommand} WireCommand */
 
 /** Deliberately NOT nested — Phase 2's codec rejects a batch inside a batch.
  *  1..16 members, applied in array order, at one tick.

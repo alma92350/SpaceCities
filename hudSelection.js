@@ -1049,7 +1049,7 @@ if (sel.length > 1 && sel.every(e => e.kind === "unit")) {
       note.className = "sel-note " + (home ? "good" : "");
       note.textContent = home ? "🏠 Home base assigned — jobs stay loyal to it first" : "🏠 Home base assigned (that Command Center is gone — using nearest-distance for now)";
       panelEl.appendChild(note);
-      if (home) panelEl.appendChild(makeButton("Clear home base", () => { e.homeCC = null; }, { tip: "Go back to picking jobs by plain nearest-distance" }));
+      if (home) panelEl.appendChild(makeButton("Clear home base", () => { game.transport.submitCommand({ t: "setHomeBase", ids: [e.id], target: null }); renderHUD(); }, { tip: "Go back to picking jobs by plain nearest-distance" }));
     }
     // A gathering worker's node saturation (engine/gather.js miningEfficiency / sim.js
     // countMiners): node.miners is retallied every tick but nothing used to show it, so a
@@ -1726,7 +1726,9 @@ function rebuildSelectionPanel(sel) {
     panelEl.appendChild(makeButton(on ? "⚡ Electrified: ON" : "⚡ Electrify: OFF",
       () => {
         const v = !elec.electrified;
-        for (const e of sel) if (e.kind === "building" && e.owner === "player" && isElectrifiable(e.type)) e.electrified = v;
+        const ids = sel.filter(e => e.kind === "building" && e.owner === "player" && isElectrifiable(e.type)).map(e => e.id);
+        game.transport.submitCommand({ t: "setElectrified", ids, on: v });
+        renderHUD();
       },
       { tip: on ? `Unwire it — stops drawing ⚡${ELECTRIFY_POWER} from the grid`
                 : `Wire it into the grid: ${what} while powered, but draws ⚡${ELECTRIFY_POWER} (competes with your factories)` }));

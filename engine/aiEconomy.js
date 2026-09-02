@@ -512,12 +512,12 @@ export function homeOreFraction(state, ccs) {
 // once the near ore is claimed or dry. Only nodes `fog` has discovered count (surface ore always,
 // hidden ore caches once scouted) — so on a map where the near ore is spent, this controller has to
 // send its own scout out to find somewhere to expand, just like its opponent does with ITS OWN
-// fog. `fog` defaults to state.fogAI so the pre-existing (owner "ai") call sites are unaffected; a
-// self-play "player" controller passes its own ctx.fog (state.fogs.player) instead — never the
-// "ai" owner's fog, which would let it "discover" nodes it has never actually scouted. Skips
-// anchors inside CLAIM_RADIUS of any CC (either owner, incl. constructing). Returns null when
-// nothing known is available — which keeps the reserve from ever engaging in a no-room deadlock.
-function bestExpansionCluster(state, myCCs, fog = state.fogAI) {
+// fog. `fog` is required (T-018/ADR-0008: no hardcoded-owner default) — every call site already
+// passes its own ctx.fog (state.fogs[owner]), never a specific owner's fog on another's behalf,
+// which would let a controller "discover" nodes it has never actually scouted. Skips anchors
+// inside CLAIM_RADIUS of any CC (either owner, incl. constructing). Returns null when nothing
+// known is available — which keeps the reserve from ever engaging in a no-room deadlock.
+function bestExpansionCluster(state, myCCs, fog) {
   const allCCs = [...state.buildings.values()].filter(b => b.type === "command");
   let best = null, bestScore = -Infinity;
   for (const n of state.map.nodes) {

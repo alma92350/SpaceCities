@@ -126,6 +126,36 @@ test("a grid-shaped formation never range-reorders a real PLAYER squad — the l
     "the bastion keeps formationSlots' own raw slot 2");
 });
 
+test("T-017: with state passed, a human-controlled \"ai\" squad gets the real leader/follower formation, not the flat AI spread", () => {
+  const state = createGameState({ planetId: "ferros" });
+  state.ai = null;   // simulate a human actually driving the "ai" seat — no AI controller
+
+  const leader = { id: "L", type: "skiff", x: 0, y: 0, owner: "ai", order: null };
+  const r1 = { id: "R1", type: "breacher", x: 0, y: 0, owner: "ai", order: null };
+  const b1 = { id: "B1", type: "bastion", x: 0, y: 0, owner: "ai", order: null };
+  const units = [leader, r1, b1];
+
+  const rawSpots = formationSlots(units, 1000, 0, { shape: "grid" });
+  issueMove(units, 1000, 0, false, { shape: "grid" }, state);
+
+  assert.deepEqual({ x: r1.order.offsetX, y: r1.order.offsetY },
+    { x: rawSpots[1].x - rawSpots[0].x, y: rawSpots[1].y - rawSpots[0].y },
+    "a human-controlled \"ai\" leader must get the same range-ranked formation slot a player squad gets");
+  assert.deepEqual({ x: b1.order.offsetX, y: b1.order.offsetY },
+    { x: rawSpots[2].x - rawSpots[0].x, y: rawSpots[2].y - rawSpots[0].y });
+});
+
+test("T-017: without state, an \"ai\" squad still gets the flat AI spread — legacy callers unchanged", () => {
+  const units = [
+    { id: "L", type: "skiff", x: 0, y: 0, owner: "ai", order: null },
+    { id: "F1", type: "breacher", x: 0, y: 0, owner: "ai", order: null },
+  ];
+  issueMove(units, 1000, 0, false, { shape: "grid" });   // no state argument — every pre-existing caller
+  // The flat spread's order never carries offsetX/offsetY — only the leader/follower mechanic sets
+  // those — so their absence is exactly what distinguishes "unchanged" from "now gets formation".
+  assert.equal(units[0].order.offsetX, undefined, "no leader/follower formation without state — byte-identical to before this fix");
+});
+
 test("issueAttack sends every unit at the same explicit target id (focus fire, no spreading)", () => {
   const units = dummyUnits(3);
   issueAttack(units, "target-1");
@@ -366,19 +396,28 @@ test("queued orders are context-sensitive — a mix of move, attack, and gather 
 });
 
 test("issueSetRally replaces a building's rally point", () => {
+  const state = createGameState({ planetId: "ferros" });
   const building = makeBuilding("command", "player", 500, 500);
+  state.buildings.set(building.id, building);
   const originalRally = building.rally;
 
-  issueSetRally(building, 900, 300);
+  issueSetRally(state, building.id, 900, 300);
 
   assert.deepEqual(building.rally, { x: 900, y: 300, nodeId: null });
   assert.notDeepEqual(building.rally, originalRally);
 });
 
 test("issueSetRally can bind the rally to a resource node for rally-to-mine", () => {
+  const state = createGameState({ planetId: "ferros" });
   const building = makeBuilding("command", "player", 500, 500);
-  issueSetRally(building, 620, 480, "n7");
+  state.buildings.set(building.id, building);
+  issueSetRally(state, building.id, 620, 480, "n7");
   assert.deepEqual(building.rally, { x: 620, y: 480, nodeId: "n7" });
+});
+
+test("T-021/D2: issueSetRally silently no-ops on an unknown buildingId, matching every other issue* function's ineligible-target convention", () => {
+  const state = createGameState({ planetId: "ferros" });
+  assert.doesNotThrow(() => issueSetRally(state, "no-such-building", 1, 1));
 });
 
 test("issueHold sets the stance on combat units only; a move order or Stop clears it", () => {

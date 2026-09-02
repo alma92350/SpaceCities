@@ -85,8 +85,9 @@ export function canRecycle(entity) {
 }
 
 // Start recycling `entity` in place. Pure state mutation — engine/commands.js's issueRecycle
-// checks ownership/canRecycle and handles the unit-order-dispatch side (squad release, clearing
-// Hold) before calling this.
+// checks canRecycle and handles the unit-order-dispatch side (squad release, clearing Hold)
+// before calling this. Ownership is issueRecycle's own job (T-019/FR-10: it used to claim that
+// here without actually doing it — canRecycle never checked owner at all).
 /** @param {Unit|Building} entity @returns {void} */
 export function beginRecycle(entity) {
   const def = defOf(entity);

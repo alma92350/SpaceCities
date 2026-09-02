@@ -703,13 +703,20 @@ function panFor(worldX) {
   return Math.max(-1, Math.min(1, (worldX - cam.x) / halfW)) * 0.85;
 }
 
+// T-019b: which events count as "the local seat is under attack" — anyone ELSE'S event, not
+// specifically a hardcoded owner "ai". `ev.owner === "ai"` used to gate the alarm directly, correct
+// only because exactly two owners exist today; once a third does (an observed match, a future
+// N-player game), an "ai"-caused event no longer necessarily means the LOCAL seat got hit. Pure and
+// exported so it's testable on its own — triggerUnderAttack itself reaches into the DOM
+// (underAttackEl, setTimeout) in a way this file's own boot.test.js deliberately doesn't drive
+// through private internals (see that file's header).
+export function isUnderAttackEvent(ev) { return ev.owner !== "player"; }
+
 // A sim event plays a sound (and spawns a matching visual effect — see
 // effects.js) if it's the player's own, or if it happened somewhere
 // currently visible — same "you can hear what you can see" rule as fog
 // of war applies to rendering. Every AI-only skirmish happening off in
-// the fogged dark stays silent. An attackHit whose attacker is the AI
-// necessarily means the target is the player's (only two sides exist),
-// so that's also the under-attack alert's trigger.
+// the fogged dark stays silent.
 function processFrameEvents() {
   const { state } = game;
   for (const ev of state.events) {
@@ -722,7 +729,7 @@ function processFrameEvents() {
       case "attackHit":
         (ev.heavy ? sound.playHeavyHit : sound.playAttackHit)(pan);
         addTracer(ev.fromX, ev.fromY, ev.x, ev.y, ev.unitType, ev.bonus, ev.splashRadius);
-        if (ev.owner === "ai") triggerUnderAttack(ev.x, ev.y);
+        if (isUnderAttackEvent(ev)) triggerUnderAttack(ev.x, ev.y);
         break;
       // Tiered destruction (docs/improvement-proposals.md): the event's unitType/kind (engine/
       // combat.js/engine/bomb.js) let the death ring/sound scale by what actually died, instead
@@ -742,7 +749,7 @@ function processFrameEvents() {
       case "bombFused":
         sound.playFuseLit(pan);
         addFuseWarning(ev.x, ev.y, ev.delay * 1000);
-        if (ev.owner === "ai") triggerUnderAttack(ev.x, ev.y);
+        if (isUnderAttackEvent(ev)) triggerUnderAttack(ev.x, ev.y);
         break;
       // The Helium Bomb's detonation (engine/bomb.js) — one event for the blast itself,
       // alongside the individual entityKilled events for everything the falloff-damaged
@@ -750,7 +757,7 @@ function processFrameEvents() {
       case "bombDetonated":
         sound.playExplosion(pan);
         addExplosion(ev.x, ev.y, ev.radius, ev.coreRadius);
-        if (ev.owner === "ai") triggerUnderAttack(ev.x, ev.y);
+        if (isUnderAttackEvent(ev)) triggerUnderAttack(ev.x, ev.y);
         break;
       // A Helium Bomb crater (engine/bomb.js) finished terraforming — the payoff for the
       // detonation, easy to miss if it's not called out (the deposit can land anywhere the

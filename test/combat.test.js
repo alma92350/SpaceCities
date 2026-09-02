@@ -118,6 +118,33 @@ test("kiting: a reloading Tactical ranged unit steps away from a closed-in enemy
   assert.equal(enemy.hp, enemyHp, "and held its fire while reloading (no shot this tick)");
 });
 
+test("T-017: kiting follows the owner's OWN controller, not a hardcoded \"ai\" literal — a micro-enabled \"player\" seat kites too", () => {
+  const state = createGameState({ planetId: "ferros" });   // aiMicro affects state.ai only; irrelevant here
+  state.playerAi = { micro: true };   // exactly what self-play/duel populate (test/ai-selfplay.test.js) — never true in ordinary single-player
+  const lancer = makeUnit("lancer", "player", 500, 500);
+  const enemy = makeUnit("bastion", "ai", 520, 500);
+  state.units.set(lancer.id, lancer); state.units.set(enemy.id, enemy);
+  lancer.order = { type: "attack", targetId: enemy.id };
+  lancer.attackTimer = 1;
+
+  updateCombat(state, lancer, 0.1);
+
+  assert.ok(lancer.x < 500, "a \"player\"-owned unit whose OWN controller has micro on must kite too, exactly like \"ai\" already does");
+});
+
+test("T-017: ordinary single-player is unaffected — a \"player\" unit never kites when state.playerAi is null (the byte-identical case)", () => {
+  const state = createGameState({ planetId: "ferros", aiMicro: true });   // state.ai.micro true, but that's the OTHER seat's controller
+  const lancer = makeUnit("lancer", "player", 500, 500);
+  const enemy = makeUnit("bastion", "ai", 520, 500);
+  state.units.set(lancer.id, lancer); state.units.set(enemy.id, enemy);
+  lancer.order = { type: "attack", targetId: enemy.id };
+  lancer.attackTimer = 1;
+
+  updateCombat(state, lancer, 0.1);
+
+  assert.equal(lancer.x, 500, "state.playerAi is null in every ordinary match, so this stays exactly today's behaviour");
+});
+
 test("kiting is Tactical-only and ranged-only: a Standard ranged unit and a melee unit both hold ground", () => {
   // Standard AI (micro off): a reloading lancer stands.
   const std = createGameState({ planetId: "ferros" });
@@ -167,6 +194,36 @@ test("an explicit attack order on a target killed by someone else re-acquires in
 
   assert.equal(a.order, null, "the stale order should be dropped, not kept forever");
   assert.ok(other.hp < startHp, "it should have engaged the new nearby enemy instead of idling");
+});
+
+test("T-019: an explicit attack order naming a FRIENDLY unit is rejected — no friendly fire", () => {
+  const state = createGameState({ planetId: "ferros" });
+  const a = makeUnit("skiff", "player", 500, 500);
+  const friendly = makeUnit("skiff", "player", 508, 500);   // same owner, well within range
+  state.units.set(a.id, a);
+  state.units.set(friendly.id, friendly);
+  a.order = { type: "attack", targetId: friendly.id };
+  const friendlyHp = friendly.hp;
+
+  updateCombat(state, a, UNITS.skiff.cooldown);
+
+  assert.equal(friendly.hp, friendlyHp, "a same-owner target must never take damage from an explicit attack order");
+  assert.equal(a.order, null, "the friendly-fire order must be cleared, not left standing");
+});
+
+test("T-019: a worker's explicit attack order naming a FRIENDLY unit is rejected too", () => {
+  const state = createGameState({ planetId: "ferros" });
+  const worker = makeUnit("worker", "player", 500, 500);
+  const friendly = makeUnit("skiff", "player", 508, 500);
+  state.units.set(worker.id, worker);
+  state.units.set(friendly.id, friendly);
+  worker.order = { type: "attack", targetId: friendly.id };
+  const friendlyHp = friendly.hp;
+
+  updateWorkerCombat(state, worker, UNITS.worker, UNITS.worker.cooldown);
+
+  assert.equal(friendly.hp, friendlyHp, "a same-owner target must never take a worker's hit either");
+  assert.equal(worker.order, null, "the friendly-fire order must be cleared for a worker too");
 });
 
 test("a plain move order is honored even with an enemy sitting right on top of the destination", () => {

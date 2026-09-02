@@ -225,6 +225,29 @@ test("issueRecycle silently skips ineligible entries in a mixed selection", () =
   assert.ok(rig.recycling, "the rig still started");
 });
 
+test("T-019: without an owner argument, issueRecycle is unchanged — every pre-existing caller stays byte-identical", () => {
+  const state = createGameState({ planetId: "ferros" });
+  const enemyRig = makeBuilding("plasmarig", "ai", 600, 500);
+  state.buildings.set(enemyRig.id, enemyRig);
+
+  issueRecycle([enemyRig]);   // no owner passed — the legacy call shape
+
+  assert.ok(enemyRig.recycling, "unchanged from before this fix: no owner argument means no filtering at all");
+});
+
+test("T-019: with an owner argument, issueRecycle skips any entity that owner doesn't own", () => {
+  const state = createGameState({ planetId: "ferros" });
+  const ownRig = makeBuilding("plasmarig", "player", 600, 500);
+  const enemyRig = makeBuilding("plasmarig", "ai", 700, 500);
+  state.buildings.set(ownRig.id, ownRig);
+  state.buildings.set(enemyRig.id, enemyRig);
+
+  issueRecycle([ownRig, enemyRig], "player");
+
+  assert.ok(ownRig.recycling, "the player's own rig starts recycling");
+  assert.equal(enemyRig.recycling, undefined, "the enemy's rig must be rejected, not silently recycled on the player's say-so");
+});
+
 test("save/load round-trip preserves an in-progress recycle's exact timer", () => {
   const state = createGameState({ planetId: "ferros" });
   const rig = makeBuilding("plasmarig", "player", 500, 500);

@@ -169,10 +169,18 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // (T-015's cost measurement, docs/analysis/00-feasibility-spikes.md Spike 3) — both legitimately
   // outside this walk (test/ is excluded up front; tools/ is browserJs()'s own exclusion). M1
   // ("server switches to projectFor") is what gives it a real caller and removes this line.
+  //
+  // net/commandEnvelope.js (T-020) is the same "lands ahead of its wiring" pattern once more:
+  // encode/decode/stampRecord exist and are tested (test/commandEnvelope.test.js) but nothing on
+  // any client path calls them yet — hudSelection.js/input.js/inputCommands.js still call
+  // game.transport.submitCommand(cmd) directly with a bare WireCommand, no envelope. T-021's
+  // net/commandCodec.js (the actual wire->engine bridge) is what starts consuming this file for
+  // real, on the server side; wiring an actual client to send enveloped commands over a real
+  // socket is Phase 3 (T-026). Both remove this line when they land.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
-    "net/loopbackFaults.js", "engine/projection.js",
+    "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

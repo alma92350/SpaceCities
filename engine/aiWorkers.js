@@ -116,11 +116,11 @@ function idleGatherAssign(state, fog, workers) {
   });
 }
 
-// `fog` defaults to state.fogAI so the pre-existing single-owner call site (engine/ai.js, owner
-// "ai") reads exactly as before; a self-play "player" controller passes its own ctx.fog
-// (state.fogs.player) instead, so it plans logistics off ITS OWN discovered nodes, never the "ai"
-// owner's — see the fog-fairness discipline this whole module's header comment already documents.
-export function assignIdleWorkers(state, workers, fog = state.fogAI) {
+// `fog` is required (T-018/ADR-0008: no hardcoded-owner default) — its one caller (engine/ai.js)
+// already passes ctx.fog, its own controller's own discovered nodes, never a specific owner's fog
+// on another's behalf — see the fog-fairness discipline this whole module's header comment
+// already documents.
+export function assignIdleWorkers(state, workers, fog) {
   // ODYSSEY: the AI runs REAL logistics like the player — dedicate a bounded share of workers to
   // feeding/clearing its factories and rig (finite buffers, stalls and all) before the gather pass, so
   // its industry pays the same labour cost the player's does. Skirmish has no factories → no-op there.

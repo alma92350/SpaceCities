@@ -6,12 +6,22 @@
 
 "use strict";
 
-import { BUILDINGS, UNITS, canAfford, payCost, prereqsMet, canGatherType, canLogisticsType, canBuildCategory } from "./entities.js";
+import { BUILDINGS, UNITS, canAfford, payCost, prereqsMet, canGatherType, canLogisticsType, canBuildCategory, isElectrifiable } from "./entities.js";
 import { canPlaceBuilding } from "./colliders.js";
 import { makeBuilding } from "./state.js";
 import { formationSlots, resolveHeading, clusterUnits } from "./formation.js";
 import { FREIGHTER_AI_TECH, LOGI_PRIORITIES } from "./haul.js";
 import { canRecycle, beginRecycle, cancelRecycle } from "./recycle.js";
+
+// A local copy of engine/aiCommon.js's isHumanControlled(state, owner) — this file cannot import
+// aiCommon.js: aiCommon.js already imports issueBuild from here, and importing back would be the
+// exact cycle aiCommon.js's own header forbids ("imports only DOWNWARD, into commands/colliders —
+// never back into an AI phase module", enforced by test/static-integrity.test.js's SCC check).
+// Same semantics: a seat is human-controlled exactly when it has no AI controller.
+function isHumanControlled(state, owner) {
+  const controller = owner === "ai" ? state.ai : owner === "player" ? state.playerAi : null;
+  return controller == null;
+}
 
 // Give a unit an order, either replacing what it's doing (a plain command)
 // or appending it as a waypoint (queue = true, the Ctrl+command from input.js).
@@ -141,18 +151,26 @@ function rankSlotsByRange(units, spots, x, y, formation) {
 // engine/movement.js's orderedSpeed) so a fast leader can't outrun its own formation — without
 // this, followers would perpetually lag behind a leader moving at its own full speed, stretching
 // the shape out instead of holding it.
-function dispatchFormation(units, x, y, formation, queue, makeLeaderOrder) {
+// `state` is OPTIONAL and trailing (T-017/ADR-0008): every caller before this fix — the scripted
+// AI, input.js's single-player UI, and every pre-existing test — never passed one, and omitting it
+// preserves the exact original `leader.owner === "player"` check, byte-identical. Only
+// server/session.js's HANDLERS (the actual multiplayer command-application path) pass state, so
+// that a human driving EITHER seat gets the real leader/follower mechanic, not just literally
+// "player". No mid-match caller mixes both call styles for the same match, so there's no risk of
+// the two forms disagreeing about the same leader within one game.
+function dispatchFormation(units, x, y, formation, queue, makeLeaderOrder, state) {
   const leader = units[0];
 
   // The leader/follow squad is a PLAYER selection-UX feature — there's no analogous "the unit
   // you built a selection around" concept for the scripted AI (or a test double with no owner
   // set at all), and the existing tactical AI (kiting, retreats, feint response, wave sizing…)
   // reads every one of ITS units' own real move/attack-move order directly. So anything that
-  // isn't a confirmed player unit skips the whole leader/follower mechanic and just gets the
-  // plain per-unit spread this replaces — one real order per unit, exactly as before this
-  // feature existed. (Every player-issued command always passes real player.owner==="player"
-  // units — see input.js's selectedUnits().)
-  if (leader.owner !== "player") {
+  // isn't human-controlled skips the whole leader/follower mechanic and just gets the plain
+  // per-unit spread this replaces — one real order per unit, exactly as before this feature
+  // existed. (Every player-issued command always passes real player.owner==="player" units —
+  // see input.js's selectedUnits().)
+  const humanControlled = state ? isHumanControlled(state, leader.owner) : leader.owner === "player";
+  if (!humanControlled) {
     const spots = formationSlots(units, x, y, formation);
     units.forEach((u, i) => dispatch(u, makeLeaderOrder(spots[i]), queue));
     return;
@@ -228,9 +246,9 @@ function applyFacing(units, formation) {
 // `formation` ({shape, leaderPos, headingX, headingY}, engine/formation.js) is optional —
 // omitted, it's the original flat grid spread (byte-identical to the old behaviour), unchanged
 // for any caller that doesn't pass one (the AI, and every pre-existing test).
-export function issueMove(units, x, y, queue = false, formation) {
+export function issueMove(units, x, y, queue = false, formation, state) {
   if (!units.length) return;
-  dispatchFormation(units, x, y, formation, queue, pt => ({ type: "move", x: pt.x, y: pt.y }));
+  dispatchFormation(units, x, y, formation, queue, pt => ({ type: "move", x: pt.x, y: pt.y }), state);
   applyFacing(units, formation);
 }
 
@@ -315,6 +333,21 @@ export function issueSetCollectPoint(units, on) {
   });
 }
 
+// Toggle a building's ELECTRIFY state (Odyssey): wired into the power grid, it runs 30% better
+// while powered, at a steady draw (see hudSelection.js's Electrify panel). T-019a/ADR-0006: this
+// used to have NO command at all — hudSelection.js wrote `e.electrified = v` directly, the only
+// thing stopping it electrifying an opponent's Habitat was that same client's own
+// `e.owner === "player"` filter, not anything in the engine. `owner` is OPTIONAL, same pattern as
+// issueRecycle: omitted, this is unfiltered (aiIndustry.js's own internal write stays direct — it's
+// engine code setting its OWN controller's building, not a trust boundary); passed, entities not
+// owned by `owner` are skipped.
+export function issueSetElectrified(entities, on, owner) {
+  entities.forEach(e => {
+    if (owner !== undefined && e.owner !== owner) return;
+    if (e.kind === "building" && isElectrifiable(e.type)) e.electrified = on;
+  });
+}
+
 // Toggle a building's per-building LOGISTICS PRIORITY — high/normal/low, a building-panel cycle
 // button (hudSelection.js) on a factory or fuel-burning power station. A pure weight on the SAME
 // distance-then-id nearest-first scans every producer/factory already competes on
@@ -347,9 +380,9 @@ export function issueAttack(units, targetId, queue = false) {
   });
 }
 
-export function issueAttackMove(units, x, y, queue = false, formation) {
+export function issueAttackMove(units, x, y, queue = false, formation, state) {
   if (!units.length) return;
-  dispatchFormation(units, x, y, formation, queue, pt => ({ type: "attack-move", x: pt.x, y: pt.y }));
+  dispatchFormation(units, x, y, formation, queue, pt => ({ type: "attack-move", x: pt.x, y: pt.y }), state);
   applyFacing(units, formation);
 }
 
@@ -372,13 +405,13 @@ export function issueEscort(units, targetId, queue = false) {
 // don't chase" rule) — LEADER AND FOLLOWERS alike — so the whole formation keeps its shape
 // instead of scattering to run down a distant target; non-combat units (workers, a Mender) still
 // take a slot — sheltering behind/inside the line — they just have no stance flag to set.
-export function issueHoldFormation(units, shape = "grid", leaderPos = "front") {
+export function issueHoldFormation(units, shape = "grid", leaderPos = "front", state) {
   if (!units.length) return;
   let sx = 0, sy = 0;
   for (const u of units) { sx += u.x; sy += u.y; }
   const anchorX = sx / units.length, anchorY = sy / units.length;
   dispatchFormation(units, anchorX, anchorY, { shape, leaderPos, originX: anchorX, originY: anchorY }, false,
-    pt => ({ type: "hold-formation", anchorX: pt.x, anchorY: pt.y, offsetX: 0, offsetY: 0 }));
+    pt => ({ type: "hold-formation", anchorX: pt.x, anchorY: pt.y, offsetX: 0, offsetY: 0 }), state);
   for (const u of units) if (UNITS[u.type] && UNITS[u.type].role === "combat") u.hold = true;
 }
 
@@ -441,8 +474,18 @@ export function issueStop(units) {
 // functional until the timer completes (see updateBuildingRecycle). Ineligible entries (a
 // Command Center, something already constructing or already recycling) are silently skipped, so
 // a mixed selection just recycles whatever in it actually can be.
-export function issueRecycle(entities) {
+//
+// `owner` is OPTIONAL (T-019/FR-10, same pattern as issueMove/issueAttackMove's trailing `state` —
+// see dispatchFormation's own comment): omitted, every pre-existing caller (input.js, every test)
+// is unchanged — this function never actually checked ownership despite recycle.js's own comment
+// once claiming it did (canRecycle doesn't either). Passed, entities NOT owned by `owner` are
+// skipped, same as any other ineligible entry — closing that gap wherever a caller HAS an owner to
+// check against. server/session.js doesn't pass one yet: Phase 1 has no validated "who issued
+// this command" signal (T-010's own header), which is exactly what T-021's codec adds in front of
+// this file, not a rewrite of it.
+export function issueRecycle(entities, owner) {
   entities.forEach(e => {
+    if (owner !== undefined && e.owner !== owner) return;
     if (!canRecycle(e)) return;
     if (e.kind === "unit") { setSquadLeader(e, null); e.hold = false; }
     beginRecycle(e);
@@ -528,6 +571,14 @@ export function issueScout(units) {
 // rally was set ON a resource node (nodeId given), new workers spawn already
 // gathering it instead of standing idle at the point — the standard "rally to
 // minerals" convenience. Non-workers just walk to the point.
-export function issueSetRally(building, x, y, nodeId = null) {
-  building.rally = { x, y, nodeId };
+// T-021/ADR-0006 D2: the ONE engine signature change the wire protocol needs — was
+// `(building, x, y, nodeId)`, a bare object reference with no state at all, the one export that
+// would otherwise force net/commandCodec.js to hand a raw object across the wire->engine boundary
+// instead of an id. 3 call sites (dossier 02 §4.2). A missing/unknown buildingId is a silent no-op,
+// matching the "silent-skip is the house style" convention every other issue* function already
+// follows for an ineligible/vanished target.
+export function issueSetRally(state, buildingId, x, y, nodeId = null) {
+  const b = state.buildings.get(buildingId);
+  if (!b) return;
+  b.rally = { x, y, nodeId };
 }

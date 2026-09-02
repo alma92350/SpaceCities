@@ -39,7 +39,7 @@ const PATROL = [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]];
 /** @param {State} state @param {Unit} unit @param {number} dt @returns {void} */
 export function updateScoutMode(state, unit, dt) {
   const def = UNITS[unit.type];
-  const fog = unit.owner === "player" ? state.fog : state.fogAI;
+  const fog = state.fogs[unit.owner];
   const order = unit.order;
 
   // Re-pick a target when we have none, we've reached it, or our own sight has

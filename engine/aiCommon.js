@@ -35,6 +35,14 @@ export function controllerFor(state, owner) {
   return null;
 }
 
+// T-017/ADR-0008: the fairness gates (formation dispatch, idle-worker auto-assignment) want "is a
+// human actually driving this seat", not a hardcoded owner literal — a seat is human-controlled
+// exactly when it has no AI controller. `state.ai` is populated for every match that exists today
+// (there is no seat-configuration path yet that leaves it null), so this is presently true only
+// for "player"; it becomes meaningful the moment a real match can put a human on either seat.
+/** @param {State} state @param {string} owner @returns {boolean} */
+export function isHumanControlled(state, owner) { return controllerFor(state, owner) === null; }
+
 // The other side in a two-owner skirmish/self-play match — the only two owners this engine models
 // today (state.owners). Centralised here so every AI phase module resolves "my opponent" the same
 // way, instead of each hardcoding "ai"/"player" itself.
