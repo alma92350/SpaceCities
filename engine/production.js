@@ -96,7 +96,7 @@ export function updateProductionQueue(state, building, dt) {
   if (job.progress >= 1) {
     building.queue.shift();
     const spawn = { x: building.x + building.radius + 10, y: building.y + building.radius + 10 };
-    const u = makeUnit(job.unitType, building.owner, spawn.x, spawn.y);
+    const u = makeUnit(job.unitType, building.owner, spawn.x, spawn.y, state);
     // Rally-to-resource: if the rally sits on a live node and this unit can actually gather
     // (canGatherType, not just cargo presence — a cargo-carrying unit with no gatherRate/cargoCap
     // would otherwise NaN-poison unit.cargo.qty/node.amount, see gather.js's miningEfficiency), it

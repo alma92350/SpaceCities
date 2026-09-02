@@ -55,6 +55,39 @@ test("id counter resets per game: a second createGameState in the same process r
   assert.equal(entitySnapshot(first), entitySnapshot(second));
 });
 
+test("T-016 (ADR-0011 B1): two INTERLEAVED matches each replay identically to running alone — entity ids no longer depend on what else is live in the process", () => {
+  // The actual defect: engine/state.js's nextEntityId used to be one module-global counter, not
+  // per-state. A second match's createGameState reset it out from under a first match already
+  // mid-play, and interleaved ticking (both matches minting units/buildings via the same AI
+  // economy every tick) let the two draw colliding ids from the same shared sequence — either
+  // way, corrupting BOTH matches' entity ids, and with them every id-hashed tie-break
+  // (movement/separation/gather) that makes a replay exact. state.nextEntityId (this state's own
+  // field, threaded through every real minting path) fixes this; this test is the one exit
+  // criterion TASKS.md's own T-016 row names, not exercised by the sequential test above.
+  const seedA = 111, seedB = 222;
+
+  function driveAlone(seed) {
+    const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
+    for (let i = 0; i < 1000; i++) tick(state, 0.1);
+    return entitySnapshot(state);
+  }
+  // Baselines: each built and driven with no other match ever alive alongside it.
+  const aloneA = driveAlone(seedA);
+  const aloneB = driveAlone(seedB);
+
+  // Now for real: A is created and well underway BEFORE B's own createGameState ever runs (the
+  // exact "B resets the counter mid-A" shape B1 names), and every tick after that interleaves
+  // both matches' own id-minting (AI economy activity on each) as tightly as one thread allows.
+  const a = createGameState({ planetId: "ferros", seed: seedA, rng: mulberry32(seedA) });
+  for (let i = 0; i < 50; i++) tick(a, 0.1);                       // A: 50 ticks down, 950 to go
+  const b = createGameState({ planetId: "ferros", seed: seedB, rng: mulberry32(seedB) });
+  for (let i = 0; i < 950; i++) { tick(a, 0.1); tick(b, 0.1); }     // A: +950 = 1000 total; B: 950 so far
+  for (let i = 0; i < 50; i++) tick(b, 0.1);                       // B: +50 = 1000 total, same as its baseline
+
+  assert.equal(entitySnapshot(a), aloneA, "match A's replay must be unaffected by match B's interleaved existence");
+  assert.equal(entitySnapshot(b), aloneB, "match B's replay must be unaffected by match A's interleaved existence");
+});
+
 test("the determinism fingerprint is sensitive to every sim-owned field a replay must reproduce", () => {
   // A guard on the guard. Every test above rests on the fingerprint actually CHANGING when the
   // sim diverges — one that silently omits a field turns "byte-identical replay" into

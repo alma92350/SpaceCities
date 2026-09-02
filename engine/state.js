@@ -14,17 +14,52 @@ import { createFog, updateFog } from "./fog.js";
 import { archetypeFor, ARCHETYPES } from "./aiArchetypes.js";
 import { difficultyFor } from "./aiDifficulty.js";
 
-// Entity-id counter. Reset to 1 at the start of every createGameState (below)
-// so a fresh game is a pure function of its seed: two same-seed runs mint the
-// same ids, and since ids feed the deterministic tie-breaks in movement /
-// separation / gather, the whole sim replays identically. IDs are only ever
-// compared within one state's own Maps, so two live games sharing id strings
-// is harmless.
-let nextEntityId = 1;
-function newId(prefix) { return `${prefix}${nextEntityId++}`; }
+// Entity-id counter (ADR-0011, TASKS.md T-016 — "Fix B1"). Each state carries its OWN counter,
+// state.nextEntityId, reset to 1 by createGameState (below): a fresh game is a pure function of
+// its seed, so two same-seed runs mint the same ids, and since ids feed the deterministic
+// tie-breaks in movement/separation/gather, the whole sim replays identically. Being PER-STATE
+// (not a single shared global) is what makes that true even when a second, unrelated match's
+// state is alive in the same process at the same time — the B1 defect this used to have: a single
+// module-global counter meant two live matches interleaving their id-minting (or one match's
+// createGameState resetting it mid-stream under another) could mint colliding ids, corrupting
+// both. See docs/analysis/02-command-wire-protocol.md §8 B1 for the fuller audit.
+//
+// `nextEntityId` below still exists, but demoted to a LEGACY watermark for the one case a
+// per-state counter can't reach: a caller with no live State to hand in at all — almost entirely
+// this repo's own test fixtures (every REAL minting path — seedPlayer, issueBuild, production,
+// colony deploy/pack, the galaxy relief spawn — is threaded; see each call site). createGameState
+// still resets it to 1_000_000 (not 1), same as it always reset the old shared counter to 1: a
+// fresh game is still a pure function of its seed, only now offset into a range no real match's
+// own state.nextEntityId ever reaches.
+//
+// That huge offset is the fix for a real bug an earlier version of this design had: nudging the
+// watermark forward to merely "stay at or above" a state's own counter still let the two draw
+// from the SAME numbers. A test building a fixture unit right after createGameState (watermark
+// and state.nextEntityId freshly equal, having both just advanced through seedPlayer together)
+// would mint the watermark's NEXT number — and the state's own NEXT threaded mint, unaware
+// anything had been drawn from underneath it, would mint that identical number right back,
+// silently overwriting the fixture in state.units/buildings. A million-wide gap between the two
+// ranges makes that impossible by construction instead of by careful bookkeeping: neither range
+// can ever reach into the other's, so a bare mint on one side can never collide with a threaded
+// mint on the other, regardless of interleaving order — the exact property "nudge forward" was
+// trying, and failing, to guarantee. This makes overlap categorically unreachable for anything
+// this repo will ever actually simulate, not merely made unlikely.
+let nextEntityId = 1000000;
+/**
+ * @param {string} prefix
+ * @param {State} [state] - when given, mints from THIS state's own counter; omitted, mints from
+ *   the legacy watermark's disjoint range instead (see the header comment above for why that's
+ *   safe to mix with threaded mints on the very same state).
+ */
+function newId(prefix, state) {
+  if (state) return `${prefix}${state.nextEntityId++}`;
+  return `${prefix}${nextEntityId++}`;
+}
 
-// Save/load (engine/persist.js) needs to snapshot and restore the id counter so a
-// loaded game keeps minting fresh, non-colliding ids from where it left off.
+// Save/load (engine/persist.js) needs to snapshot and restore the LEGACY watermark so a loaded
+// game's untracked/fallback mints (and engine/galaxy.js's own cross-planet bump) keep landing
+// beyond every id already on disk. A loaded state's own nextEntityId is restored directly by
+// engine/persist.js's rehydratePlanet (maxOwnEntityId), not through this pair.
 /** @returns {number} */
 export function peekEntityId() { return nextEntityId; }
 /** @param {number} n */
@@ -35,13 +70,15 @@ export function restoreEntityId(n) { nextEntityId = n; }
  * @param {string} owner  "player" | "ai"
  * @param {number} x
  * @param {number} y
+ * @param {State} [state] - thread the live match through so its id lands in ITS OWN counter,
+ *   not the legacy cross-process watermark (see newId's own header comment, T-016)
  * @returns {Unit}
  */
-export function makeUnit(type, owner, x, y) {
+export function makeUnit(type, owner, x, y, state) {
   const def = UNITS[type];
   /** @type {Unit} */
   const u = {
-    kind: "unit", id: newId("u"), type, owner,
+    kind: "unit", id: newId("u", state), type, owner,
     x, y, hp: def.hp, maxHp: def.hp,
     order: null,          // { type: 'move'|'gather'|'attack'|'attack-move'|'build', ... } — the active order
     orderQueue: [],       // queued waypoints (Ctrl+command); sim.js pulls the next in whenever `order` clears
@@ -62,12 +99,13 @@ export function makeUnit(type, owner, x, y) {
  * @param {number} x
  * @param {number} y
  * @param {{ hp?: number, constructing?: boolean }} [opts]
+ * @param {State} [state] - see makeUnit's own param doc (T-016)
  * @returns {Building}
  */
-export function makeBuilding(type, owner, x, y, opts = {}) {
+export function makeBuilding(type, owner, x, y, opts = {}, state) {
   const def = BUILDINGS[type];
   return {
-    kind: "building", id: newId("b"), type, owner,
+    kind: "building", id: newId("b", state), type, owner,
     x, y, radius: def.radius, hp: opts.hp ?? def.hp, maxHp: def.hp,
     constructing: !!opts.constructing, buildProgress: opts.constructing ? 0 : 1,
     queue: [],             // [{ unitType, progress }]
@@ -152,7 +190,14 @@ export function createAiController(planetId, opts = {}) {
  * @returns {State}
  */
 export function createGameState(opts = {}) {
-  nextEntityId = 1;   // fresh game -> deterministic ids from the seed (see newId above)
+  // Reset the LEGACY watermark too, not just state.nextEntityId below — countless test fixtures
+  // mint a bare, untracked entity right after createGameState and expect that to be exactly as
+  // reproducible across two same-seed runs as everything else. That stays true here: nothing in
+  // THIS state's own construction reads the watermark for its own ids (seedPlayer is fully
+  // state-threaded below), so resetting it can't perturb state.nextEntityId's sequence — and the
+  // watermark's own million-wide offset (see its declaration above) means it can never collide
+  // with that sequence either, in any interleaving, reset or not.
+  nextEntityId = 1000000;
   const planetId = opts.planetId || "ferros";
   // The one sanctioned fallback: an UNSEEDED caller (a direct test, or a call
   // that predates seeding) uses the platform PRNG for map generation only.
@@ -191,6 +236,7 @@ export function createGameState(opts = {}) {
   const state = {
     time: 0,
     tick: 0,
+    nextEntityId: 1,   // this match's OWN counter (T-016) — see newId's header comment
     over: false,
     winner: null,
     winReason: null,   // set by engine/victory.js finish() — why the match ended, once it does
@@ -316,15 +362,15 @@ function seedPlayer(state, ownerId, basePos) {
     // deploy it (engine/colony.js) to found the first Command Center; the colonists
     // (opening workers) disembark then. Seeding workers now would strand them: with
     // no drop-off yet they can't bank ore (engine/gather.js).
-    const ship = makeUnit("colonyship", ownerId, basePos.x, basePos.y);
+    const ship = makeUnit("colonyship", ownerId, basePos.x, basePos.y, state);
     state.units.set(ship.id, ship);
     return;
   }
   // Skirmish — BYTE-IDENTICAL to before: a finished Command Center + 3 workers.
-  const cc = makeBuilding("command", ownerId, basePos.x, basePos.y);
+  const cc = makeBuilding("command", ownerId, basePos.x, basePos.y, {}, state);
   state.buildings.set(cc.id, cc);
   for (let i = 0; i < 3; i++) {
-    const w = makeUnit("worker", ownerId, basePos.x + 40 + i * 14, basePos.y + 40);
+    const w = makeUnit("worker", ownerId, basePos.x + 40 + i * 14, basePos.y + 40, state);
     state.units.set(w.id, w);
   }
 }

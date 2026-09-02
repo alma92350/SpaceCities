@@ -419,7 +419,7 @@ export function checkGalaxyRescue(galaxy) {
   if (now - (galaxy.lastReliefTime ?? -Infinity) < RELIEF_COOLDOWN) return;   // still on cooldown
   galaxy.lastReliefTime = now;
   const lz = active.map.bases.player;
-  const ship = makeUnit("colonyship", "player", lz.x, lz.y);
+  const ship = makeUnit("colonyship", "player", lz.x, lz.y, active);
   ship.id = "g" + (galaxy.entitySeq = (galaxy.entitySeq || 0) + 1);   // galaxy id scheme (as in jumpCapital)
   active.units.set(ship.id, ship);
   galaxy.reliefNote = true;                                        // drained by boot.js for a toast

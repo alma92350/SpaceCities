@@ -316,6 +316,11 @@
  * @typedef {Object} State
  * @property {number} time
  * @property {number} tick
+ * @property {number} nextEntityId   this state's OWN entity-id counter (engine/state.js newId) —
+ *   independent of any other live state's, so two interleaved matches never mint colliding ids
+ *   (ADR-0011/TASKS.md T-016). Threaded through every real minting path (seedPlayer, issueBuild,
+ *   production, colony deploy/pack); a caller that omits it falls back to a legacy process-wide
+ *   watermark, unique to that state's own Maps
  * @property {boolean} over
  * @property {string|null} winner
  * @property {string|null} [winReason]  why the match ended — "elimination" | "mutual-wipe-score" | "timeout-score" (engine/victory.js finish); unset for an Odyssey-sandbox finish (checkEndlessLoss/checkEndlessWin), which has no clock/score tiebreak to explain

@@ -438,7 +438,7 @@ export function issueBuild(state, workerId, buildingType, x, y) {
   if (!prereqsMet(state, worker.owner, def)) return null;   // e.g. no founding a Foundry without a completed Barracks
   if (!canPlaceBuilding(state, buildingType, x, y)) return null;
   payCost(player.resources, def.cost);
-  const building = makeBuilding(buildingType, worker.owner, x, y, { constructing: true });
+  const building = makeBuilding(buildingType, worker.owner, x, y, { constructing: true }, state);
   state.buildings.set(building.id, building);
   setSquadLeader(worker, null);   // a direct order releases the worker from any squad it was following
   worker.order = { type: "build", buildingId: building.id };

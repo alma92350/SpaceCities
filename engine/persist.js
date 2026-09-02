@@ -22,14 +22,17 @@ import { CRATER_NODE_AMOUNT } from "./bomb.js";
 import { WRECK_SPAWN_DELAY } from "./wreckage.js";
 import { LOGI_PRIORITIES } from "./haul.js";   // the enum a building's logiPriority (below) is coerced against
 // peekEntityId/restoreEntityId (called at ~4 sites below: gamePayload, deserializeGame,
-// galaxyPayload, deserializeGalaxy) read and overwrite `nextEntityId` in engine/state.js — a
-// SINGLE module-global counter, not per-state. Reading it (peek, on save) is safe any time, but
-// writing it (restore, on load) stomps whatever value newId()/createGameState was mid-using, so a
-// restoreEntityId() must never race or interleave with another id-minting call (newId, or another
-// save/load) — e.g. don't deserialize a save while a tick that mints ids is in flight, and don't
-// load two saves concurrently. Single-threaded JS makes this safe as long as callers don't
-// interleave async id-minting work around these calls; see the "module-global" note on
-// nextEntityId in engine/state.js and test/save-hardening.test.js's freshSkirmishSave helper.
+// galaxyPayload, deserializeGalaxy) read and overwrite the LEGACY watermark in engine/state.js —
+// a single module-global, not per-state (T-016: each state now carries its OWN nextEntityId,
+// restored directly by rehydratePlanet below via maxOwnEntityId, no module-global involved).
+// This pair still matters for the watermark's own job: keeping a caller with no live State to
+// hand in (an untracked/fallback mint) landing beyond every id already on disk. Reading it (peek,
+// on save) is safe any time, but writing it (restore, on load) stomps whatever value an untracked
+// newId() call elsewhere might be mid-using, so a restoreEntityId() must never race or interleave
+// with another SUCH call (or another save/load) — e.g. don't deserialize a save while a fallback
+// mint is in flight, and don't load two saves concurrently. Single-threaded JS makes this safe as
+// long as callers don't interleave async id-minting work around these calls; see the watermark's
+// own header comment in engine/state.js and test/save-hardening.test.js's freshSkirmishSave helper.
 import { peekEntityId, restoreEntityId } from "./state.js";
 import { createMarket, PRESSURE_FLOOR, PRESSURE_CEIL, GLUT_CEIL } from "./market.js";
 import { createDiplomacy } from "./diplomacy.js";
@@ -766,7 +769,9 @@ function rehydratePlanet(P) {
     }) : []).filter(w => Object.keys(w.goods).length > 0);
 
   const state = {
-    time: num(P.time, 0), tick: num(P.tick, 0), over: P.over, winner: P.winner,
+    time: num(P.time, 0), tick: num(P.tick, 0),
+    nextEntityId: 0,   // placeholder — overwritten just below, once units/buildings exist to scan (T-016)
+    over: P.over, winner: P.winner,
     winReason: P.winReason ?? null,   // additive — why the match ended (engine/victory.js finish); null before/absent
     seed: P.seed, planetId: P.planetId, sizeMult, resourceMult, swapAsym, matchTimeLimit, popCap,
     endless: !!P.endless,
@@ -791,6 +796,11 @@ function rehydratePlanet(P) {
     wrecks,
   };
   for (const id of owners) updateFog(state, state.fogs[id], id);
+  // This state's OWN counter (T-016), independent of any other live state's — never trust a
+  // saved value as ground truth (there isn't one to trust; nothing serializes state.nextEntityId
+  // itself, on purpose), always re-derive from the ids actually present, the same defensive rule
+  // deserializeGame already applies to the legacy watermark below.
+  state.nextEntityId = maxOwnEntityId(state) + 1;
   return state;
 }
 

@@ -38,10 +38,10 @@ export function deployColonyShip(state, shipId) {
     return null;
   }
   removeEntity(state, shipId);                        // consume the ship (also drops it from selection)
-  const cc = makeBuilding("command", owner, x, y);    // no { constructing } ⇒ spawns COMPLETE
+  const cc = makeBuilding("command", owner, x, y, {}, state);    // no { constructing } ⇒ spawns COMPLETE
   state.buildings.set(cc.id, cc);
   for (let i = 0; i < COLONY_SHIP_WORKERS; i++) {     // colonists disembark — no cost, they rode in
-    const w = makeUnit("worker", owner, x + 40 + i * 14, y + 40);   // same offsets as state.js seedPlayer
+    const w = makeUnit("worker", owner, x + 40 + i * 14, y + 40, state);   // same offsets as state.js seedPlayer
     state.units.set(w.id, w);
   }
   state.events.push({ type: "buildingComplete", x, y, owner });   // reuse the CC-finished sound/vfx
@@ -86,7 +86,7 @@ export function packCommandCenter(state, buildingId) {
   payCost(player.resources, PACK_COST);
   const { owner, x, y } = cc;
   removeEntity(state, cc.id);
-  const ship = makeUnit("colonyship", owner, x, y);
+  const ship = makeUnit("colonyship", owner, x, y, state);
   state.units.set(ship.id, ship);
   state.events.push({ type: "unitSpawned", x, y, owner });   // reuse the normal spawn sound/vfx
   return ship.id;

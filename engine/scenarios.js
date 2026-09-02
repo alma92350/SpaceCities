@@ -98,14 +98,14 @@ export function setupEscort({ planetId = "ferros", seed = 1, difficulty = "mediu
   const start = route[0];
   // Four freighters clustered at the start station.
   for (let i = 0; i < 4; i++) {
-    const f = makeUnit("freighter", "player", start.x + (i % 2) * 26 - 13, start.y + Math.floor(i / 2) * 30 - 15);
+    const f = makeUnit("freighter", "player", start.x + (i % 2) * 26 - 13, start.y + Math.floor(i / 2) * 30 - 15, state);
     state.units.set(f.id, f);
   }
   // The escort fleet, just behind the freighters.
   let ei = 0;
   for (const [type, count] of Object.entries(diff.escorts)) {
     for (let k = 0; k < count; k++) {
-      const u = makeUnit(type, "player", start.x - 55 - (ei % 3) * 22, start.y + (ei - 2) * 26);
+      const u = makeUnit(type, "player", start.x - 55 - (ei % 3) * 22, start.y + (ei - 2) * 26, state);
       state.units.set(u.id, u);
       ei++;
     }
@@ -277,7 +277,7 @@ function updatePirateSpawns(state, dt) {
     x = Math.max(20, Math.min(state.map.width - 20, x));
     y = Math.max(20, Math.min(state.map.height - 20, y));
     const type = pirateType(risk, sc.rng);
-    const u = makeUnit(type, "ai", x, y);
+    const u = makeUnit(type, "ai", x, y, state);
     u.order = { type: "attack-move", x: convoy.x, y: convoy.y };
     state.units.set(u.id, u);
   }
@@ -337,13 +337,13 @@ export function setupRaider({ planetId = "ferros", seed = 1, difficulty = "mediu
   // The AI convoy: four freighters plus its escort, clustered at the start gate.
   // Nothing is ordered yet — the convoy holds until prep ends (updateRaider).
   for (let i = 0; i < 4; i++) {
-    const f = makeUnit("freighter", "ai", start.x + (i % 2) * 26 - 13, start.y + Math.floor(i / 2) * 30 - 15);
+    const f = makeUnit("freighter", "ai", start.x + (i % 2) * 26 - 13, start.y + Math.floor(i / 2) * 30 - 15, state);
     state.units.set(f.id, f);
   }
   let ei = 0, escortsTotal = 0;
   for (const [type, count] of Object.entries(diff.escort)) {
     for (let k = 0; k < count; k++) {
-      const u = makeUnit(type, "ai", start.x - 55 - (ei % 3) * 22, start.y + (ei - 2) * 26);
+      const u = makeUnit(type, "ai", start.x - 55 - (ei % 3) * 22, start.y + (ei - 2) * 26, state);
       state.units.set(u.id, u);
       if (UNITS[type].role === "combat") escortsTotal++;
       ei++;
@@ -356,7 +356,7 @@ export function setupRaider({ planetId = "ferros", seed = 1, difficulty = "mediu
   let pi = 0;
   for (const [type, count] of Object.entries(diff.pirates)) {
     for (let k = 0; k < count; k++) {
-      const u = makeUnit(type, "player", ambush.x + (pi % 3) * 26 - 26, ambush.y + Math.floor(pi / 3) * 26);
+      const u = makeUnit(type, "player", ambush.x + (pi % 3) * 26 - 26, ambush.y + Math.floor(pi / 3) * 26, state);
       state.units.set(u.id, u);
       pi++;
     }
@@ -522,7 +522,7 @@ export function setupBounty({ planetId = "ferros", seed = 1, difficulty = "mediu
   let mi = 0;
   for (const [type, count] of Object.entries(diff.marshal)) {
     for (let k = 0; k < count; k++) {
-      const u = makeUnit(type, "player", center.x + (mi % 4) * 28 - 42, center.y + Math.floor(mi / 4) * 28 - 14);
+      const u = makeUnit(type, "player", center.x + (mi % 4) * 28 - 42, center.y + Math.floor(mi / 4) * 28 - 14, state);
       state.units.set(u.id, u);
       mi++;
     }
@@ -540,7 +540,7 @@ export function setupBounty({ planetId = "ferros", seed = 1, difficulty = "mediu
     let k = 0;
     for (const [type, count] of Object.entries(diff.packComp)) {
       for (let c = 0; c < count; c++) {
-        const u = makeUnit(type, "ai", pos.x + (k % 3) * 26 - 26, pos.y + Math.floor(k / 3) * 26 - 13);
+        const u = makeUnit(type, "ai", pos.x + (k % 3) * 26 - 26, pos.y + Math.floor(k / 3) * 26 - 13, state);
         u.packId = p;
         state.units.set(u.id, u);
         k++;
