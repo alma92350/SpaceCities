@@ -87,9 +87,13 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
     // stopped (engine/commands.js applyFacing). A plain click carries no heading, so the shape
     // orients itself off the group's own travel direction as before, and any earlier facing is
     // cleared.
+    // Wire-shaped (net/commandShapes.js's WireFormation: s/l/hx/hy, not the engine's own
+    // shape/leaderPos/headingX/headingY) — net/commandCodec.js's decodeFormation translates
+    // this into the engine's opts bag server-side; sending the engine's own key names here
+    // would silently decode to the all-defaults formation instead of the player's actual choice.
     function currentFormation(heading) {
-      const f = { shape: game.formation.shape, leaderPos: game.formation.leaderPos };
-      if (heading) { f.headingX = heading.x; f.headingY = heading.y; }
+      const f = { s: game.formation.shape, l: game.formation.leaderPos };
+      if (heading) { f.hx = heading.x; f.hy = heading.y; }
       return f;
     }
 

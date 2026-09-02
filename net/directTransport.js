@@ -19,6 +19,12 @@
    Deliberately NOT net/loopback.js with a null session: loopback's tick()/getState() extensions
    promise a live session underneath (T-012's own header on that file), and this has none — a
    separate, smaller shape says that honestly instead of leaving two dead methods on the object.
+
+   `owner` defaults to "player" for the same reason server/session.js's own localOwner does
+   (D4, boot.js: every boot path this adapter serves is still a single local human who can only
+   ever hold that seat) — every command submitted through it now runs through
+   net/commandCodec.js's real ownership/fog checks via server/session.js's applyCommand, not the
+   unvalidated pass-through this adapter used before ADR-0006's codec existed.
    ============================================================ */
 
 "use strict";
@@ -28,12 +34,14 @@ import { applyCommand } from "../server/session.js";
 /**
  * @param {State} state - a bare engine/state.js-shaped state, ticked by the CALLER on
  *   whichever path it already uses (this adapter never ticks anything itself).
+ * @param {string} [owner="player"] - the seat every command submitted through this transport
+ *   applies as.
  * @returns {Transport}
  */
-export function createDirectTransport(state) {
+export function createDirectTransport(state, owner = "player") {
   return {
     submitCommand(cmd) {
-      return Promise.resolve(applyCommand(state, cmd));
+      return Promise.resolve(applyCommand(state, owner, cmd));
     },
     onEvent() {},
     close() {},

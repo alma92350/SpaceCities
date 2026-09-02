@@ -98,7 +98,16 @@ function makeState() {
     player: { resources: { ore: 99999, crystals: 99999, radioactives: 99999 }, upgrades: {} },
     ai: { resources: { ore: 99999, crystals: 99999, radioactives: 99999 }, upgrades: {} },
   };
-  return { map, units: new Map(), buildings: new Map(), selection: [], fog: createFog(map), planetId: "test", players };
+  // fogs/fog/fogAI mirror engine/state.js's own createGameState shape (fog/fogAI are aliases INTO
+  // fogs.player/fogs.ai, never a separate object) — net/commandCodec.js's targetEntity/targetNode
+  // read state.fogs[owner] unconditionally now that every command in this file's fixture goes
+  // through net/directTransport.js's real codec-backed applyCommand, not Phase 1's old
+  // fog-blind HANDLERS.
+  const fogs = { player: createFog(map), ai: createFog(map) };
+  return {
+    map, units: new Map(), buildings: new Map(), selection: [], planetId: "test", players,
+    fogs, fog: fogs.player, fogAI: fogs.ai,
+  };
 }
 
 function reveal(fog, x, y) {

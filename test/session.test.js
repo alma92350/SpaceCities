@@ -6,16 +6,17 @@ import { mulberry32 } from "../engine/rng.js";
 
 // server/session.js is the ADR-0003/ADR-0004 seam: a session owns one match's
 // state, applies commands through the SAME command taxonomy the wire protocol
-// will use (net/commandShapes.js), and can be driven headlessly with no
-// browser, no transport, no requestAnimationFrame — exactly like
-// tools/selfplay.js already proves the underlying engine can be.
+// uses (net/commandShapes.js), and can be driven headlessly with no browser,
+// no transport, no requestAnimationFrame — exactly like tools/selfplay.js
+// already proves the underlying engine can be.
 //
-// Phase 1 scope (TASKS.md, ADR-0004): submitCommand resolves ids and applies
-// the corresponding engine/commands.js issue* call — it does NOT yet validate
-// ownership or fog (that is Phase 2's net/commandCodec.js, layered on top of
-// this, not a rewrite of it). What it DOES do, deliberately, even now: drop a
-// dead id gracefully rather than throw, and reject a malformed/unknown
-// command shape — both are basic input robustness, not security policy.
+// Phase 2 (ADR-0006): submitCommand applies as `localOwner` (default
+// "player" — D4, boot.js: today's client is a single local human who can
+// only ever hold that seat) through net/commandCodec.js's apply(), which
+// does the REAL work — id resolution, ownership, fog. This file owns no
+// command-application logic of its own any more; see test/commandCodec.test.js
+// for the ownership/fog/malformed-input behavior these tests used to have to
+// describe as "not yet validated" here.
 
 function baseOpts(seed = 12345) {
   return { planetId: "ferros", seed, rng: mulberry32(seed) };

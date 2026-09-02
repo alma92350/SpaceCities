@@ -12,7 +12,8 @@ import { mulberry32 } from "../engine/rng.js";
 // SAME submitCommand(cmd) they call everywhere else, so none of them need to know or care
 // whether a real session is behind the state they're pointed at. Unlike net/loopback.js, this
 // owns no tick/getState/AI-seat behaviour at all — it is nothing but
-// server/session.js's own applyCommand(state, cmd), Promise-wrapped.
+// server/session.js's own applyCommand(state, owner, cmd), Promise-wrapped, applying as
+// "player" by default (D4: every boot path this adapter serves is still a single local human).
 
 function makeState(seed = 12345) {
   return createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
