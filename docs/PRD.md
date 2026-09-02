@@ -202,7 +202,7 @@ Requirements are `FR-n`, and every delivery task in [`TASKS.md`](../TASKS.md) tr
 |---|---|---|
 | NFR-1 | Simulation rate | 20 Hz fixed timestep, unchanged from upstream (`engine/loop.js`) |
 | NFR-2 | Server tick budget | < 25 ms per tick for a 4-seat Gigantic-map late game on HF free-tier CPU |
-| NFR-3 | Bandwidth per client | < 32 KB/s steady-state at 4 seats. **Provisional** — measured full-state serialization at 800v800 is 404 KB/snapshot, fog-filtered 55 KB. Filtering is what makes replication affordable, but the pathological end still exceeds this target, so T-015 either meets it via snapshot rate and delta-encoding or restates it deliberately. |
+| NFR-3 | Bandwidth per client | < 32 KB/s steady-state at 4 seats. **Settled by T-015** (`docs/analysis/00-feasibility-spikes.md` Spike 3): a full `projectFor` snapshot every tick does not meet this at *any* measured army size — at 20 Hz (NFR-1) even the smallest scenario (200-a-side, 87 KB/snapshot mean) is ~1.7 MB/s, ~50x over. The snapshot RATE is what breaks the budget, not the entity count, so no restatement of the number closes a 50x+ gap — this requires ADR-0009's M3 (delta-encode against the last acknowledged snapshot), not as optional headroom but as required work, with full snapshots reserved for an infrequent baseline (join/reconnect). |
 | NFR-4 | Concurrent matches | ≥ 4 on free-tier hardware, degrading gracefully |
 | NFR-5 | Runtime dependencies | **Zero.** No npm packages in the shipped image |
 | NFR-6 | Build step | **None.** The browser loads the repo as-is |

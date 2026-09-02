@@ -158,10 +158,21 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // wiring step that will ever remove this line — the same standing reason tools/ailab.js,
   // tools/selfplay-cli.js and tools/serve.js are excluded from this check entirely (browserJs()'s
   // own comment), just for one file that happens to live in net/ instead of tools/.
+  //
+  // engine/projection.js (T-015) is the newest TEMPORARY exemption, the same "module lands ahead
+  // of its wiring" pattern as server/session.js/net/loopback.js/net/directTransport.js above —
+  // except here the wiring it's ahead of is ADR-0009's own migration path, not a UI screen.
+  // projectFor is deliberately unused by any production path yet: M0 is "write and test
+  // projectFor, but keep broadcasting full state... proves the renderer tolerates a projection
+  // before anything depends on it" (test/projection.test.js's own render-parity test is exactly
+  // that proof). It's called today only by that test and by tools/bench.js's benchProjection
+  // (T-015's cost measurement, docs/analysis/00-feasibility-spikes.md Spike 3) — both legitimately
+  // outside this walk (test/ is excluded up front; tools/ is browserJs()'s own exclusion). M1
+  // ("server switches to projectFor") is what gives it a real caller and removes this line.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
-    "net/loopbackFaults.js",
+    "net/loopbackFaults.js", "engine/projection.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

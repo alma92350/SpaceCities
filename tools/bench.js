@@ -6,14 +6,19 @@
    spikes were first run) becomes "affordable on the real Hugging Face Space" (TASKS.md T-014)
    instead of staying an assumption.
 
-   THREE MEASUREMENTS, matching the spike's own method:
+   FOUR MEASUREMENTS, matching the spike's own method plus its own named follow-ons:
      1. NATURAL MATCHES — tools/selfplay.js drives a real AI-vs-AI game; per-tick wall-clock cost
         is measured as it's actually incurred in play, not synthetically.
      2. STRESS — large armies seeded directly (engine/state.js makeUnit) on a Gigantic (4x) map
         and sent at each other (engine/commands.js issueAttackMove), so combat/pathing/targeting/
         separation are all hot at once — the honest worst case a natural 20-40 unit match would
         flatter.
-     3. MEMORY PER MATCH — server/session.js createSession N times, measuring heap growth. Neither
+     3. PROJECTION (T-015) — cost of engine/projection.js's projectFor + JSON.stringify per client
+        per tick, on the same in-contact armies STRESS uses. Spike 2 found simulation running
+        ~500x faster than real time, which made serialization/filtering — not simulation — the
+        real suspect for server cost; this is that follow-on, committed rather than left as a
+        one-off spike.
+     4. MEMORY PER MATCH — server/session.js createSession N times, measuring heap growth. Neither
         original spike measured this; ADR-0003's "N concurrent matches per box" question needs it
         as much as CPU.
 
@@ -34,6 +39,7 @@ import { issueAttackMove } from "../engine/commands.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createSelfPlayState, tickSelfPlay, SELFPLAY_DT } from "./selfplay.js";
 import { createSession } from "../server/session.js";
+import { projectFor } from "../engine/projection.js";
 
 // p99 by nearest-rank on a copy sorted ascending — same simple method the original spike used
 // (docs/analysis/00's own tables), good enough for a bench, not a statistics paper.
@@ -124,6 +130,56 @@ export function benchStress({ armySize, ticks = 1200, seed = 1 }) {
 }
 
 /**
+ * T-015 — cost of ADR-0009's projectFor per client per tick: the measurement docs/analysis/00
+ * flagged as "likely dominant" once Spike 2 found the simulation itself running ~500x faster than
+ * real time (so the server spends nearly all its wall clock idle — serialization/filtering, not
+ * simulation, is the real cost). Same army-in-contact scenario as benchStress, since fog filtering
+ * has to walk every unit/building regardless of whether they're fighting, and combat is what
+ * churns the event list projectFor also filters. `warmupTicks` runs before any sample is taken, so
+ * the measured ticks reflect a real in-combat state (armies already engaged, events actually
+ * flowing) rather than the instant-of-spawn stillness benchStress's own header warns about.
+ * @param {{armySize:number, ticks?:number, warmupTicks?:number, seed?:number}} opts
+ */
+export function benchProjection({ armySize, ticks = 300, warmupTicks = 50, seed = 1 }) {
+  const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed), sizeMult: 4 });
+  const { width: w, height: h } = state.map;
+  const { a, b } = seedFacingArmies(state, armySize);
+  issueAttackMove(a, w / 2 + w * 0.1, h / 2);
+  issueAttackMove(b, w / 2 - w * 0.1, h / 2);
+  // Drain events every tick, warmup included — boot.js:807 does the same after every real render
+  // frame ("drained and turned into sound"). A real server broadcasts each tick's events once,
+  // then clears; without this, state.events grows for the whole bench run instead of holding just
+  // the current tick's, and every later JSON.stringify pays to re-serialize the entire match's
+  // combat log over and over.
+  for (let i = 0; i < warmupTicks; i++) { tick(state, 0.1); state.events.length = 0; }
+
+  const perSeatMs = [];      // one sample per projectFor+stringify call, both seats pooled
+  const perTickTotalMs = []; // one sample per tick: BOTH seats' cost summed — what actually competes with the tick budget
+  const payloadBytes = [];   // one sample per projectFor+stringify call
+  for (let i = 0; i < ticks; i++) {
+    tick(state, 0.1);
+    let tickTotal = 0;
+    for (const seat of state.owners) {
+      const t0 = performance.now();
+      const wire = JSON.stringify(projectFor(state, seat));
+      const dt = performance.now() - t0;
+      perSeatMs.push(dt);
+      payloadBytes.push(wire.length);
+      tickTotal += dt;
+    }
+    perTickTotalMs.push(tickTotal);
+    state.events.length = 0;
+  }
+  const alive = [...state.units.values()].filter(u => u.hp > 0).length;
+  return {
+    armySize, ticks, seats: state.owners.length, finalUnitsAlive: alive,
+    perSeat: summarizeTimings(perSeatMs),
+    perTickTotal: summarizeTimings(perTickTotalMs),
+    payloadBytes: { mean: Math.round(payloadBytes.reduce((a, v) => a + v, 0) / payloadBytes.length), max: Math.max(...payloadBytes) },
+  };
+}
+
+/**
  * Heap growth from creating `matchCount` independent sessions (server/session.js), the shape the
  * real match server actually instantiates per match. Forces a GC pass before/after when the
  * process was launched with --expose-gc (not required — `gcForced: false` just means the reading
@@ -161,8 +217,11 @@ export function runBenchSuite({ quick = false } = {}) {
   const stress = quick
     ? [benchStress({ armySize: 10, ticks: 10 })]
     : [200, 400, 800].map(armySize => benchStress({ armySize }));
+  const projection = quick
+    ? [benchProjection({ armySize: 10, ticks: 10, warmupTicks: 5 })]
+    : [200, 400, 800].map(armySize => benchProjection({ armySize }));
   return {
     node: process.version, cpus: cpus().length, at: new Date().toISOString(),
-    natural, stress, memory: benchMemory({ matchCount: quick ? 3 : 20 }),
+    natural, stress, projection, memory: benchMemory({ matchCount: quick ? 3 : 20 }),
   };
 }

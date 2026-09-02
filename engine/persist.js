@@ -489,6 +489,31 @@ function serPlayer(p) {
     resources: { ...p.resources }, upgrades: { ...p.upgrades } };
 }
 
+// Strip a unit's transient, session-only bookkeeping before it leaves the live engine — shared by
+// the save format (serPlanet below) and engine/projection.js's per-seat network view, so the
+// denylist is written once. `_gi`/`repairTargetId`/`ferriers`/`repairers` are stamped fresh every
+// tick and meaningless once copied out; `squadLeader`/`squadFollowers` are live UNIT OBJECT
+// REFERENCES that can't survive JSON.stringify at all (a follower points at its leader, the
+// leader's own squadFollowers list points right back, and JSON.stringify throws on the cycle
+// rather than silently truncating it). A live `follow-leader` order embeds that same leader
+// reference, so it's nulled out too — the same "recomputed/reset, never carried further"
+// treatment repairTargetId gets. `homeCC` is real persisted/visible intent, kept as-is.
+/** @param {Unit} u @returns {Unit} */
+export function sanitizeUnitForExternal(u) {
+  const { _gi, repairTargetId, squadLeader, squadFollowers, ferriers, repairers, ...rest } = u;
+  return rest.order && rest.order.type === "follow-leader" ? { ...rest, order: null } : rest;
+}
+
+// Same idea for a building: `haulers`/`servers`/`repairers` (logistics tallies), `powered`/`fuel`
+// (Generator fuel state) and `menderClaims`/`lastYield`/`lastTier` (HUD readouts regenerated next
+// tick) are all transient, stamped fresh like a unit's `_gi`. (digProgress/digCount are the rig's
+// REAL persisted dig state, kept.)
+/** @param {Building} b @returns {Building} */
+export function sanitizeBuildingForExternal(b) {
+  const { haulers, servers, repairers, powered, fuel, menderClaims, lastYield, lastTier, ...rest } = b;
+  return rest;
+}
+
 // The DYNAMIC per-planet payload — everything the seed can't regenerate. Shared by
 // the skirmish save and every planet of a galaxy save. visible fog is NOT stored
 // (recomputed on load); only `explored` (permanent scouted memory) persists. The
@@ -515,32 +540,8 @@ function serPlanet(state) {
     // shape stays two-keyed (fog/fogAI below likewise): a save FORMAT built for N
     // sides is separate, deferred work.
     players: Object.fromEntries((state.owners || Object.keys(state.players)).map(id => [id, serPlayer(state.players[id])])),
-    // `_gi` is the grid broad-phase index — a transient stamped fresh onto every unit each tick
-    // by buildUnitGrid, meaningless once saved. Strip it so it doesn't bloat the payload with a
-    // per-unit integer that the next tick overwrites anyway. Shallow copy, only at save time.
-    // `squadLeader`/`squadFollowers` (engine/commands.js) are live UNIT OBJECT REFERENCES, not
-    // ids — session-only, transient bookkeeping like the rest of this denylist, but they ALSO
-    // can't survive JSON.stringify at all: a follower points at its leader, the leader's own
-    // squadFollowers list points right back, and JSON.stringify throws on a circular structure
-    // rather than silently truncating it — a live squad would crash every save. Strip both
-    // fields, and null out a live `follow-leader` order too (it embeds the same leader
-    // reference) — a reload simply drops squad membership, the same "recomputed/reset, never
-    // persisted" treatment repairTargetId already gets.
-    // `ferriers` (a freighter's per-tick ferry-worker tally, engine/haul.js countLogistics) and
-    // `repairers` (a unit can now be a worker repair-job TARGET too, engine/repair.js
-    // countRepairJobs) are transient too, same reasoning as `haulers`/`servers` below — stripped
-    // here since they can live on a UNIT, not just a building. `homeCC` (a player-assigned home
-    // base, engine/commands.js issueSetHomeBase) is real persisted intent, kept as-is — a stale
-    // reference to a destroyed CC is harmless, zoneFirst just falls back to the nearest-CC guess.
-    units: [...state.units.values()].map(({ _gi, repairTargetId, squadLeader, squadFollowers, ferriers, repairers, ...u }) =>
-      u.order && u.order.type === "follow-leader" ? { ...u, order: null } : u),
-    // `haulers`/`servers` (logistics tallies, engine/haul.js), `repairers` (worker repair-job
-    // tally, engine/repair.js countRepairJobs), `powered`/`fuel` (Generator fuel state, engine/
-    // industry.js), `menderClaims` (auto-repair Mender tally, engine/sim.js) and `lastYield`/
-    // `lastTier` (a Plasma Rig's last-strike HUD readout, engine/rig.js — regenerated on the next
-    // dig) are all transient — stamped fresh each tick like a unit's `_gi` grid index — so strip
-    // them from saves. (digProgress/digCount are the rig's REAL persisted dig state, kept.)
-    buildings: [...state.buildings.values()].map(({ haulers, servers, repairers, powered, fuel, menderClaims, lastYield, lastTier, ...b }) => b),
+    units: [...state.units.values()].map(sanitizeUnitForExternal),
+    buildings: [...state.buildings.values()].map(sanitizeBuildingForExternal),
     // A map-generated node is regenerated fresh from the seed on load (generateMap), so only
     // its `amount` (the one thing that changes) needs saving. A crater node (engine/bomb.js)
     // or a wreck node (engine/wreckage.js) does NOT exist in that regeneration at all — it

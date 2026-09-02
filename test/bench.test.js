@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { summarizeTimings, benchNaturalMatch, benchStress, benchMemory, runBenchSuite } from "../tools/bench.js";
+import { summarizeTimings, benchNaturalMatch, benchStress, benchProjection, benchMemory, runBenchSuite } from "../tools/bench.js";
 
 // tools/bench.js (TASKS.md T-014) is the committed, re-runnable form of the two throwaway spikes
 // in docs/analysis/00-feasibility-spikes.md — "natural matches" (tools/selfplay.js AI-vs-AI, real
@@ -63,6 +63,33 @@ test("benchStress's two armies actually fight — losses occur by the end of a l
   assert.ok(r.finalUnitsAlive < 60, "combat over 400 ticks should have destroyed at least some of the 60 seeded units");
 });
 
+test("benchProjection (T-015) returns a well-formed row for the requested army size and tick count", () => {
+  const r = benchProjection({ armySize: 20, ticks: 10, warmupTicks: 5, seed: 1 });
+  assert.equal(r.armySize, 20);
+  assert.equal(r.ticks, 10);
+  assert.equal(r.seats, 2);
+  assert.ok(r.perSeat.mean >= 0 && r.perSeat.p99 >= r.perSeat.p50 && r.perSeat.max >= r.perSeat.p99);
+  assert.ok(r.perTickTotal.mean >= 0);
+  // Two seats measured per tick, so the summed-per-tick cost is at least the per-call cost, and
+  // typically close to double it — this would silently break if a future edit measured only one
+  // seat but still called it "total".
+  assert.ok(r.perTickTotal.mean >= r.perSeat.mean, "the per-tick total sums both seats, so it can't be smaller than a single seat's own cost");
+  assert.ok(r.payloadBytes.mean > 0 && r.payloadBytes.max >= r.payloadBytes.mean);
+});
+
+test("benchProjection is deterministic: same seed and army size produce the same payload size", () => {
+  const a = benchProjection({ armySize: 16, ticks: 8, warmupTicks: 4, seed: 3 });
+  const b = benchProjection({ armySize: 16, ticks: 8, warmupTicks: 4, seed: 3 });
+  assert.deepEqual(a.payloadBytes, b.payloadBytes);
+  assert.equal(a.finalUnitsAlive, b.finalUnitsAlive);
+});
+
+test("benchProjection's payload grows with army size — bandwidth scales with entities in contact, not the map", () => {
+  const small = benchProjection({ armySize: 20, ticks: 10, warmupTicks: 5, seed: 1 });
+  const big = benchProjection({ armySize: 200, ticks: 10, warmupTicks: 5, seed: 1 });
+  assert.ok(big.payloadBytes.mean > small.payloadBytes.mean);
+});
+
 test("benchMemory returns a non-negative per-match figure and reports whether it could force a GC pass", () => {
   const r = benchMemory({ matchCount: 5 });
   assert.equal(r.matchCount, 5);
@@ -76,6 +103,7 @@ test("runBenchSuite assembles every section into one JSON-able result, with the 
   assert.ok(r.cpus >= 1);
   assert.ok(Array.isArray(r.natural) && r.natural.length > 0);
   assert.ok(Array.isArray(r.stress) && r.stress.length > 0);
+  assert.ok(Array.isArray(r.projection) && r.projection.length > 0);
   assert.ok(r.memory && typeof r.memory.perMatchMB === "number");
   assert.doesNotThrow(() => JSON.stringify(r), "the whole result must be plain, serializable data — this is what an HTTP endpoint returns verbatim");
 });

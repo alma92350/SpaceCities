@@ -109,3 +109,13 @@ observation layer (ADR-0007) must project through this same function, never from
 
 **Revisit if.** Projection cost per client per tick turns out to dominate the tick budget at 4 seats
 — then M3 delta-encoding moves from optional to required, ahead of schedule.
+
+**Update 2026-09-02 (T-015).** This condition is triggered, though not the way it was framed:
+`docs/analysis/00-feasibility-spikes.md` Spike 3 measured `projectFor` + `JSON.stringify` directly
+(`tools/bench.js` `benchProjection`) and found the dominant cost is **bandwidth, not CPU**, and it's
+already true well below 4 seats — at 20 Hz, even a 200-a-side, 2-seat scenario is ~50x over PRD
+NFR-3's 32 KB/s budget on payload size alone. CPU cost stays modest (comparable to simulation cost
+at worst, nowhere near NFR-2's 25 ms). **M3 is required work, not optional headroom, and doesn't
+need to wait for 4 seats or for the tick budget to be the thing under pressure.** At 800-a-side, the
+fog grid alone is ~23% of payload bytes — independent evidence that M2 ("stop shipping fog; client
+recomputes") is worth doing early too, not only for the reasons already given above.
