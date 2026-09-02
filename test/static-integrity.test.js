@@ -189,16 +189,23 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // but nothing records or replays a match on any live boot path yet — that's the same
   // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real.
   //
-  // net/ws.js (T-025) joins the same wait: a complete, tested (test/ws.test.js — including a real
-  // Node WebSocket client round-tripping through a real HTTP server, not a hand-rolled client that
-  // could share this file's own misconceptions) RFC 6455 implementation with nothing upgrading a
-  // real connection through it yet — that caller is T-026 (the WebSocket Transport) and T-027 (the
-  // HTTP server that actually listens). All four lines come out together once those land.
+  // net/ws.js (T-025) now HAS a real caller — net/wsServerTransport.js (T-026) calls its
+  // acceptUpgrade for real, and test/wsTransport.test.js exercises the whole pair over an actual
+  // HTTP server plus a real client-side WebSocket (net/wsClientTransport.js), not a hand-rolled
+  // stand-in for either side. So net/ws.js's own wait is over; what's left is that none of these
+  // three files sit on any path index.html's own module graph reaches. net/wsServerTransport.js is
+  // inherently server-side (it takes a Node http.Server) and will only ever be reached from a real
+  // server entry point — T-027. net/wsClientTransport.js IS meant for the browser (it implements
+  // net/transport.js's Transport interface exactly, same as net/loopback.js), but boot.js has no
+  // path that constructs one yet — every boot path still picks loopback/direct — because there is
+  // no lobby/join flow to hand it a real match URL to connect to (T-029's hosting plus Phase 4's
+  // lobby). All three lines come out once boot.js actually wires createWsClientTransport in.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
     "server/matchLoop.js", "server/replay.js", "net/ws.js",
+    "net/wsServerTransport.js", "net/wsClientTransport.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

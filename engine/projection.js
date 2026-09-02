@@ -93,3 +93,40 @@ export function projectFor(state, seat) {
     events,
   };
 }
+
+/**
+ * The paired decode step for a projectFor(...) payload that has crossed the wire (so `wire` here
+ * is already a plain JSON value, never a live State) — reassembles it into the shape render.js and
+ * the rest of the client already read: units/buildings indexed into Maps by id (projectFor emits
+ * arrays, the JSON-safe form), `fog`/`fogAI` aliases matching state.js's own (a single-seat
+ * projection only ever carries its OWN fog, so both aliases point at the one entry `wire.fogs`
+ * has), and `selection: []` — UI-only, and never part of the wire contract at all (ADR-0006 rule
+ * 5: it moves to the client session, the server never reads or sends it).
+ *
+ * `map` is supplied by the caller, never the payload — projectFor deliberately omits it (ADR-0009:
+ * deterministic from opts the client already has), so reassembly needs the SAME map the projection
+ * was taken against, regenerated locally exactly as engine/state.js's own createGameState would.
+ *
+ * This is the one property that makes T-026's WebSocket transport satisfy its own exit criterion
+ * ("swapping loopback -> WebSocket changes no client code above the transport"): loopback delivers
+ * the live engine State object as-is; a WebSocket transport delivers wire JSON, and doing the
+ * reassembly HERE — inside the transport, before a StateEvent is ever emitted — is what lets
+ * everything above the transport boundary keep reading `event.state` exactly as it always did.
+ * Proven pixel-identical against the real renderer by test/projection.test.js's own M0 case, the
+ * one this function was extracted out of rather than left duplicated at every future call site.
+ * @param {Object} wire - a JSON.parse'd projectFor(...) payload
+ * @param {GameMap} map - the client's own locally-regenerated map for this match
+ * @returns {Object} a state-shaped object render.js and the client's own read paths already expect
+ */
+export function reassembleProjection(wire, map) {
+  const seat = Object.keys(wire.fogs)[0];
+  return {
+    ...wire,
+    map,
+    units: new Map(wire.units.map(u => [u.id, u])),
+    buildings: new Map(wire.buildings.map(b => [b.id, b])),
+    selection: [],
+    fog: wire.fogs[seat],
+    fogAI: wire.fogs[seat],
+  };
+}

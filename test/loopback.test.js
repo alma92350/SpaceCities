@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createLoopbackTransport } from "../net/loopback.js";
 import { createSession } from "../server/session.js";
 import { mulberry32 } from "../engine/rng.js";
+import { testTransportContract } from "./transportContract.js";
 
 // net/loopback.js wires a client directly to a server/session.js session, in
 // process, with no socket (ADR-0004). It implements the generic net/transport.js
@@ -20,6 +21,16 @@ import { mulberry32 } from "../engine/rng.js";
 function makeSession(seed = 12345) {
   return createSession({ planetId: "ferros", seed, rng: mulberry32(seed) });
 }
+
+testTransportContract("loopback", async () => {
+  const session = makeSession();
+  const transport = createLoopbackTransport(session);
+  const worker = [...session.getState().units.values()].find(u => u.owner === "player");
+  return {
+    transport, unitId: worker.id, moveTarget: { x: 300, y: 300 },
+    cleanup: () => transport.close(),
+  };
+});
 
 test("submitCommand resolves with the session's own CommandResult", async () => {
   const session = makeSession();

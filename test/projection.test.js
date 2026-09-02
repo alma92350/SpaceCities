@@ -4,7 +4,7 @@ import { createGameState, makeUnit } from "../engine/state.js";
 import { updateFog } from "../engine/fog.js";
 import { supplyUsed, supplyCap } from "../engine/supply.js";
 import { playerScore } from "../engine/victory.js";
-import { projectFor } from "../engine/projection.js";
+import { projectFor, reassembleProjection } from "../engine/projection.js";
 
 /* ============================================================
    ADR-0009's M0 step: projectFor(state, seat) must exist and be tested before anything depends
@@ -277,18 +277,6 @@ globalThis.document = {
 
 const { drawFrame } = await import("../render.js");
 
-function reassembleClientView(proj, ownMap) {
-  return {
-    ...proj,
-    map: ownMap,
-    units: new Map(proj.units.map(u => [u.id, u])),
-    buildings: new Map(proj.buildings.map(b => [b.id, b])),
-    selection: [],
-    fog: proj.fogs.player,
-    fogAI: proj.fogs.player,   // unused by a player-perspective render; kept so any stray read doesn't throw
-  };
-}
-
 test("M0: projectFor(s, 'player') renders pixel-identically to s once reassembled with the local map", () => {
   const { state, px, py } = buildScenario();
   const camera = { x: px, y: py, zoom: 1 };
@@ -298,9 +286,21 @@ test("M0: projectFor(s, 'player') renders pixel-identically to s once reassemble
 
   const proj = projectFor(state, "player");
   const wire = JSON.parse(JSON.stringify(proj));
-  const view = reassembleClientView(wire, state.map);
+  const view = reassembleProjection(wire, state.map);
   const projCtx = recordingCtx();
   drawFrame(projCtx, view, camera, 800, 600, null, null, 1, false);
 
   assert.deepEqual(projCtx.calls, realCtx.calls);
+});
+
+test("reassembleProjection works for any seat, not just a hardcoded 'player' — derives the seat from the projection's own fogs key", () => {
+  const { state } = buildScenario();
+  const proj = projectFor(state, "ai");
+  const wire = JSON.parse(JSON.stringify(proj));
+  const view = reassembleProjection(wire, state.map);
+  assert.equal(view.fog, wire.fogs.ai);
+  assert.equal(view.fogAI, wire.fogs.ai);
+  assert.ok(view.units instanceof Map);
+  assert.ok(view.buildings instanceof Map);
+  assert.deepEqual(view.selection, []);
 });
