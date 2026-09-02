@@ -174,13 +174,20 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // encode/decode/stampRecord exist and are tested (test/commandEnvelope.test.js) but nothing on
   // any client path calls them yet — hudSelection.js/input.js/inputCommands.js still call
   // game.transport.submitCommand(cmd) directly with a bare WireCommand, no envelope. T-021's
-  // net/commandCodec.js (the actual wire->engine bridge) is what starts consuming this file for
-  // real, on the server side; wiring an actual client to send enveloped commands over a real
-  // socket is Phase 3 (T-026). Both remove this line when they land.
+  // net/commandCodec.js turned out NOT to be that caller — it takes an already-shape-validated
+  // WireCommand directly (server/session.js calls apply(state, owner, cmd) with no envelope in
+  // between), so this file's real first caller is server/matchLoop.js (T-023) instead, itself
+  // exempted below for the identical reason: it exists, is tested
+  // (test/matchLoop.test.js), and is CORRECT, but nothing on any live boot path calls it yet —
+  // server/session.js's loopback submitCommand keeps its own immediate-apply path (ADR-0004:
+  // exactly one trusted local input source, so there's no ordering ambiguity yet to justify the
+  // queueing delay). A real multi-socket server is what gives matchLoop.js — and, through it,
+  // commandEnvelope.js — a live caller (T-026/T-029). Both lines come out together when that lands.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
+    "server/matchLoop.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
