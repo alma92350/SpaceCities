@@ -187,13 +187,18 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // server/replay.js (T-024) is the same pattern layered one file higher: it exists, is tested
   // (test/replay.test.js) and reuses matchLoop.js's own stepMatch rather than reimplementing it,
   // but nothing records or replays a match on any live boot path yet — that's the same
-  // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real. All three lines
-  // come out together then.
+  // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real.
+  //
+  // net/ws.js (T-025) joins the same wait: a complete, tested (test/ws.test.js — including a real
+  // Node WebSocket client round-tripping through a real HTTP server, not a hand-rolled client that
+  // could share this file's own misconceptions) RFC 6455 implementation with nothing upgrading a
+  // real connection through it yet — that caller is T-026 (the WebSocket Transport) and T-027 (the
+  // HTTP server that actually listens). All four lines come out together once those land.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
-    "server/matchLoop.js", "server/replay.js",
+    "server/matchLoop.js", "server/replay.js", "net/ws.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
