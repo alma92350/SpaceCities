@@ -183,11 +183,17 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // exactly one trusted local input source, so there's no ordering ambiguity yet to justify the
   // queueing delay). A real multi-socket server is what gives matchLoop.js — and, through it,
   // commandEnvelope.js — a live caller (T-026/T-029). Both lines come out together when that lands.
+  //
+  // server/replay.js (T-024) is the same pattern layered one file higher: it exists, is tested
+  // (test/replay.test.js) and reuses matchLoop.js's own stepMatch rather than reimplementing it,
+  // but nothing records or replays a match on any live boot path yet — that's the same
+  // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real. All three lines
+  // come out together then.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
-    "server/matchLoop.js",
+    "server/matchLoop.js", "server/replay.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
