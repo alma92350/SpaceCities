@@ -47,6 +47,22 @@ test("a loaded game continues identically to the original — determinism surviv
   assert.equal(snapshot(b), original, "the reloaded game replays the continuation exactly");
 });
 
+// T-034a — a human occupying seat "ai" (see test/ownerScaffold.test.js's own T-034a tests) must
+// stay human-controlled across a save/reload, never silently regain a built-in computer AI.
+test("aiEnabled:false round-trips as state.ai === null (T-034a)", () => {
+  const a = createGameState({ planetId: "ferros", seed: 5, aiEnabled: false });
+  const b = deserializeGame(JSON.parse(JSON.stringify(serializeGame(a))));
+  assert.equal(b.ai, null, "reload must not silently regain a built-in AI for a seat a human is actually playing");
+});
+
+test("a save payload with no ai: key at all (predates T-034a) still restores a populated state.ai, not null (T-034a)", () => {
+  const a = createGameState({ planetId: "ferros", seed: 6 });
+  const save = serializeGame(a);
+  delete save.ai;   // simulate a save file written before this field could ever be null
+  const b = deserializeGame(save);
+  assert.ok(b.ai, "an absent ai: key must default to a populated controller, not to null");
+});
+
 test("deserializeGame rejects an unknown save version", () => {
   assert.throws(() => deserializeGame({ v: 999 }), /unsupported save version/);
 });

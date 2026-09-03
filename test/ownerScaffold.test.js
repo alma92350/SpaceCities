@@ -24,6 +24,7 @@ import { checkWinCondition, DEFAULT_MATCH_TIME_LIMIT } from "../engine/victory.j
 import { serializeGame, deserializeGame } from "../engine/persist.js";
 import { createFog, isVisibleAt } from "../engine/fog.js";
 import { tick } from "../engine/sim.js";
+import { isHumanControlled } from "../engine/aiCommon.js";
 
 function commandCenterOf(state, owner) {
   return [...state.buildings.values()].find(b => b.owner === owner && b.type === "command");
@@ -190,4 +191,30 @@ test("T-018: no skirmish-path engine CODE line reads state.fog or state.fogAI di
     });
   }
   assert.deepEqual(offenders, [], "engine line(s) still read state.fog/state.fogAI directly:\n" + offenders.join("\n"));
+});
+
+// T-034a — discovered while researching T-034 (lobby join): engine/aiCommon.js's own comment on
+// isHumanControlled has, since T-017, named this exact moment ("it becomes meaningful the moment a
+// real match can put a human on either seat") as the point state.ai needs to be able to go null.
+// Without this, a real human joining a lobby's seat "ai" would have every one of their own orders
+// fought, every tick, by the built-in single-player AI — engine/sim.js's tick() calls runAI(state,
+// dt) for "ai" unconditionally whenever state.ai exists, which today it always does.
+test("aiEnabled:false leaves state.ai null — the seam a real human on seat \"ai\" needs (T-034a)", () => {
+  const state = createGameState({ planetId: "ferros", aiEnabled: false });
+  assert.equal(state.ai, null);
+  assert.equal(isHumanControlled(state, "ai"), true, "isHumanControlled must flip once state.ai is null");
+  // Every existing caller (nobody passes aiEnabled today) is completely unaffected.
+  const normal = createGameState({ planetId: "ferros" });
+  assert.ok(normal.ai, "state.ai stays populated when aiEnabled isn't passed");
+  assert.equal(isHumanControlled(normal, "ai"), false);
+});
+
+test("with aiEnabled:false, tick() never lets the built-in AI act for owner \"ai\" (T-034a)", () => {
+  const state = createGameState({ planetId: "ferros", seed: 99, aiEnabled: false });
+  const startBuildings = state.buildings.size;
+  for (let i = 0; i < 600; i++) tick(state, 0.1);   // 60 sim-seconds — persist.test.js's own "build, fight, reveal fog" ticks only 800 at the same dt, so this is comfortably enough for the built-in AI to normally have queued at least one build
+  assert.equal(state.buildings.size, startBuildings, "no new construction was ever decided for owner \"ai\" — nothing is deciding anything");
+  for (const b of state.buildings.values()) {
+    if (b.owner === "ai") assert.equal(b.queue.length, 0, `${b.type} must never get an autonomous production order`);
+  }
 });

@@ -569,7 +569,9 @@ function serPlanet(state) {
     })),
     fog: [...state.fog.explored],
     fogAI: [...state.fogAI.explored],
-    ai: {
+    // T-034a: null exactly when a real human occupies seat "ai" (engine/state.js's aiEnabled:false)
+    // — never serialize a synthetic controller for a seat nothing is actually driving.
+    ai: !state.ai ? null : {
       aiThink: state.ai.think ?? 0, aiScoutId: state.ai.scoutId ?? null,
       aiApm: state.ai.apm ?? null, aiMicro: !!state.ai.micro,
       // The player-picked AI strategy (engine/aiStrategy.js) — persisted the same redundant-per-planet
@@ -785,7 +787,10 @@ function rehydratePlanet(P) {
     // Restore the AI controller's bookkeeping into the grouped `state.ai` (see engine/state.js).
     // Wire keys stay `aiThink`/`aiScoutId`/… under the save's `ai:` object for backward compat;
     // only the live shape is nested. The archetype is re-derived from the planet id, not persisted.
-    ai: cleanController(P.ai, "ai", P.planetId),
+    // T-034a: `=== null` on purpose, not a truthy check — an OLD save simply lacks the `ai` key
+    // (P.ai undefined) and must still default to a populated controller, exactly as it always has;
+    // only an EXPLICIT null (a save of a match where a human occupied seat "ai") stays null.
+    ai: P.ai === null ? null : cleanController(P.ai, "ai", P.planetId),
     // Restore Tier 1 self-play's second controller (see the matching comment in serPlanet above)
     // — null for every save that predates it or never activated self-play, exactly like state.ai
     // itself would be if createGameState were ever called without seeding it (it never is; this

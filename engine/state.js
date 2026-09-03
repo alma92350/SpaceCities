@@ -185,7 +185,7 @@ export function createAiController(planetId, opts = {}) {
  * regenerates deterministically from the seed, so two same-option runs are identical.
  * @param {{ planetId?: string, rng?: () => number, seed?: number, sizeMult?: number,
  *   resourceMult?: number, swapAsym?: boolean, matchTimeLimit?: number, popCap?: number, endless?: boolean,
- *   aiApm?: number, aiMicro?: boolean,
+ *   aiApm?: number, aiMicro?: boolean, aiEnabled?: boolean,
  *   aiStrategy?: string, difficulty?: string, aiArchetype?: string, playerFaction?: string, aiFaction?: string }} [opts]
  * @returns {State}
  */
@@ -284,7 +284,13 @@ export function createGameState(opts = {}) {
     // the save's `ai:` key (engine/persist.js). The think/wave/attack-schedule fields used to be
     // set lazily by ai.js on first tick; initialising them here keeps the shape complete and
     // self-documenting, and is behaviourally identical (they were read `|| 0` / `?? …` anyway).
-    ai: createAiController(planetId, {
+    // opts.aiEnabled (default true): false is the T-034a seam — the moment a real match can put a
+    // human on seat "ai" (a lobby join, not self-play's separate playerAi slot below), state.ai
+    // must be able to stay null so isHumanControlled(state,"ai") is true and engine/sim.js's tick()
+    // stops calling runAI for "ai" — exactly the null a fresh state.playerAi already models, and
+    // engine/aiCommon.js's controllerFor/runAI already treat a null controller as a safe no-op.
+    // Every existing caller leaves this unset, so state.ai is exactly as populated as before.
+    ai: opts.aiEnabled === false ? null : createAiController(planetId, {
       apm: opts.aiApm, micro: opts.aiMicro, strategy: opts.aiStrategy, difficulty: opts.difficulty,
       // docs/competitions-and-elo.md D3, one layer up from createAiController's own opts.archetype
       // (which this just forwards verbatim, including its own null/unknown-key fallback to
