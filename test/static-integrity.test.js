@@ -498,3 +498,25 @@ test("no shipped module imports a name it never uses", () => {
   }
   assert.deepEqual(offenders, [], `dead imports:\n  ${offenders.join("\n  ")}`);
 });
+
+// T-032 (FR-11: "the client remains responsive under latency... via local prediction of selection
+// and camera"). camera.js has ZERO imports today — not by convention, but because it has no way
+// to reach `game`/a Transport/anything network-adjacent even if some future change wanted it to.
+// That is what makes camera movement STRUCTURALLY latency-immune rather than merely
+// latency-immune-in-practice: a future edit that wired camera panning through a submitCommand
+// round trip (an accidental regression, not a deliberate redesign) would have to add an import to
+// get there, and this guard catches exactly that edit, not just its symptom three files away.
+// Deliberately narrow (one file, one property) rather than a general "no UI module imports net/"
+// rule — camera.js is the one module FR-11 names by name, and input.js's own selection code
+// (state.selection = ..., six sites, all direct synchronous assignment — no await/.then/
+// submitCommand anywhere near them) is proven at the behavioral level instead, by
+// test/input.test.js's own T-013 fault-injection test ("buildMode survives the whole gap") and
+// test/latency.test.js's T-032 tests (the real-WS-transport, 150ms-RTT measurement FR-11's exit
+// criterion itself asks for) — a second, static "camera has no imports" style check for input.js
+// would either have to allowlist its many legitimate imports individually or prove nothing a
+// behavioral test doesn't already prove more directly.
+test("T-032: camera.js has zero imports — camera movement is structurally unable to depend on network/transport timing, not just conventionally", () => {
+  const src = readFileSync(join(root, "camera.js"), "utf8");
+  const specs = [...src.matchAll(IMPORT_SPEC)].map(specPath);
+  assert.deepEqual(specs, [], `camera.js must import nothing at all — found: ${specs.join(", ")}`);
+});
