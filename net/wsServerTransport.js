@@ -10,9 +10,21 @@
        {type:"welcome", seat, createGameState:{planetId,seed,sizeMult,resourceMult,swapAsym}}
          sent once, immediately on connect — everything a client needs to regenerate this match's
          map locally (ADR-0009: the map is deterministic from these fields, so it's never sent).
-       {type:"state", proj: <engine/projection.js's projectFor(state, seat) output>}
-         sent on broadcastState() — the caller decides the cadence (every stepMatch tick, in
-         practice), matching how net/loopback.js's own tick() is caller-driven, never self-timed.
+       {type:"state", full:true, proj: <engine/projection.js's projectFor(state, seat) output>}
+         the FIRST push to a given connection — a full snapshot, so a fresh client (or one that just
+         reconnected) has a real baseline to delta against from here on.
+       {type:"state", full:false, delta: <engine/projectionDelta.js's computeDelta(prev, curr)>}
+         every push after the first, on the SAME connection (ADR-0009 M3, T-028b) — computed against
+         the last snapshot actually sent to THIS connection, tracked in lastSnapshotBySeat below and
+         cleared on disconnect so a reconnect always gets a fresh full push, never a delta against a
+         dead connection's stale baseline. Needs no separate application-level ack: this transport
+         runs over a real WebSocket (TCP-backed, in-order, no loss within one connection — net/ws.js
+         never drops a frame), so "the last snapshot sent on this still-open connection" already IS
+         "the last one the client has" for as long as the socket stays open; a closed/replaced
+         connection is exactly the case lastSnapshotBySeat's own clear-on-disconnect handles.
+         Either push is sent on broadcastState() — the caller decides the cadence (every stepMatch
+         tick, in practice), matching how net/loopback.js's own tick() is caller-driven, never
+         self-timed.
        {type:"commandResult", seq, result}
          sent once a submitted command is actually APPLIED (server/matchLoop.js's own emitAck
          hook) — correlates back to the client's own submitCommand call by seq, exactly as
@@ -40,6 +52,7 @@
 import { acceptUpgrade } from "./ws.js";
 import { admit } from "../server/matchLoop.js";
 import { projectFor } from "../engine/projection.js";
+import { computeDelta } from "../engine/projectionDelta.js";
 
 // server/matchLoop.js's own log records deliberately store a SIMPLER shape than net/transport.js's
 // documented CommandResult ({ok, code?, result?}): `null` (or a success payload like {buildingId})
@@ -64,6 +77,7 @@ function toCommandResult(recResult) {
 export function attachWsMatch(httpServer, match, opts = {}) {
   const { allowedOrigins, path } = opts;
   const bySeat = new Map();   // owner -> live connection, at most one per seat at a time
+  const lastSnapshotBySeat = new Map();   // owner -> the last projectFor(...) output actually SENT on the current connection (T-028b)
 
   function welcomePayload(seat) {
     const { planetId, seed, sizeMult, resourceMult, swapAsym } = match.state;
@@ -100,7 +114,16 @@ export function attachWsMatch(httpServer, match, opts = {}) {
           if (seq !== null) conn.send(JSON.stringify({ type: "commandResult", seq, result: { ok: false, code: admitted.code } }));
         }
       };
-      conn.onclose = () => { if (bySeat.get(seat) === conn) bySeat.delete(seat); };
+      conn.onclose = () => {
+        if (bySeat.get(seat) === conn) bySeat.delete(seat);
+        // Clear the baseline too — a RECONNECT (new socket, same seat) must get a fresh full
+        // snapshot as its own first push, never a delta computed against a now-dead connection's
+        // last state. Not conditioned on `bySeat.get(seat) === conn` the way the line above is:
+        // there is no lobby/reconnect flow yet (T-033/T-036) for two connections to genuinely race
+        // for the same seat, so the only way this fires late is a deliberate close-then-reconnect —
+        // exactly the case this exists to handle.
+        lastSnapshotBySeat.delete(seat);
+      };
     });
   }
 
@@ -113,9 +136,19 @@ export function attachWsMatch(httpServer, match, opts = {}) {
 
   return {
     /** Push a fresh per-seat projection to every currently-connected seat. Caller-driven, once per
-     *  stepMatch tick in practice — this function has no timer or loop of its own. */
+     *  stepMatch tick in practice — this function has no timer or loop of its own. The first push
+     *  on a connection is always full (T-028b: lastSnapshotBySeat has no entry for this seat yet);
+     *  every one after is a delta against whatever was last actually sent on THIS connection. */
     broadcastState() {
-      for (const [seat, conn] of bySeat) conn.send(JSON.stringify({ type: "state", proj: projectFor(match.state, seat) }));
+      for (const [seat, conn] of bySeat) {
+        const curr = projectFor(match.state, seat);
+        const prev = lastSnapshotBySeat.get(seat);
+        conn.send(JSON.stringify(
+          prev ? { type: "state", full: false, delta: computeDelta(prev, curr) }
+               : { type: "state", full: true, proj: curr }
+        ));
+        lastSnapshotBySeat.set(seat, curr);
+      }
     },
     /** Stop accepting new upgrades on this httpServer for this match and close every live
      *  connection. Idempotent — closing twice is a harmless no-op, same guarantee every other
@@ -124,6 +157,7 @@ export function attachWsMatch(httpServer, match, opts = {}) {
       httpServer.off("upgrade", onUpgrade);
       for (const conn of bySeat.values()) conn.close();
       bySeat.clear();
+      lastSnapshotBySeat.clear();
     },
   };
 }

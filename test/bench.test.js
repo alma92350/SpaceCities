@@ -90,6 +90,22 @@ test("benchProjection's payload grows with army size — bandwidth scales with e
   assert.ok(big.payloadBytes.mean > small.payloadBytes.mean);
 });
 
+test("benchProjection also reports deltaBytes (T-028b, ADR-0009 M3) — a well-formed row alongside payloadBytes", () => {
+  const r = benchProjection({ armySize: 20, ticks: 10, warmupTicks: 5, seed: 1 });
+  assert.ok(r.deltaBytes.mean > 0 && r.deltaBytes.max >= r.deltaBytes.mean);
+});
+
+test("deltaBytes is dramatically smaller than a full snapshot even during active combat — the measured payoff of engine/projectionDelta.js's per-field patches", () => {
+  // Deliberately not asserting an absolute KB/s budget here: measured (see TASKS.md T-028b),
+  // NFR-3's 32 KB/s is met on average at NATURAL army sizes (this bench's own "20-40 a side" —
+  // docs/analysis/00) but not at STRESS scale (200+) or on the highest-churn individual ticks even
+  // at natural scale. What's unconditionally true, and what this guards, is the RELATIVE win: a
+  // delta always costs meaningfully less than resending everything, at any army size.
+  const r = benchProjection({ armySize: 200, ticks: 200, warmupTicks: 50, seed: 1 });
+  assert.ok(r.deltaBytes.mean < r.payloadBytes.mean / 2,
+    `delta (${r.deltaBytes.mean}B) should be well under half a full snapshot (${r.payloadBytes.mean}B)`);
+});
+
 test("benchMemory returns a non-negative per-match figure and reports whether it could force a GC pass", () => {
   const r = benchMemory({ matchCount: 5 });
   assert.equal(r.matchCount, 5);

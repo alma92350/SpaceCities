@@ -38,6 +38,7 @@ import { tick } from "../engine/sim.js";
 import { issueAttackMove } from "../engine/commands.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createSelfPlayState, tickSelfPlay, SELFPLAY_DT } from "./selfplay.js";
+import { computeDelta } from "../engine/projectionDelta.js";
 import { createSession } from "../server/session.js";
 import { projectFor } from "../engine/projection.js";
 
@@ -155,17 +156,29 @@ export function benchProjection({ armySize, ticks = 300, warmupTicks = 50, seed 
 
   const perSeatMs = [];      // one sample per projectFor+stringify call, both seats pooled
   const perTickTotalMs = []; // one sample per tick: BOTH seats' cost summed — what actually competes with the tick budget
-  const payloadBytes = [];   // one sample per projectFor+stringify call
+  const payloadBytes = [];   // one sample per projectFor+stringify call: a FULL snapshot's own size
+  const deltaBytes = [];     // one sample per tick after the first, per seat (T-028b, ADR-0009 M3):
+                              // engine/projectionDelta.js's computeDelta against the PREVIOUS tick's
+                              // own projection for that seat — the size a connected client actually
+                              // receives from tick 2 onward, once net/wsServerTransport.js has a
+                              // real baseline to delta against (this loop's own first tick has none,
+                              // exactly mirroring a fresh connection's own one-time full push).
+  const prevProjBySeat = new Map();
   for (let i = 0; i < ticks; i++) {
     tick(state, 0.1);
     let tickTotal = 0;
     for (const seat of state.owners) {
       const t0 = performance.now();
-      const wire = JSON.stringify(projectFor(state, seat));
+      const proj = projectFor(state, seat);
+      const wire = JSON.stringify(proj);
       const dt = performance.now() - t0;
       perSeatMs.push(dt);
       payloadBytes.push(wire.length);
       tickTotal += dt;
+
+      const prev = prevProjBySeat.get(seat);
+      if (prev) deltaBytes.push(JSON.stringify(computeDelta(prev, proj)).length);
+      prevProjBySeat.set(seat, proj);
     }
     perTickTotalMs.push(tickTotal);
     state.events.length = 0;
@@ -176,6 +189,7 @@ export function benchProjection({ armySize, ticks = 300, warmupTicks = 50, seed 
     perSeat: summarizeTimings(perSeatMs),
     perTickTotal: summarizeTimings(perTickTotalMs),
     payloadBytes: { mean: Math.round(payloadBytes.reduce((a, v) => a + v, 0) / payloadBytes.length), max: Math.max(...payloadBytes) },
+    deltaBytes: { mean: Math.round(deltaBytes.reduce((a, v) => a + v, 0) / deltaBytes.length), max: Math.max(...deltaBytes) },
   };
 }
 

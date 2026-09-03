@@ -167,6 +167,92 @@ test("T-028: a seat's own state payload contains no entity outside its fog — p
   } finally { stopTicking(); server.close(); }
 });
 
+/* ---------- T-028b: delta-encoded state pushes (ADR-0009 M3) ---------- */
+
+test("the first state push to a fresh connection is a FULL snapshot; every push after it is a delta", async () => {
+  const match = makeMatch();
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  const port = await listen(server);
+  const stopTicking = startTicking(match, wsMatch);
+  const ws = new WebSocket(`ws://localhost:${port}/?seat=player`);
+  try {
+    const stateMsgs = [];
+    await new Promise(resolve => {
+      ws.addEventListener("message", ev => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "state") { stateMsgs.push(msg); if (stateMsgs.length >= 3) resolve(); }
+      });
+    });
+    assert.equal(stateMsgs[0].full, true);
+    assert.ok(stateMsgs[0].proj && !stateMsgs[0].delta, "the first push carries a full projection, no delta field");
+    for (const msg of stateMsgs.slice(1)) {
+      assert.equal(msg.full, false);
+      assert.ok(msg.delta && !msg.proj, `push after the first must carry a delta, never a full proj: ${JSON.stringify(msg).slice(0, 80)}`);
+    }
+  } finally { ws.close(); stopTicking(); server.close(); }
+});
+
+test("a reconnecting client (new socket, same seat) gets a FRESH full snapshot, never a delta against the closed connection's stale baseline", async () => {
+  const match = makeMatch();
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  const port = await listen(server);
+  const stopTicking = startTicking(match, wsMatch);
+  const first = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+  let ws2 = null;
+  try {
+    await new Promise(resolve => first.onEvent(e => { if (e.type === "state") resolve(); }));
+    first.close();
+    await new Promise(r => setTimeout(r, 30));   // let the server's onclose actually fire
+
+    ws2 = new WebSocket(`ws://localhost:${port}/?seat=player`);
+    const firstStateOnReconnect = await new Promise(resolve => {
+      ws2.addEventListener("message", ev => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "state") resolve(msg);
+      });
+    });
+    assert.equal(firstStateOnReconnect.full, true, "a brand-new connection must never receive a delta as its first push");
+  } finally { if (ws2) ws2.close(); stopTicking(); server.close(); }
+});
+
+test("end-to-end: the client transport correctly reconstructs state across a real sequence of delta pushes", async () => {
+  const match = makeMatch();
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  const port = await listen(server);
+  const stopTicking = startTicking(match, wsMatch);
+  const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+  try {
+    const unit = [...match.state.units.values()].find(u => u.owner === "player");
+    const startX = unit.x, startY = unit.y;
+    await transport.submitCommand({ t: "move", ids: [unit.id], x: unit.x + 300, y: unit.y });
+
+    // Collect several state events, crossing multiple full/delta boundaries (attachWsMatch's own
+    // first-push-full-then-delta rule, proven by the test above, means push 1 is full and every one
+    // after is a delta) — and confirm the unit SURVIVES reconstruction correctly across all of them,
+    // ending up somewhere other than where it started. Deliberately not comparing against
+    // match.state's OWN live value at the moment the promise resolves: that live read races the
+    // server's still-running tick loop (several more ticks can land between this message being SENT
+    // and this test code actually running), so it could disagree with what message #8 legitimately
+    // carried for reasons that have nothing to do with delta reconstruction being correct or not.
+    let count = 0;
+    const state = await new Promise(resolve => {
+      transport.onEvent(e => {
+        if (e.type !== "state") return;
+        if (++count >= 8) resolve(e.state);
+      });
+    });
+    const seen = state.units.get(unit.id);
+    assert.ok(seen, "the unit must still be present after several delta applications, not dropped or corrupted");
+    assert.equal(typeof seen.x, "number");
+    assert.equal(typeof seen.y, "number");
+    assert.ok(seen.x !== startX || seen.y !== startY,
+      "the unit's reconstructed position must have actually changed across these pushes — proving delta application really moved it, not left it frozen at the first full snapshot");
+  } finally { transport.close(); stopTicking(); server.close(); }
+});
+
 /* ---------- Origin / seat-binding robustness ---------- */
 
 test("a connection naming an unknown seat is refused at the upgrade, not silently accepted", async () => {

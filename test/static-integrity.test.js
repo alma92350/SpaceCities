@@ -189,22 +189,26 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // but nothing records or replays a match on any live boot path yet — that's the same
   // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real.
   //
-  // net/ws.js (T-025) now HAS a real caller — net/wsServerTransport.js (T-026) calls its
-  // acceptUpgrade for real, and test/wsTransport.test.js exercises the whole pair over an actual
-  // HTTP server plus a real client-side WebSocket (net/wsClientTransport.js), not a hand-rolled
-  // stand-in for either side. So net/ws.js's own wait is over; what's left is that none of these
-  // three files sit on any path index.html's own module graph reaches. net/wsServerTransport.js is
-  // inherently server-side (it takes a Node http.Server) and will only ever be reached from a real
-  // server entry point — T-027. net/wsClientTransport.js IS meant for the browser (it implements
+  // net/ws.js (T-025) and net/wsServerTransport.js (T-026) both now have a REAL caller —
+  // tools/serve.js's createAppServer (T-027) actually attaches a live match's WebSocket handling
+  // to a real http.Server, verified against the real Docker image, not just test/wsTransport.test.js's
+  // own coverage. That caller just isn't a BROWSER one: tools/ is this walk's own standing
+  // exclusion (browserJs()'s comment — it holds genuine Node CLI/server entry points, launched from
+  // a shell, never from index.html), so the edge is real but invisible to this specific check by
+  // design, the same way competitionWorker.js's Worker-construction edge is invisible to it for a
+  // different syntactic reason. net/wsClientTransport.js IS meant for the browser (it implements
   // net/transport.js's Transport interface exactly, same as net/loopback.js), but boot.js has no
   // path that constructs one yet — every boot path still picks loopback/direct — because there is
   // no lobby/join flow to hand it a real match URL to connect to (T-029's hosting plus Phase 4's
-  // lobby). All three lines come out once boot.js actually wires createWsClientTransport in.
+  // lobby). engine/projectionDelta.js (T-028b) joins the same wait one layer deeper: it's a real,
+  // tested dependency of BOTH net/wsServerTransport.js and net/wsClientTransport.js (computeDelta/
+  // applyDelta), so it inherits exactly their reachability status, not a new reason of its own.
+  // All these lines come out together once boot.js actually wires createWsClientTransport in.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
-    "server/matchLoop.js", "server/replay.js", "net/ws.js",
+    "server/matchLoop.js", "server/replay.js", "net/ws.js", "engine/projectionDelta.js",
     "net/wsServerTransport.js", "net/wsClientTransport.js",
   ]);
   const orphans = browserJs()

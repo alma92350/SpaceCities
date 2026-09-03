@@ -22,6 +22,14 @@
    connection — explored accumulates monotonically, the same guarantee state.fogs[owner] already
    gives server-side.
 
+   ADR-0009 M3 (T-028b): a "state" message now carries EITHER a full projectFor(...) payload
+   (`full:true, proj`) or a delta against the last one this connection was sent (`full:false,
+   delta`) — net/wsServerTransport.js's own header explains why. This file holds `lastProj`, the
+   last reconstructed snapshot, and either replaces it outright (full) or folds the delta into it
+   (engine/projectionDelta.js's applyDelta) before handing the result to reassembleProjection —
+   which never sees the difference, since by the time it runs the wire-level full/delta split is
+   already resolved into an ordinary projectFor-shaped object.
+
    Async on purpose, unlike createLoopbackTransport: establishing a real socket and waiting for
    that first welcome message is genuinely asynchronous, where loopback wraps an
    already-constructed session synchronously. The resolved Transport's own methods stay
@@ -35,6 +43,7 @@ import { generateMap } from "../engine/map.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createFog } from "../engine/fog.js";
 import { reassembleProjection } from "../engine/projection.js";
+import { applyDelta } from "../engine/projectionDelta.js";
 import { encode } from "./commandEnvelope.js";
 
 /**
@@ -56,6 +65,8 @@ export function createWsClientTransport(url) {
     let fog = null;   // this seat's OWN persistent fog (ADR-0009 M2) — created once at welcome,
                        // mutated in place by every reassembleProjection call from then on
     let seat = null;
+    let lastProj = null;   // the last reconstructed projectFor(...)-shaped snapshot (ADR-0009 M3,
+                            // T-028b) — a full push replaces it outright; a delta is applied against it
 
     function emit(event) {
       if (closed) return;
@@ -94,7 +105,12 @@ export function createWsClientTransport(url) {
         return;
       }
       if (msg.type === "state") {
-        emit({ type: "state", state: reassembleProjection(msg.proj, map, fog, seat) });
+        // T-028b: the first push on this connection is always full (net/wsServerTransport.js's own
+        // rule); every one after is a delta against whatever this client last reconstructed. There
+        // is no separate ack to send — the WebSocket itself is the ack (see that file's own header
+        // for why TCP's in-order delivery already gives the server everything "acknowledged" needs).
+        lastProj = msg.full ? msg.proj : applyDelta(lastProj, msg.delta);
+        emit({ type: "state", state: reassembleProjection(lastProj, map, fog, seat) });
         return;
       }
       if (msg.type === "commandResult") {
