@@ -16,6 +16,12 @@
        joinLive() saved (liveMatchStorage.js) and calls rejoinLiveMatch() instead of the ordinary
        map-select screen — the same joinLive() under the hood, just fed remembered credentials
        instead of a fresh POST's response.
+     Watch (T-037, FR-7): the SAME shareable link a player uses also offers "👁 Watch" on the
+       renderJoinByLink card — spectateLive() connects over WS as a read-only spectator
+       (net/wsSpectatorTransport.js's own `?spectate=1`, no seat/token at all) and immediately
+       enters Observer Mode (observer.js), the same free-camera/full-vision/no-orders view a
+       watched local AI-vs-AI exhibition already gets, just fed by a real network match. The host's
+       own card offers a "Allow spectators" checkbox (POST /api/matches's spectatorsEnabled).
 
    SCOPE, same discipline every task in this phase states up front: FR-3 (AI fill for unfilled open
    seats) and FR-4 (start conditions) are T-035's own job, not this file's — a match is simply live
@@ -29,7 +35,9 @@ import { lobbyScreenEl, mapSelectEl } from "./dom.js";
 import { PLANETS } from "./data.js";
 import { MAP_CHOICES, SIZE_OPTIONS, RESOURCE_OPTIONS, MATCH_LENGTH_OPTIONS, renderMapSelect } from "./setup.js";
 import { createWsClientTransport } from "./net/wsClientTransport.js";
+import { createWsSpectatorTransport } from "./net/wsSpectatorTransport.js";
 import { bootState } from "./boot.js";
+import { enterObserverMode } from "./observer.js";
 import { game } from "./session.js";
 import * as sound from "./sound.js";
 import { saveLiveMatch, clearLiveMatch } from "./liveMatchStorage.js";
@@ -48,6 +56,11 @@ async function apiGet(path) {
 function wsUrlFor(matchId, seat, token) {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   return `${proto}//${location.host}/ws?match=${encodeURIComponent(matchId)}&seat=${encodeURIComponent(seat)}&token=${encodeURIComponent(token)}`;
+}
+
+function wsSpectateUrlFor(matchId) {
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${location.host}/ws?match=${encodeURIComponent(matchId)}&spectate=1`;
 }
 
 function shareLink(matchId) {
@@ -99,6 +112,34 @@ async function joinLive(matchId, owner, token, statusEl) {
     applyLiveState(game.state, e.state);
     if (e.state.over) clearLiveMatch();
   });
+}
+
+// T-037 (FR-7): connects as a READ-ONLY spectator and hands off into Observer Mode — the same
+// free-camera, full-vision, no-orders view boot.js's own startSpectatedMatch already gives a
+// watched local AI-vs-AI exhibition, just fed by a REAL live network match instead. Deliberately
+// NOT joinLive: a spectator has no seat and no token — nothing to persist for a T-036-style
+// reclaim (liveMatchStorage.js is seat-specific by design) — and createWsSpectatorTransport's own
+// submitCommand is a pure no-op regardless, so handing it to bootState/attachInput uniformly is
+// still safe even though nothing issued through it could ever reach the worker.
+// game.localOwner = null (not a real seat, T-030's own seam has nothing to point at) is set BEFORE
+// bootState, same reason joinLive's own comment gives (bootState's camera-open code reads it
+// immediately). game.networkSpectate is the OPPOSITE ordering, same as spectateMatch/competition
+// elsewhere in this file's own family: bootState clears it to false internally (its own header:
+// "cleared by default; lobbyScreen.js's spectateLive re-sets this right after this returns"), so
+// it must be set AFTER bootState returns, not before — setting it first would just get wiped out
+// by that same reset. enterObserverMode() runs right after, exactly where startSpectatedMatch
+// already calls it, and reads networkSpectate as part of its own gate.
+async function spectateLive(matchId, statusEl) {
+  if (statusEl) statusEl.textContent = "Connecting…";
+  const transport = await createWsSpectatorTransport(wsSpectateUrlFor(matchId));
+  const firstState = await new Promise(resolve => { transport.onEvent(e => { if (e.type === "state") resolve(e.state); }); });
+  sound.unlockAudio();   // a real user gesture (the Watch click) led here — safe to start audio now
+  game.localOwner = null;
+  lobbyScreenEl.classList.add("hidden");
+  bootState(firstState, { intro: false, transport });   // no objectives strip — a spectator has no checklist of their own
+  game.networkSpectate = true;
+  enterObserverMode();
+  transport.onEvent(e => { if (e.type === "state") applyLiveState(game.state, e.state); });
 }
 
 // T-036: called from main.js's own boot-time check (a saved {matchId, owner, token} survived a
@@ -174,6 +215,18 @@ function renderHostCard(container) {
   const resourceSelect = dialSelectInto(card, "Resources", RESOURCE_OPTIONS);
   const lengthSelect = dialSelectInto(card, "Match length", MATCH_LENGTH_OPTIONS);
 
+  // T-037 (FR-7): "unless the host has disabled spectators" — on by default (an unchecked box is
+  // the ONE thing that changes today's behavior, so the default matches what every match already
+  // did before this task existed).
+  const spectatorsRow = document.createElement("label");
+  spectatorsRow.className = "lobby-row";
+  const spectatorsCheckbox = document.createElement("input");
+  spectatorsCheckbox.type = "checkbox";
+  spectatorsCheckbox.checked = true;
+  spectatorsRow.appendChild(spectatorsCheckbox);
+  spectatorsRow.appendChild(document.createTextNode(" Allow spectators"));
+  card.appendChild(spectatorsRow);
+
   const status = document.createElement("p");
   status.className = "setup-hint";
   card.appendChild(status);
@@ -209,6 +262,7 @@ function renderHostCard(container) {
     const res = await apiPost("/api/matches", {
       planetId: planetSelect.value,
       sizeMult: Number(sizeSelect.value), resourceMult: Number(resourceSelect.value), matchTimeLimit: Number(lengthSelect.value),
+      spectatorsEnabled: spectatorsCheckbox.checked,
     });
     if (!res.ok) {
       status.textContent = `Could not create a match (${(res.json && res.json.error) || res.status}).`;
@@ -336,6 +390,30 @@ function renderJoinByLink(joinMatchId) {
     await joinLive(joinMatchId, res.json.owner, res.json.token, status);
   });
   card.appendChild(joinBtn);
+
+  // T-037 (FR-7): "Any client may join a running match as a spectator" — the SAME shareable link
+  // a player would use, offered as a second option on the SAME card, since a host shares one link
+  // and whoever opens it decides whether to play or watch. No pre-check of the match's own
+  // spectatorsEnabled here (there's no single-match lookup endpoint to check it against before
+  // trying — GET /api/matches only ever lists still-OPEN matches, and a match worth watching is
+  // usually already started): a disabled host just gets a clear rejection after clicking, same as
+  // "Join match" already handles its own failure modes above.
+  const watchBtn = document.createElement("button");
+  watchBtn.className = "btn ghost";
+  watchBtn.type = "button";
+  watchBtn.textContent = "👁 Watch";
+  watchBtn.addEventListener("click", async () => {
+    watchBtn.disabled = true;
+    status.textContent = "Connecting…";
+    try {
+      await spectateLive(joinMatchId, status);
+    } catch {
+      status.textContent = "Could not spectate this match — it may have ended, or the host has disabled spectating.";
+      watchBtn.disabled = false;
+    }
+  });
+  card.appendChild(watchBtn);
+
   lobbyScreenEl.appendChild(card);
 }
 

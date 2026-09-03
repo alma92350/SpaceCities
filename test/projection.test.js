@@ -6,7 +6,7 @@ import { generateMap } from "../engine/map.js";
 import { mulberry32 } from "../engine/rng.js";
 import { supplyUsed, supplyCap } from "../engine/supply.js";
 import { playerScore } from "../engine/victory.js";
-import { projectFor, reassembleProjection, projectForSpectator } from "../engine/projection.js";
+import { projectFor, reassembleProjection, projectForSpectator, reassembleSpectatorProjection } from "../engine/projection.js";
 
 /* ============================================================
    ADR-0009's M0 step: projectFor(state, seat) must exist and be tested before anything depends
@@ -405,6 +405,62 @@ test("reassembleProjection merges the wire's current node amounts into the LOCAL
   const seen = view.map.nodes.find(n => n.id === chartedNode.id);
   assert.equal(seen.amount, chartedNode.amount,
     "the client's own map must reflect the server's current (harvested-down) amount, not the map's generation-time default");
+});
+
+/* ============================================================
+   T-037 (FR-7): reassembleSpectatorProjection — the client-side paired decode step for
+   projectForSpectator(...)'s own wire shape. No fog to reconstruct (there is no seat to compute it
+   FOR, and render.js/minimap.js's own hiddenByFog only ever reads state.fog when observerMode is
+   false — a network spectator is ALWAYS rendered through Observer Mode, so state.fog is simply never
+   consulted), so this is deliberately simpler than reassembleProjection: no createFog, no updateFog,
+   just the same mechanical array-to-Map + node-amount-merge transform every client already needs
+   regardless of which projection filled the wire payload.
+   ============================================================ */
+
+test("reassembleSpectatorProjection builds units/buildings Maps from the wire, keyed by id, with every field intact", () => {
+  const { state, visibleEnemy } = buildScenario();
+  const proj = projectForSpectator(state);
+  const wire = JSON.parse(JSON.stringify(proj));
+  const view = reassembleSpectatorProjection(wire, state.map);
+  assert.ok(view.units instanceof Map);
+  assert.ok(view.buildings instanceof Map);
+  const enemy = view.units.get(visibleEnemy.id);
+  assert.ok(enemy, "the AI's unit must survive reassembly, same as it survived the projection itself");
+  assert.equal(enemy.homeCC, "some-ai-cc-id", "full fields, not stripped — a spectator's own reassembly must not re-introduce fog filtering client-side either");
+});
+
+test("reassembleSpectatorProjection merges the wire's current node amounts into the LOCAL map, same as the ordinary per-seat reassembly", () => {
+  const { state } = buildScenario();
+  const chartedNode = state.map.nodes.find(n => !n.hidden);
+  const originalAmount = chartedNode.amount;
+  chartedNode.amount = originalAmount - 41;
+
+  const proj = projectForSpectator(state);
+  const wire = JSON.parse(JSON.stringify(proj));
+  const freshMap = generateMap(state.planetId, mulberry32(state.seed),
+    { sizeMult: state.sizeMult, resourceMult: state.resourceMult, swapAsym: state.swapAsym });
+
+  const view = reassembleSpectatorProjection(wire, freshMap);
+  const seen = view.map.nodes.find(n => n.id === chartedNode.id);
+  assert.equal(seen.amount, chartedNode.amount);
+});
+
+test("reassembleSpectatorProjection's fog/fogAI are null — there is no seat to compute fog for, and Observer Mode's own render path never reads them", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  const wire = JSON.parse(JSON.stringify(proj));
+  const view = reassembleSpectatorProjection(wire, state.map);
+  assert.equal(view.fog, null);
+  assert.equal(view.fogAI, null);
+});
+
+test("reassembleSpectatorProjection never crashes on a full projectForSpectator round-trip, and selection starts empty", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  const wire = JSON.parse(JSON.stringify(proj));
+  const view = reassembleSpectatorProjection(wire, state.map);
+  assert.deepEqual(view.selection, []);
+  assert.equal(view.over, false);
 });
 
 test("reassembleProjection works for any seat, not just a hardcoded 'player'", () => {

@@ -34,6 +34,7 @@ function resetGame() {
   game.observerCamera = null;
   game.spectateMatch = null;
   game.spectateSpeed = 1;
+  game.networkSpectate = false;
 }
 
 /* ---------- observedState / enter / exit / toggle ---------- */
@@ -111,6 +112,41 @@ test("you cannot STOP observing a watched match — that would hand you an AI's 
 
   // The unconditional teardown call is a DIFFERENT thing and must still work: boot.js's
   // bootState/restartToMapSelect call it while leaving, before the spectate flag itself is cleared.
+  exitObserverMode();
+  assert.equal(game.observerMode, false, "teardown is never blocked");
+  resetGame();
+});
+
+/* ---------- T-037 (FR-7): spectating a REAL LIVE NETWORK match — networkSpectate, not spectateMatch ---------- */
+
+test("enterObserverMode works for a live network spectator (networkSpectate), with no galaxy and no spectateMatch either", () => {
+  resetGame();
+  const state = watchedMatchState();   // any real state shape works — a network spectator's own
+                                        // reassembled state has the identical shape (units/buildings
+                                        // Maps, a real map), this fixture just avoids duplicating one
+  game.state = state;
+  game.networkSpectate = true;
+
+  enterObserverMode();
+
+  assert.equal(game.observerMode, true, "a live network spectator can be observed without an Odyssey or a local exhibition");
+  assert.equal(game.spectateId, state.planetId);
+  assert.ok(game.observerCamera);
+  assert.equal(observedState(), state);
+  resetGame();
+});
+
+test("you cannot STOP observing a live network spectate connection either — same reasoning as a watched match, no seat to hand control back to", () => {
+  resetGame();
+  game.state = watchedMatchState();
+  game.networkSpectate = true;
+  enterObserverMode();
+
+  assert.equal(requestExitObserverMode(), false, "the O key / Esc / the topbar button are refused");
+  assert.equal(game.observerMode, true, "still observing");
+  toggleObserverMode();
+  assert.equal(game.observerMode, true);
+
   exitObserverMode();
   assert.equal(game.observerMode, false, "teardown is never blocked");
   resetGame();

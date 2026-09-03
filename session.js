@@ -148,6 +148,20 @@ export const game = {
   // buys, never the fixed timestep itself. Ignored (pinned to 1) whenever spectateMatch is null,
   // so an ordinary game can never inherit a leftover multiplier.
   spectateSpeed: 1,
+  // T-037 (FR-7): true while watching a REAL live network match as a read-only spectator — as
+  // opposed to spectateMatch above, which is a purely local AI-vs-AI self-play exhibition. The two
+  // are deliberately separate flags rather than one shared one: spectateMatch's own consumers
+  // (boot.js's loop, which drives BOTH seats through tickSelfPlay; the spectate bar's speed
+  // control) all assume a LOCAL simulation with no server ticking it — none of that applies here,
+  // where a real worker owns the tick loop and this seat only ever receives pushes (the same
+  // no-op-tick branch boot.js's loop already takes for any live network transport). The one thing
+  // the two genuinely share is observer.js's own gate: `enterObserverMode` treats either flag as
+  // "the human is not playing this match," so read-only free-look is legitimate for both. Set by
+  // lobbyScreen.js's spectateLive right after bootState (which clears it, exactly like spectateMatch
+  // above) and cleared by boot.js's restartToMapSelect, the one choke point every "leave" path
+  // already funnels through. Never part of the sim or the persisted save, same reasoning as
+  // spectateMatch: it says which VIEW this state belongs to, not anything about the state itself.
+  networkSpectate: false,
 };
 
 // T-031: the ONE place a seat's owner id (`"player"`/`"ai"`, or a future third+ seat's own id)

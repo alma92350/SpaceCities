@@ -30,8 +30,11 @@ export function showSeedChip(seed) {
 }
 
 // "You: Frontier ⚔ Miners" — your faction vs the opponent's. Hidden for a
-// neutral-vs-neutral match (a bare state with no factions picked).
+// neutral-vs-neutral match (a bare state with no factions picked), and — T-037 — for a live
+// network SPECTATOR (game.localOwner is null, T-030's own seam has no seat to point at, so there
+// is no "you" side for this chip's whole framing to describe at all).
 export function showFactionChip(st) {
+  if (game.localOwner === null) { factionChipEl.classList.add("hidden"); return; }
   const you = FACTIONS[st.players[game.localOwner].faction], foe = FACTIONS[st.players[otherOwner(game.localOwner)].faction];
   if (!you || you.id === "neutral") { factionChipEl.classList.add("hidden"); return; }
   // T-031: seatDisplayName(), not a hardcoded "You"/"Foe" pair — see hud.js's own identical fix

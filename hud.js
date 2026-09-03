@@ -158,13 +158,21 @@ export function renderHUD() {
   // scenario does, one step further: it isn't the player's game to keep. Both seats are AI-driven
   // by a session flag that no save carries, so a saved-and-resumed watched match would come back
   // as a skirmish with an unmanned player seat (saveShape.js's resumableMode already refuses to
-  // autosave one — this is the matching affordance).
-  const spectating = !!game.spectateMatch;
+  // autosave one — this is the matching affordance). T-037's live network spectator gets the same
+  // treatment for the same reason, one flag over: there is no seat of their own to save, and its
+  // own reassembled state isn't even save-shaped (fog:null — resumableMode's own T-037 comment).
+  const spectating = !!game.spectateMatch || game.networkSpectate;
   saveBtn.classList.toggle("hidden", !!state.scenario || spectating);
   loadBtn.classList.toggle("hidden", !!state.scenario || spectating);
   pauseBtn.classList.remove("hidden");   // pause is available in every mode (touch has no P key)
 
-  if (state.scenario) {
+  // T-037: a live network SPECTATOR (game.localOwner === null, T-030's own seam has no seat to
+  // point at) has no economy of its own to show either — same blanking as a scenario's own
+  // player-less readouts, one condition wider. observerPanel.js's own renderObserverPanel already
+  // gives a spectator its real stats panel (both seats at once), gated on game.observerMode alone,
+  // so nothing is actually lost here — this is just the ordinary player-facing panel correctly
+  // declining to show data for a seat that doesn't exist.
+  if (state.scenario || game.localOwner === null) {
     // A scenario has no economy: its budget + clock live in the scenario bar,
     // so blank the skirmish readouts and drive the bar instead.
     resourcesEl.innerHTML = "";
@@ -361,7 +369,15 @@ export function renderHUD() {
 
   renderScenarioBar(state);
   renderGroupChips();
-  renderSelectionPanel();
+  // T-037: a live network spectator (game.localOwner === null) never has a real selection —
+  // input.js delegates every mouse/key path to observer.js's own read-only handlers while
+  // game.observerMode is on, so state.selection stays permanently empty. hudSelection.js's own
+  // panelSignature/rebuildSelectionPanel assume a real local seat throughout (state.players
+  // [game.localOwner], dozens of call sites) for exactly the "what can THIS player build/research
+  // right now" question a spectator never asks — skipping the rebuild entirely, rather than
+  // auditing every one of those reads for a panel that would never show anything anyway, is both
+  // simpler and correct.
+  if (game.localOwner !== null) renderSelectionPanel();
   updateObjectives(game);
 }
 

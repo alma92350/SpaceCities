@@ -216,3 +216,36 @@ export function reassembleProjection(wire, map, fog, seat) {
     fogAI: fog,
   };
 }
+
+/**
+ * T-037 (FR-7): the client-side paired decode step for projectForSpectator(...)'s own wire shape —
+ * deliberately simpler than reassembleProjection above: no createFog/updateFog, because there is no
+ * seat to compute fog FOR. render.js's hiddenByFog and minimap.js's own equivalent only ever read
+ * state.fog when observerMode is false (`e.owner !== game.localOwner && !observerMode && ...` —
+ * short-circuits before touching fog at all once observerMode is true), and a network spectator's
+ * client always renders through Observer Mode (lobbyScreen.js's own spectateLive calls
+ * enterObserverMode() immediately after boot) — so fog/fogAI are simply null here, never consulted.
+ * Same node-amount-merge and array-to-Map mechanics as reassembleProjection either way: the wire
+ * SHAPE is identical regardless of which projection function filled it.
+ * @param {Object} wire - a JSON.parse'd projectForSpectator(...) payload
+ * @param {GameMap} map - the client's own locally-regenerated map for this match
+ * @returns {Object} a state-shaped object render.js and the client's own read paths already expect
+ */
+export function reassembleSpectatorProjection(wire, map) {
+  const { nodes: wireNodes, ...rest } = wire;
+  for (const n of wireNodes) {
+    const mapNode = map.nodes.find(mn => mn.id === n.id);
+    if (mapNode) mapNode.amount = n.amount;
+  }
+  const units = new Map(wire.units.map(u => [u.id, u]));
+  const buildings = new Map(wire.buildings.map(b => [b.id, b]));
+  return {
+    ...rest,
+    map,
+    units,
+    buildings,
+    selection: [],
+    fog: null,
+    fogAI: null,
+  };
+}

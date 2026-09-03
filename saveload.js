@@ -245,6 +245,15 @@ function goHome() {
   // requestExitObserverMode refuses mid-match), flashing "Saved ✓" on a Save button hud.js has
   // hidden, without leaving. So: no Save & Exit, honest copy, a plain Leave.
   const watching = game.spectateMatch;
+  // …and a live network SPECTATOR (T-037) is the fifth, the identical reason one flag over: there
+  // is no seat here either, and its own reassembled state isn't even save-shaped (fog:null —
+  // saveShape.js's resumableMode already refuses to autosave one, same as watching above). Found
+  // the same way that fix was: this button is visible in EVERY mode, so without its own branch a
+  // network spectator would ALSO fall through to the ordinary skirmish copy and "Save & Exit" —
+  // and unlike watching's own fallback (a plain skirmish save that at least succeeds), this one's
+  // own saveToFile() would throw straight into engine/persist.js's fog.explored read and get
+  // caught only by that function's own try/catch as a bare "Save failed", never actually leaving.
+  const networkSpectating = game.networkSpectate;
 
   const overlay = document.createElement("div");
   overlay.className = "home-confirm";
@@ -259,6 +268,7 @@ function goHome() {
   h.id = "home-confirm-title";
   h.textContent = fixture ? "Forfeit this gauntlet match?"
     : watching ? (watching.recorded ? "Stop replaying this match?" : "Stop watching this match?")
+    : networkSpectating ? "Stop spectating this match?"
     : scenario ? "Leave the mission?" : "Return to the menu?";
   card.setAttribute("aria-labelledby", h.id);
   const p = document.createElement("p");
@@ -274,6 +284,8 @@ function goHome() {
         + (watching.recorded
           ? "This match is already on the ladder; re-running it records nothing."
           : "Nothing is recorded either way.")
+    : networkSpectating
+      ? "You're watching a live match between two other players — you command neither seat, so there's nothing here to save. The match itself keeps going without you."
     : scenario
       ? "A scenario can't be saved — leaving abandons this run."
       : "Your progress autosaves — Save & Exit checkpoints it now so you can Continue later.";
@@ -302,9 +314,9 @@ function goHome() {
   // Save & Exit only leaves once the checkpoint actually lands. If localStorage is
   // unavailable (quota / private mode) we DON'T pretend it saved and exit into a lost
   // game — we fall back to a file download and keep the player in-game so nothing is lost.
-  // Offered for the two modes that can actually be resumed; the other three each get their own
+  // Offered for the two modes that can actually be resumed; the other four each get their own
   // single primary below, because for them there is no checkpoint to write in the first place.
-  if (!scenario && !fixture && !watching) act("Save & Exit", () => {
+  if (!scenario && !fixture && !watching && !networkSpectating) act("Save & Exit", () => {
     if (autoSave()) restartToMapSelect();
     else saveToFile();
   }, "primary");
@@ -314,6 +326,10 @@ function goHome() {
   // back on the Competition screen it came from rather than inventing a second destination. The
   // fallback covers a launcher that parked none — restartToMapSelect clears spectateMatch itself.
   else if (watching) act("Leave", () => { if (watching.onLeave) watching.onLeave(); else restartToMapSelect(); }, "primary");
+  // A live network spectator has no launcher-provided callback to defer to — lobbyScreen.js's own
+  // spectateLive() never parks one (there is no "screen it came from" beyond the ordinary
+  // map-select every other leave path already lands on) — so this is always the plain teardown.
+  else if (networkSpectating) act("Leave", () => restartToMapSelect(), "primary");
   else act(scenario ? "Leave" : "Exit without Saving", () => restartToMapSelect(), scenario ? "primary" : "");
   act("Cancel", () => {}, "ghost");
 

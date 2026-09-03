@@ -159,32 +159,26 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // tools/selfplay-cli.js and tools/serve.js are excluded from this check entirely (browserJs()'s
   // own comment), just for one file that happens to live in net/ instead of tools/.
   //
-  // engine/projection.js (T-015) is the newest TEMPORARY exemption, the same "module lands ahead
-  // of its wiring" pattern as server/session.js/net/loopback.js/net/directTransport.js above —
-  // except here the wiring it's ahead of is ADR-0009's own migration path, not a UI screen.
-  // projectFor is deliberately unused by any production path yet: M0 is "write and test
-  // projectFor, but keep broadcasting full state... proves the renderer tolerates a projection
-  // before anything depends on it" (test/projection.test.js's own render-parity test is exactly
-  // that proof). It's called today only by that test and by tools/bench.js's benchProjection
-  // (T-015's cost measurement, docs/analysis/00-feasibility-spikes.md Spike 3) — both legitimately
-  // outside this walk (test/ is excluded up front; tools/ is browserJs()'s own exclusion). M1
-  // ("server switches to projectFor") is what gives it a real caller and removes this line.
+  // engine/projection.js's own TEMPORARY exemption (T-015) is gone: T-034's lobbyScreen.js wires a
+  // real createWsClientTransport() into a real host/join flow (see the wsClientTransport paragraph
+  // below), and that file statically imports this one's reassembleProjection to turn every incoming
+  // wire push back into a state-shaped object — so an import chain from index.html reaches this file
+  // for real now. The ORIGINAL "M1 (server switches to projectFor) is what gives it a real caller"
+  // prediction was about the wrong HALF of this file (projectFor is still server-only — called by
+  // server/matchWorker.js/net/wsServerTransport.js, both genuinely unreached, see below), but the
+  // conclusion — a real caller removes this line — still landed, just via reassembleProjection and
+  // one task later than M1's own guess.
   //
-  // net/commandEnvelope.js (T-020) is the same "lands ahead of its wiring" pattern once more:
-  // encode/decode/stampRecord exist and are tested (test/commandEnvelope.test.js) but nothing on
-  // any client path calls them yet — hudSelection.js/input.js/inputCommands.js still call
-  // game.transport.submitCommand(cmd) directly with a bare WireCommand, no envelope. T-021's
-  // net/commandCodec.js turned out NOT to be that caller — it takes an already-shape-validated
-  // WireCommand directly (server/session.js calls apply(state, owner, cmd) with no envelope in
-  // between), so this file's real first caller is server/matchLoop.js (T-023) instead, itself
-  // exempted below for the identical reason: it exists, is tested
-  // (test/matchLoop.test.js), and is CORRECT, but nothing on any live boot path calls it yet —
-  // server/session.js's loopback submitCommand keeps its own immediate-apply path (ADR-0004:
-  // exactly one trusted local input source, so there's no ordering ambiguity yet to justify the
-  // queueing delay). A real multi-socket server is what gives matchLoop.js — and, through it,
-  // commandEnvelope.js — a live caller (T-026/T-029). Both lines come out together when that lands.
+  // net/commandEnvelope.js's own prediction here was wrong too, corrected in place rather than
+  // silently fixed (the same treatment server/lobby.js/lobbySnapshot.js's own wrong prediction gets
+  // further down): it expected server/matchLoop.js becoming reached to be what pulled this file in.
+  // matchLoop.js is STILL genuinely unreached (a server-only module — see its own exempt entry
+  // below) and stays exempt. What actually happened is more direct and doesn't involve matchLoop.js
+  // at all: net/wsClientTransport.js's own submitCommand calls this file's encode() straight from
+  // itself to build the wire envelope it sends, and T-034 is what gives wsClientTransport.js — and
+  // through it, this file — a real caller (see that paragraph below).
   //
-  // server/replay.js (T-024) is the same pattern layered one file higher: it exists, is tested
+  // server/replay.js is the same pattern layered one file higher: it exists, is tested
   // (test/replay.test.js) and reuses matchLoop.js's own stepMatch rather than reimplementing it,
   // but nothing records or replays a match on any live boot path yet — that's the same
   // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real.
@@ -200,15 +194,18 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // competitionWorker.js's Worker-construction edge is invisible to it for a different syntactic
   // reason (and server/matchWorker.js's OWN construction — `new Worker("server/matchWorker.js",
   // ...)` inside tools/serve.js — is that identical kind of invisible edge, one layer further out).
-  // net/wsClientTransport.js IS meant for the browser (it implements net/transport.js's Transport
-  // interface exactly, same as net/loopback.js), but boot.js has no path that constructs one yet —
-  // every boot path still picks loopback/direct — because there is still no lobby/join flow
-  // (Phase 4) to hand it a real match URL to connect to; T-029's own hosting work is done, but that
-  // was never what stood between boot.js and this file. engine/projectionDelta.js (T-028b) joins
-  // the same wait one layer deeper: it's a real, tested dependency of BOTH net/wsServerTransport.js
-  // and net/wsClientTransport.js (computeDelta/applyDelta), so it inherits exactly their
-  // reachability status, not a new reason of its own. All these lines come out together once
-  // boot.js actually wires createWsClientTransport in.
+  // net/wsClientTransport.js's own wait is OVER: T-034 wires a real createWsClientTransport() call
+  // into lobbyScreen.js's joinLive (host a match, or join one via a shareable link) — not boot.js
+  // ITSELF constructing one, as this paragraph originally expected, but boot.js's own bootState
+  // still receives and runs the resulting transport exactly as expected, so the conclusion holds
+  // even though the exact call site was one file over (lobbyScreen.js, reached from main.js's own
+  // dynamic import, exactly as this walk already treats that edge for every other module reached
+  // only that way). An import chain from index.html now reaches this file for real, so this line —
+  // and engine/projection.js's/net/commandEnvelope.js's above — all come out together.
+  // engine/projectionDelta.js (T-028b) rides along the same way it was always going to: a real,
+  // tested dependency of BOTH net/wsServerTransport.js and net/wsClientTransport.js
+  // (computeDelta/applyDelta), so it inherits wsClientTransport.js's own newly-real reachability,
+  // not a new reason of its own — this line comes out too.
   //
   // server/matchSnapshot.js (T-029a) joins the exemption list one layer deeper still, the exact
   // same way engine/projectionDelta.js does two paragraphs up: its only real caller is
@@ -232,9 +229,9 @@ test("every shipped browser module is reachable from index.html's entry point", 
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
-    "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
-    "server/matchLoop.js", "server/replay.js", "net/ws.js", "engine/projectionDelta.js",
-    "net/wsServerTransport.js", "net/wsClientTransport.js",
+    "net/loopbackFaults.js",
+    "server/matchLoop.js", "server/replay.js", "net/ws.js",
+    "net/wsServerTransport.js",
     "net/wsWorkerTransport.js", "server/matchWorker.js", "server/matchSnapshot.js",
     "server/lobby.js", "server/lobbySnapshot.js",
   ]);

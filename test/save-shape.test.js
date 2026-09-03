@@ -39,3 +39,17 @@ test("resumableMode: a SPECTATED AI-vs-AI match is never checkpointed", () => {
   assert.equal(resumableMode({ state: { over: false }, spectateMatch: null }), "skirmish",
     "…and an ordinary skirmish is untouched by that rule");
 });
+
+test("resumableMode: T-037 — a live network SPECTATOR is never checkpointed either", () => {
+  // A real, found-by-a-real-browser bug: a network spectator's own reassembled state has
+  // fog:null (engine/projection.js's reassembleSpectatorProjection — there is no seat to compute
+  // fog FOR), and engine/persist.js's own serializer reads state.fog.explored unconditionally —
+  // autoSave's beforeunload/hidden handler crashed with a real page error the instant a spectator
+  // closed the tab, since nothing had ever told it this session has nothing resumable either.
+  // Same reasoning as spectateMatch above, one flag over: a spectator has no seat of their own
+  // to resume as, and the state it would try to serialize isn't even save-shaped.
+  assert.equal(resumableMode({ state: { over: false }, networkSpectate: true }), null,
+    "a live network spectator has nothing of their own to resume");
+  assert.equal(resumableMode({ state: { over: false }, networkSpectate: false }), "skirmish",
+    "…and an ordinary skirmish is untouched by that rule");
+});

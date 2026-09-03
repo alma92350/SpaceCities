@@ -126,9 +126,11 @@ function pointCameraAt(state, at) {
 let obsBaseCycle = 0, lastObsBaseAt = -Infinity;
 
 export function enterObserverMode() {
-  // The one gate (see this file's header): an Odyssey, or a match the human is not playing.
-  // A plain skirmish falls through both terms and stays un-observable — that would be a fog cheat.
-  if (!game.galaxy && !game.spectateMatch) return;
+  // The one gate (see this file's header): an Odyssey, or a match the human is not playing —
+  // networkSpectate (T-037) widens the second half of that to a REAL live network match, not just
+  // a local AI-vs-AI exhibition (spectateMatch). A plain skirmish falls through every term and
+  // stays un-observable — that would be a fog cheat.
+  if (!game.galaxy && !game.spectateMatch && !game.networkSpectate) return;
   if (!game.state && !game.galaxy) return;   // nothing to look at (belt-and-braces: spectateMatch always implies a state)
   if (game.observerMode) return;
   if (game.input) game.input.cancelGesture();   // don't let a drag armed just before this resolve into a real order
@@ -160,7 +162,10 @@ export function exitObserverMode() {
 // ends the match and returns to the Competition screen) is the way out.
 // Returns whether Observer Mode was actually left.
 export function requestExitObserverMode() {
-  if (game.spectateMatch) return false;
+  // T-037: a network spectator has no seat of their own either — same "nothing to return to"
+  // reasoning as spectateMatch just above, so the same refusal applies. Leaving a live spectate
+  // connection is lobbyScreen.js's own job (closing the transport), never this toggle's.
+  if (game.spectateMatch || game.networkSpectate) return false;
   exitObserverMode();
   return true;
 }

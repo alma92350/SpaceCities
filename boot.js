@@ -438,6 +438,20 @@ export function restartToMapSelect() {
   // ordinary skirmish. Same dangling-session hazard as the spectateId exitObserverMode clears above.
   game.spectateMatch = null;
   game.spectateSpeed = 1;
+  // …and no live network spectate connection either (T-037) — same dangling-session hazard,
+  // one flag over: left set, it would keep offering Observer Mode in the NEXT (ordinary) game.
+  game.networkSpectate = false;
+  // T-030's own seam back to its documented default. A genuine pre-existing gap, found while
+  // adding networkSpectate above: lobbyScreen.js's joinLive sets this to a real seat ("player" OR
+  // "ai") BEFORE bootState, and nothing ever reset it back afterward — a player who joined a live
+  // match as seat "ai" (or, now, spectated one — this task's own spectateLive sets it to null),
+  // then returned here and started an ORDINARY single-player skirmish, would silently keep
+  // localOwner stuck at "ai"/null: the camera would open on the WRONG base (or crash — see
+  // bootState's own openAt fallback), and every "is this mine" check throughout input/HUD would
+  // read inverted or reject everything. joinLive/spectateLive both set the real value they need
+  // AFTER this point runs (a fresh call always follows a return-to-map-select), so resetting the
+  // default here can never race or get overwritten out from under a live connection.
+  game.localOwner = "player";
   // Repaint the observer UI once, now that all of the above is false: the banner, the spectate bar
   // and the stats panel are only ever hidden by this function, and the render loop that normally
   // calls it has just been stopped. Without this they survive as stale elements — covered by the
@@ -485,6 +499,7 @@ export function bootState(newState, { intro, selfPlay = false, transport = null 
   game.galaxy = null;   // cleared by default; startOdyssey re-sets it right after this returns
   game.competition = null;   // …and likewise: startCompetitionMatch re-sets it right after this returns
   game.spectateMatch = null; game.spectateSpeed = 1;   // …and likewise: startSpectatedMatch re-sets them right after this returns
+  game.networkSpectate = false;   // …and likewise: lobbyScreen.js's spectateLive re-sets this right after this returns (T-037)
   game.groups = {};     // fresh game → fresh control groups (entity ids reset per game, so stale groups would mis-select)
   game.colonyAlerts = {};   // fresh game → fresh starmap alert ledger (a previous game's background-colony alerts are meaningless here)
   game.state = newState;
@@ -503,8 +518,13 @@ export function bootState(newState, { intro, selfPlay = false, transport = null 
   const input = game.input;
   // Open on the player's own ships — the escort/convoy start station, the raider
   // fleet's ambush point, or the player's base in a skirmish — never the map
-  // centre, which on a big map is empty space.
-  const openAt = state.scenario ? (state.scenario.playerStart || state.scenario.route[0]) : state.map.bases[game.localOwner];
+  // centre, which on a big map is empty space. A network SPECTATOR (T-037) has no seat of its own
+  // — game.localOwner is null, so state.map.bases has no entry for it — so this falls back to a
+  // harmless {0,0} (clampCamera right below pulls it into valid bounds regardless): the caller
+  // (lobbyScreen.js's spectateLive) always calls enterObserverMode() immediately after bootState,
+  // which recenters the camera for real, so this fallback's own value is never actually seen.
+  const openAt = state.scenario ? (state.scenario.playerStart || state.scenario.route[0])
+    : (state.map.bases[game.localOwner] || { x: 0, y: 0 });
   const cam = input.getCamera();
   cam.x = openAt.x;
   cam.y = openAt.y;

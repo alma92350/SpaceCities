@@ -860,6 +860,39 @@ test("T-035 (FR-6): restartToMapSelect() closes the live transport — a network
   resetPause();
 });
 
+// T-037: a genuine pre-existing gap, found while adding networkSpectate — nothing ever reset
+// game.localOwner back to "player" after a multiplayer/spectate session set it to something else
+// (joinLive sets a real seat, T-034; spectateLive sets null, this task). Left stuck, a player who
+// joined as seat "ai" (or spectated) and then started an ORDINARY single-player skirmish would open
+// the camera on the wrong base and have every "is this mine" check throughout input/HUD read
+// inverted or reject everything — restartToMapSelect() is the one choke point every "leave" path
+// already funnels through, so it's the right place for the reset.
+test("T-037: restartToMapSelect() resets game.localOwner back to \"player\" — a leftover multiplayer seat must never leak into the next game", () => {
+  resetPause();
+  resetSetup();
+  startGame("ferros");
+  game.localOwner = "ai";   // simulates having just left a live match where this seat was "ai"
+  restartToMapSelect();
+  assert.equal(game.localOwner, "player");
+
+  game.input = null;
+  hideObjectives();
+  resetPause();
+});
+
+test("T-037: restartToMapSelect() clears game.networkSpectate — leaving a spectated match must not keep offering Observer Mode in the next ordinary game", () => {
+  resetPause();
+  resetSetup();
+  startGame("ferros");
+  game.networkSpectate = true;
+  restartToMapSelect();
+  assert.equal(game.networkSpectate, false);
+
+  game.input = null;
+  hideObjectives();
+  resetPause();
+});
+
 // T-019b: isUnderAttackEvent used to be `ev.owner === "ai"` inlined at three call sites — correct
 // only because exactly two owners exist today. Pure, so testable directly with plain objects; no
 // game/DOM state needed at all.

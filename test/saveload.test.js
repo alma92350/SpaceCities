@@ -572,6 +572,53 @@ test("Leave from the ⌂ Home confirm during a watched match exits via the launc
   game.spectateMatch = null; game.state = null;
 });
 
+// T-037: a live network spectator's own session shape — an ordinary skirmish state plus
+// game.networkSpectate, the SAME "additive flag on an otherwise-ordinary state" shape
+// spectateSession() above already established for game.spectateMatch. localOwner is null (T-030's
+// own seam has no seat to point at, lobbyScreen.js's spectateLive), matching the real thing.
+function networkSpectateSession() {
+  globalThis.localStorage = fakeLocalStorage();
+  lastAnchor = null;
+  saveBtn.textContent = "Save";
+  game.galaxy = null;
+  game.competition = null;
+  game.spectateMatch = null;
+  game.localOwner = null;
+  game.state = createGameState({ seed: 909, planetId: "ferros", rng: mulberry32(909) });
+  game.networkSpectate = true;
+}
+
+test("T-037: the ⌂ Home confirm during a live network spectate offers no 'Save & Exit' and never claims the match autosaves", () => {
+  networkSpectateSession();
+  const { heading, body, buttons } = openHomeConfirm();
+  const labels = buttons.map(b => b.textContent);
+
+  assert.ok(!labels.includes("Save & Exit"),
+    `a network spectator must not offer to save someone else's match — got ${JSON.stringify(labels)}`);
+  assert.deepEqual(labels, ["Leave", "Cancel"], "a plain Leave, exactly like the watched-match branch above");
+  assert.ok(buttons[0].classList.contains("primary"));
+  assert.doesNotMatch(body, /autosave|Save & Exit|Continue later/i,
+    `the copy must not promise a checkpoint resumableMode refuses to write — got ${JSON.stringify(body)}`);
+  assert.match(heading + " " + body, /spectat|watch/i, "the copy should say what leaving actually does");
+
+  game.spectateMatch = null; game.networkSpectate = false; game.localOwner = "player"; game.state = null;
+});
+
+test("T-037: Leave from the ⌂ Home confirm during a live network spectate just tears down — writes and downloads nothing", () => {
+  networkSpectateSession();
+  const { overlay, buttons } = openHomeConfirm();
+
+  buttons[0].dispatchEvent(new Event("click"));   // "Leave"
+
+  assert.equal(localStorage.getItem(SAVE_KEY), null, "nothing was checkpointed to localStorage");
+  assert.equal(localStorage.getItem(SAVE_KEY + ".prev"), null);
+  assert.equal(lastAnchor, null, "and no <a download> was built — a spectator's view is never written to a file");
+  assert.equal(saveBtn.textContent, "Save", "no 'Saved ✓' / 'Save failed' flash on a button hud.js has hidden");
+  assert.ok(!doc.body.children.includes(overlay), "the dialog closes on its way out");
+
+  game.spectateMatch = null; game.networkSpectate = false; game.localOwner = "player"; game.state = null;
+});
+
 test("an ordinary skirmish still gets Save & Exit and the autosave copy — the spectate branch is additive", () => {
   globalThis.localStorage = fakeLocalStorage();
   game.galaxy = null;
