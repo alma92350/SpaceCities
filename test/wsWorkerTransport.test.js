@@ -41,7 +41,12 @@ async function listen(server) {
 // connectTimeoutMs (added for exactly this) turns that from "hangs until the native ~300s default"
 // into a fast, retriable failure; this wraps it into a few short attempts rather than one long one,
 // used only by the one test below that's shown itself exposed to this under full-suite load.
-async function connectResilient(url, attempts = 3) {
+// 5 attempts, not 3 (T-037's own full-suite run): a single severely CPU-heavy file running
+// concurrently (test/ailab.test.js's own multi-minute AI-strategy search, unrelated to this test)
+// can hold contention long enough that even 3×20s=60s of retries isn't always enough — bumped to
+// 5×20s=100s, still comfortably bounded (never the native ~300s+ default) but with real headroom
+// for a slow neighbor's worst moments rather than merely its typical ones.
+async function connectResilient(url, attempts = 5) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
     try { return await createWsClientTransport(url, { connectTimeoutMs: 20000 }); }
