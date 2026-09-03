@@ -12,6 +12,10 @@
        POSTs /api/matches/:id/join -> connects over WS as whichever seat that returns.
      Join (browsing): the open-matches list (GET /api/matches) offers the same join flow without a
        link at all — a cheap, reasonable addition once the endpoint already exists for the link flow.
+     Rejoin (T-036): main.js's own boot-time check finds a {matchId, owner, token} a PREVIOUS
+       joinLive() saved (liveMatchStorage.js) and calls rejoinLiveMatch() instead of the ordinary
+       map-select screen — the same joinLive() under the hood, just fed remembered credentials
+       instead of a fresh POST's response.
 
    SCOPE, same discipline every task in this phase states up front: FR-3 (AI fill for unfilled open
    seats) and FR-4 (start conditions) are T-035's own job, not this file's — a match is simply live
@@ -28,6 +32,7 @@ import { createWsClientTransport } from "./net/wsClientTransport.js";
 import { bootState } from "./boot.js";
 import { game } from "./session.js";
 import * as sound from "./sound.js";
+import { saveLiveMatch, clearLiveMatch } from "./liveMatchStorage.js";
 
 async function apiPost(path, body) {
   const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -76,8 +81,51 @@ async function joinLive(matchId, owner, token, statusEl) {
   sound.unlockAudio();   // a real user gesture (the Host/Join click) led here — safe to start audio now
   game.localOwner = owner;
   lobbyScreenEl.classList.add("hidden");
+  // T-036: remembered so a reload/crash mid-match can silently reconnect (main.js's own boot-time
+  // check) instead of dumping the player back at map-select — net/wsWorkerTransport.js's
+  // authorizeSeat already treats a fresh connection carrying this exact token as a legitimate
+  // reclaim, so there is nothing else a rejoin needs beyond what's saved here. Cleared on either of
+  // the two ways this seat's own tenancy of the match legitimately ends: the player closes the
+  // transport (wrapped below — covers boot.js's restartToMapSelect, the one choke point every
+  // voluntary leave already funnels through), or the match itself ends while still connected (the
+  // over:true branch in the onEvent handler below) — a finished match's worker stops ticking
+  // entirely (T-035) and would never answer a later reconnect attempt with a first state push.
+  saveLiveMatch({ matchId, owner, token });
+  const closeTransport = transport.close.bind(transport);
+  transport.close = () => { clearLiveMatch(); closeTransport(); };
   bootState(firstState, { intro: true, transport });
-  transport.onEvent(e => { if (e.type === "state") applyLiveState(game.state, e.state); });
+  transport.onEvent(e => {
+    if (e.type !== "state") return;
+    applyLiveState(game.state, e.state);
+    if (e.state.over) clearLiveMatch();
+  });
+}
+
+// T-036: called from main.js's own boot-time check (a saved {matchId, owner, token} survived a
+// reload) — the same joinLive() every fresh host/join click already uses, so a rejoin is simply
+// "connect again with the credentials we already have," never a separate code path. A failure
+// (the match ended, the server restarted with nothing to recover, or the token was somehow no
+// longer valid) clears the stale entry and falls back to the ordinary map-select screen — the exact
+// same screen a player who'd never had a saved match at all would have landed on.
+export async function rejoinLiveMatch(entry) {
+  if (!lobbyScreenEl) return;   // import-safe under Node (dom.js idiom)
+  if (mapSelectEl) mapSelectEl.classList.add("hidden");
+  lobbyScreenEl.classList.remove("hidden");
+  lobbyScreenEl.innerHTML = "";
+  const title = document.createElement("h2");
+  title.textContent = "🌐 Multiplayer";
+  lobbyScreenEl.appendChild(title);
+  const status = document.createElement("p");
+  status.className = "setup-hint";
+  status.textContent = "Reconnecting to your match…";
+  lobbyScreenEl.appendChild(status);
+  try {
+    await joinLive(entry.matchId, entry.owner, entry.token, status);
+  } catch {
+    clearLiveMatch();
+    lobbyScreenEl.classList.add("hidden");
+    renderMapSelect();
+  }
 }
 
 function planetOptionsInto(select) {

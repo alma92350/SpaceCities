@@ -74,6 +74,7 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
           const conn = result.connection;
           bySeat.set(seat, conn);
           conn.send(welcomePayload(seat));
+          worker.postMessage({ type: "seatConnected", seat });
 
           conn.onmessage = (data, isBinary) => {
             if (isBinary) return;   // a client only ever sends a JSON command envelope, never binary
@@ -91,6 +92,7 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
             // Same reasoning as net/wsServerTransport.js's own onclose: a reconnect must get a
             // fresh full snapshot, never a delta against a dead connection's stale baseline.
             lastSnapshotBySeat.delete(seat);
+            worker.postMessage({ type: "seatDisconnected", seat });
           };
         });
       }

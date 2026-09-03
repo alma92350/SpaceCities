@@ -214,6 +214,65 @@ test("attachWsMatchWorker(...).close() stops accepting new upgrades and closes e
   } finally { server.close(); worker.terminate(); }
 });
 
+// T-036: server/matchWorker.js's own grace-timer/AI-takeover logic is already fully exercised in
+// test/matchWorker.test.js by hand-feeding it {type:"seatDisconnected"/"seatConnected"} messages
+// directly. What ISN'T covered there is this file's own job: does a REAL socket close/reconnect
+// actually reach the worker as those messages at all? These two tests prove the wiring, not the
+// takeover logic itself — aiEnabled:false for the same reason matchWorker.test.js's own fixture
+// needs it (state.ai defaults populated otherwise, and a test disconnecting an already-AI-driven
+// seat isn't testing takeover, just watching that AI's own pre-existing bursty cadence).
+test("T-036: closing a seat's real WebSocket connection reaches the worker as seatDisconnected — the built-in AI takes over once the grace period elapses", async () => {
+  const seed = nextSeed++;
+  const worker = new Worker(WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed, aiEnabled: false }, graceMs: 150 } });
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const t1 = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);
+    const baselineState = await new Promise(resolve => t1.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    const baselineCount = [...baselineState.buildings.values()].filter(b => b.owner === "ai").length;
+    t1.close();   // a real network disconnect — must reach the worker as {type:"seatDisconnected", seat:"ai"}, not a no-op
+
+    await new Promise(resolve => setTimeout(resolve, 4000));   // grace (150ms) + generous room for the AI's first build decision
+    // Reconnecting as the SAME seat is how this test observes the outcome without needing a second
+    // seat's view (blocked by fog anyway) — a seat always sees its own buildings regardless of fog.
+    const t2 = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);
+    const laterState = await new Promise(resolve => t2.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    const laterCount = [...laterState.buildings.values()].filter(b => b.owner === "ai").length;
+    t2.close();
+    assert.ok(laterCount > baselineCount, `the AI must have built something while the seat was disconnected (${baselineCount} -> ${laterCount})`);
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-036: reconnecting the same seat's WebSocket before the grace period elapses reaches the worker as seatConnected and cancels the pending takeover", async () => {
+  const seed = nextSeed++;
+  const worker = new Worker(WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed, aiEnabled: false }, graceMs: 300 } });
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const t1 = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);
+    await new Promise(resolve => t1.onEvent(e => { if (e.type === "state") resolve(); }));
+    t1.close();
+
+    await new Promise(resolve => setTimeout(resolve, 100));   // well before the 300ms grace elapses
+    const t2 = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);   // a real reconnect — must reach the worker as seatConnected
+    const baselineState = await new Promise(resolve => t2.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    const baselineCount = [...baselineState.buildings.values()].filter(b => b.owner === "ai").length;
+
+    const grew = await new Promise(resolve => {
+      const timer = setTimeout(() => resolve(false), 1500);
+      t2.onEvent(e => {
+        if (e.type !== "state") return;
+        const count = [...e.state.buildings.values()].filter(b => b.owner === "ai").length;
+        if (count > baselineCount) { clearTimeout(timer); resolve(true); }
+      });
+    });
+    t2.close();
+    assert.equal(grew, false, "a cancelled grace timer (real reconnect before it elapsed) must never let the AI take over later");
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
 test("T-035 (FR-6): once a match ends, BOTH connected seats receive over:true and the same winner over their own real WebSocket connection", async () => {
   const dir = mkdtempSync(join(tmpdir(), "spacecities-wsworker-over-test-"));
   try {

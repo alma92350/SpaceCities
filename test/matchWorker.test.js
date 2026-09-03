@@ -360,3 +360,86 @@ test("exit criterion (identically): the same seed and the same command sequence 
   const fingerprintB = await driveToFingerprint();
   assert.equal(fingerprintA, fingerprintB);
 });
+
+/* ---------- T-036: disconnect -> AI takeover (grace period) -> reclaim ---------- */
+// A low-level protocol test, same posture as everything above: no lobby, no WS, no tokens — those
+// are net/wsWorkerTransport.js's own job (its own tests cover that layer). This file only has to
+// prove the WORKER's own reaction to {type:"seatDisconnected"/"seatConnected", seat} is correct.
+
+// aiEnabled:false — the real scenario this task is about: a HUMAN was seated at "ai" (T-034a's own
+// seam is what makes that possible at all), then disconnected. Without this, state.ai defaults to
+// populated from the moment the match is created (today's every-other-caller default), and a test
+// that disconnects an ALREADY-AI-driven seat isn't testing takeover at all — it's just watching
+// that AI's own pre-existing, genuinely bursty building cadence and mistaking it for a reaction to
+// the disconnect message.
+function spawnWorkerWithGrace(graceMs, seed = SEED) {
+  return new Worker(WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed, aiEnabled: false }, graceMs } });
+}
+
+// Watches seat `seat`'s own state pushes (a seat always sees its OWN buildings unfogged, so this
+// is immune to the fog problem that made T-035's own first AI-fill proof unreliable) and resolves
+// once that owner's building count is strictly greater than it was when watching started.
+function watchForBuildingGrowth(worker, seat, timeoutMs) {
+  return new Promise(resolve => {
+    let baseline = null;
+    const timer = setTimeout(() => { worker.off("message", onMsg); resolve(false); }, timeoutMs);
+    const onMsg = m => {
+      if (m.type !== "state" || m.seat !== seat) return;
+      const count = m.proj.buildings.filter(b => b.owner === seat).length;
+      if (baseline === null) { baseline = count; return; }
+      if (count > baseline) { clearTimeout(timer); worker.off("message", onMsg); resolve(true); }
+    };
+    worker.on("message", onMsg);
+  });
+}
+
+test("T-036 (FR-5): a disconnected \"ai\" seat falls to the built-in AI after the grace period — nobody else was driving it", async () => {
+  const worker = spawnWorkerWithGrace(200);
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    const grew = await watchForBuildingGrowth(worker, "ai", 6000);
+    assert.equal(grew, true, "the AI must actually start building once it takes over");
+  } finally { await worker.terminate(); }
+});
+
+test("T-036 (FR-5): a disconnected \"player\" seat falls to AI too — not just seat \"ai\" (engine/sim.js's own tick() only ever auto-drives \"ai\"; this file has to drive playerAi itself, the same aiSeats pattern server/session.js already established for self-play)", async () => {
+  const worker = spawnWorkerWithGrace(200);
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "player" });
+    const grew = await watchForBuildingGrowth(worker, "player", 6000);
+    assert.equal(grew, true, "the host's own seat must also be playable by AI once abandoned");
+  } finally { await worker.terminate(); }
+});
+
+test("T-036 (FR-5): a reconnect BEFORE the grace period expires cancels the pending takeover — a brief network blip must never hand control to the AI", async () => {
+  const worker = spawnWorkerWithGrace(300);
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 100));   // well inside the 300ms grace window
+    worker.postMessage({ type: "seatConnected", seat: "ai" });
+    // Watch for LONGER than the original grace period would have taken — if the timer had NOT
+    // been cancelled, this window comfortably contains its would-be firing.
+    const grew = await watchForBuildingGrowth(worker, "ai", 1500);
+    assert.equal(grew, false, "a cancelled grace timer must never let the AI take over later");
+  } finally { await worker.terminate(); }
+});
+
+test("T-036 (FR-5): a reconnect AFTER the grace period (AI already took over) hands control back — the AI must stop acting once its rightful owner returns", async () => {
+  const worker = spawnWorkerWithGrace(150);
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    const grew = await watchForBuildingGrowth(worker, "ai", 4000);
+    assert.equal(grew, true, "fixture sanity: the AI really did take over first");
+
+    worker.postMessage({ type: "seatConnected", seat: "ai" });
+    // A real wait, not just "no growth in one instant" — proving it STOPPED needs to observe an
+    // absence over real time, several TICK_MS worth, the same pattern T-035's own "worker stops
+    // ticking" test already established.
+    const grewAgain = await watchForBuildingGrowth(worker, "ai", 2000);
+    assert.equal(grewAgain, false, "once reconnected, the built-in AI must not keep building on its own");
+  } finally { await worker.terminate(); }
+});

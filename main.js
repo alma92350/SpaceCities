@@ -22,6 +22,7 @@ import { UNITS } from "./engine/entities.js";
 import * as sound from "./sound.js";
 import { buildHelpOverlay } from "./overlays.js";
 import { renderMapSelect } from "./setup.js";
+import { loadLiveMatch } from "./liveMatchStorage.js";
 import "./starmap.js";   // self-wires the galaxy-map button + M key
 import "./techChart.js"; // self-wires the Tech & Industry Chart button + T key
 import "./update.js";    // self-wires the version chip + auto-update check
@@ -168,9 +169,20 @@ buildHelpOverlay();
 // either, always through a function (renderMapSelect included) that does its own dom.js-style
 // null check. Dynamic import: lobbyScreen.js's own header explains why setup.js's lone other call
 // site reaches it the same way; staying consistent avoids two conventions for the same module.
+//
+// T-036: a saved live-match entry (liveMatchStorage.js — set by a previous joinLive(), cleared on
+// a voluntary leave or once the match ends) takes the SAME dynamic-import path, one priority below
+// an explicit ?join= link — a fresh invite the player just clicked is a clearer, newer intent than
+// a match this same browser happened to still be seated in. loadLiveMatch() is safe to call
+// unconditionally (its own try/catch already tolerates a Node import with no localStorage at all,
+// liveMatchStorage.js's own header), so no extra guard is needed here beyond the one joinMatchId
+// already has.
 const joinMatchId = typeof location !== "undefined" ? new URL(location.href).searchParams.get("join") : null;
+const savedLiveMatch = loadLiveMatch();
 if (joinMatchId) {
   import("./lobbyScreen.js").then(({ renderLobbyScreen }) => renderLobbyScreen({ joinMatchId }));
+} else if (savedLiveMatch) {
+  import("./lobbyScreen.js").then(({ rejoinLiveMatch }) => rejoinLiveMatch(savedLiveMatch));
 } else {
   renderMapSelect();
 }
