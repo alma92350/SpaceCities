@@ -217,6 +217,14 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // Unlike wsClientTransport's own wait, there is no future boot.js wiring step that will ever
   // remove this line — matchWorker.js is a Node worker_threads entry point, never something a
   // browser import chain could reach even once every other multiplayer feature lands.
+  //
+  // server/lobby.js and server/lobbySnapshot.js (T-033) are TEMPORARY exemptions, joining
+  // net/wsClientTransport.js's own wait, not matchSnapshot.js's permanent one: both exist and are
+  // tested (test/lobby.test.js, test/lobbySnapshot.test.js) but deliberately have no HTTP/WS
+  // wiring yet — tools/serve.js still boots exactly one fixed demo match, same as T-027 left it —
+  // because a lobby only matters once a browser can actually reach it (a shareable join link,
+  // T-034's own exit criterion), and that wiring is T-034's job, not this task's. Both lines come
+  // out together once tools/serve.js's boot path actually calls createLobby/restoreLobby.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
@@ -224,6 +232,7 @@ test("every shipped browser module is reachable from index.html's entry point", 
     "server/matchLoop.js", "server/replay.js", "net/ws.js", "engine/projectionDelta.js",
     "net/wsServerTransport.js", "net/wsClientTransport.js",
     "net/wsWorkerTransport.js", "server/matchWorker.js", "server/matchSnapshot.js",
+    "server/lobby.js", "server/lobbySnapshot.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
