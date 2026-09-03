@@ -24,7 +24,13 @@ import assert from "node:assert/strict";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { encode } from "../net/commandEnvelope.js";
+import { createGameState } from "../engine/state.js";
+import { mulberry32 } from "../engine/rng.js";
+import { createMatch, admit, stepMatch, INPUT_DELAY_TICKS } from "../server/matchLoop.js";
+import { writeSnapshot } from "../server/matchSnapshot.js";
 
 const WORKER_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "server", "matchWorker.js");
 const SEED = 909090;
@@ -71,6 +77,63 @@ test("the worker's ready message echoes back the createGameStateOpts it actually
     assert.equal(ready.createGameStateOpts.seed, 777);
     assert.equal(ready.createGameStateOpts.planetId, "ferros");
   } finally { await worker.terminate(); }
+});
+
+/* ---------- T-029a: boot restores from a snapshot on disk when one exists ---------- */
+
+test("a worker given a dataDir with no snapshot yet starts fresh — ready.restored is false", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    assert.equal(ready.restored, false);
+  } finally { await worker.terminate(); }
+});
+
+test("a worker given a dataDir containing a real snapshot restores from it instead of starting fresh — the restored unit's actual position wins over a fresh spawn from the seed the worker was otherwise given", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spacecities-matchworker-restore-test-"));
+  try {
+    // Build a match OUTSIDE any worker, move a unit, drive it partway, and snapshot it via the
+    // REAL writeSnapshot() — the same fixture-building approach test/matchSnapshot.test.js itself
+    // uses, so this test exercises exactly the write path a live match's own periodic snapshot
+    // would produce, not a hand-built stand-in file.
+    const seed = 314159;
+    const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
+    const match = createMatch(state);
+    const w = [...match.state.units.values()].find(u => u.owner === "player");
+    const origX = w.x, origY = w.y;
+    admit(match, encode({ t: "move", ids: [w.id], x: origX + 321, y: origY + 123 }, 1), "player");
+    // First let the (delayed, per INPUT_DELAY_TICKS) command actually apply...
+    for (let i = 0; i < INPUT_DELAY_TICKS + 1; i++) stepMatch(match, 0.05);
+    assert.equal(w.order && w.order.type, "move", "fixture sanity: the move order must have applied by now");
+    // ...then drive until the unit actually ARRIVES (engine/combat.js and friends null out
+    // `order` on arrival) rather than a fixed tick count — the worker keeps ticking the restored
+    // match forward on its own 20Hz loop after boot, so a snapshot taken mid-move would keep
+    // drifting between "snapshot time" and "first captured state message", making an
+    // exact-position assertion timing-dependent. An IDLE unit's position can't drift further no
+    // matter how many extra ticks the worker runs before this test observes it.
+    for (let i = 0; i < 600 && w.order; i++) stepMatch(match, 0.05);
+    assert.equal(w.order, null, "fixture sanity: the unit must have reached its destination and gone idle before snapshotting");
+    assert.ok(w.x !== origX || w.y !== origY, "fixture sanity: the unit must have actually moved before it's snapshotted");
+    const expectedX = w.x, expectedY = w.y;
+    await writeSnapshot(dir, match.state);
+
+    // A DIFFERENT seed in workerData's own createGameStateOpts than the snapshot's — proving the
+    // restored snapshot wins over a fresh createGameState call, not merely that the worker
+    // happens to reconstruct the same thing from the seed it was handed.
+    const worker = new Worker(WORKER_FILE, {
+      workerData: { createGameStateOpts: { planetId: "ferros", seed: seed + 1 }, dataDir: dir },
+    });
+    try {
+      const ready = await waitFor(worker, m => m.type === "ready");
+      assert.equal(ready.restored, true);
+
+      const first = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+      const restoredUnit = first.proj.units.find(u => u.id === w.id);
+      assert.ok(restoredUnit, "the restored unit's own id must still be present on the wire");
+      assert.equal(restoredUnit.x, expectedX);
+      assert.equal(restoredUnit.y, expectedY);
+    } finally { await worker.terminate(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("the worker pushes a state message for EVERY owner, every tick, unprompted — its own tick loop, not driven by the parent", async () => {

@@ -172,7 +172,10 @@ export async function createAppServer() {
   const server = createServer(requestHandler);
 
   const seed = (Math.floor(Math.random() * 0x100000000)) >>> 0;
-  const worker = new Worker(MATCH_WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed } } });
+  // dataDir: T-029a snapshot/restore (server/matchWorker.js's own header). Unset in local dev,
+  // so `seed` above is always what actually boots there — production-only, same DATA_DIR gate
+  // dataProbeResult and /__bench already use above.
+  const worker = new Worker(MATCH_WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed }, dataDir: process.env.DATA_DIR || null } });
   const wsMatch = await attachWsMatchWorker(server, worker, { path: "/" });
 
   return {

@@ -209,13 +209,21 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // and net/wsClientTransport.js (computeDelta/applyDelta), so it inherits exactly their
   // reachability status, not a new reason of its own. All these lines come out together once
   // boot.js actually wires createWsClientTransport in.
+  //
+  // server/matchSnapshot.js (T-029a) joins the exemption list one layer deeper still, the exact
+  // same way engine/projectionDelta.js does two paragraphs up: its only real caller is
+  // server/matchWorker.js (readSnapshot at boot, writeSnapshot on a periodic timer), so it
+  // inherits matchWorker.js's own invisible-edge status rather than carrying a reason of its own.
+  // Unlike wsClientTransport's own wait, there is no future boot.js wiring step that will ever
+  // remove this line — matchWorker.js is a Node worker_threads entry point, never something a
+  // browser import chain could reach even once every other multiplayer feature lands.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
     "server/matchLoop.js", "server/replay.js", "net/ws.js", "engine/projectionDelta.js",
     "net/wsServerTransport.js", "net/wsClientTransport.js",
-    "net/wsWorkerTransport.js", "server/matchWorker.js",
+    "net/wsWorkerTransport.js", "server/matchWorker.js", "server/matchSnapshot.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

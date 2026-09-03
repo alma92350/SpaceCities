@@ -11,6 +11,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGameState } from "../engine/state.js";
 import { mulberry32 } from "../engine/rng.js";
+import { serializeGameString, deserializeGame } from "../engine/persist.js";
 import { entitySnapshot } from "./_helpers.js";
 import { createMatch, admit, stepMatch, INPUT_DELAY_TICKS, toCommandResult } from "../server/matchLoop.js";
 import { encode, PROTOCOL_VERSION } from "../net/commandEnvelope.js";
@@ -189,4 +190,41 @@ test("toCommandResult() turns an applied record's success payload into {ok:true,
 
 test("toCommandResult() turns a bare null (applied, no payload) into {ok:true, result:null}", () => {
   assert.deepEqual(toCommandResult(null), { ok: true, result: null });
+});
+
+/* ---------- T-029a's own exit criterion: snapshot mid-play, restore, continue ---------- */
+
+test("a match snapshotted mid-play, restored into a fresh state object and continued, yields the same fingerprint as one that ran uninterrupted", () => {
+  const seed = 87654;
+
+  function driveUninterrupted() {
+    const match = makeMatch(seed);
+    const w = playerUnit(match);
+    admit(match, encode({ t: "move", ids: [w.id], x: w.x + 150, y: w.y }, 1), "player");
+    for (let i = 0; i < 60; i++) stepMatch(match, 0.05);
+    return entitySnapshot(match.state);
+  }
+
+  function driveViaSnapshotRestore() {
+    const match = makeMatch(seed);
+    const w = playerUnit(match);
+    admit(match, encode({ t: "move", ids: [w.id], x: w.x + 150, y: w.y }, 1), "player");
+    // Drive well past INPUT_DELAY_TICKS so the admitted move has already been applied and
+    // match.pending is empty — engine/persist.js's save format covers state only, never
+    // match.pending/log/seenSeq (see server/matchSnapshot.js's own header for why that's a
+    // deliberate, bounded scope decision, not an oversight this test happens to dodge).
+    for (let i = 0; i < 30; i++) stepMatch(match, 0.05);
+    assert.equal(match.pending.length, 0, "fixture sanity: nothing still in flight at snapshot time");
+
+    // The actual round trip: serialize, then rehydrate into a COMPLETELY FRESH state object and
+    // match wrapper — never the same live objects — proving restoration, not just continuing the
+    // original in memory.
+    const saved = serializeGameString(match.state);
+    const restoredMatch = createMatch(deserializeGame(JSON.parse(saved)));
+
+    for (let i = 0; i < 30; i++) stepMatch(restoredMatch, 0.05);
+    return entitySnapshot(restoredMatch.state);
+  }
+
+  assert.equal(driveViaSnapshotRestore(), driveUninterrupted());
 });
