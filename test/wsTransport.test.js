@@ -100,6 +100,20 @@ test("welcome handshake: the client regenerates the same map the server's own ma
   } finally { cleanup(); }
 });
 
+// T-034: found by an actual browser join — the seed chip (overlays.js's showSeedChip(state.seed))
+// read "Seed undefined" for a live network match, because reassembleProjection's own per-tick
+// projection never carries match-identity metadata like the seed (it's welcome-message-only,
+// this file's own header table says so). The welcome already tells this client its seed to
+// regenerate the map from; the reconstructed state it hands the rest of the client should carry it
+// too, the same way a locally-created State always has state.seed.
+test("a reassembled state carries the match's own seed, straight from the welcome handshake", async () => {
+  const { transport, cleanup } = await setupOneSeat();
+  try {
+    const state = await new Promise(resolve => { transport.onEvent(e => { if (e.type === "state") resolve(e.state); }); });
+    assert.equal(typeof state.seed, "number");
+  } finally { cleanup(); }
+});
+
 test("state events reassemble into the shape render.js already expects: Maps, not arrays, plus selection", async () => {
   const { transport, cleanup } = await setupOneSeat();
   try {

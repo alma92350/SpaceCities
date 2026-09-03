@@ -109,6 +109,16 @@ test("two independently-fresh-booted workers get DIFFERENT matchIds — not a ha
   } finally { await Promise.all([a.terminate(), b.terminate()]); }
 });
 
+test("T-034: workerData.matchId, when given, is adopted as this fresh match's own id instead of minting a new one — the lobby's own id must be the live match's id too", async () => {
+  const worker = new Worker(WORKER_FILE, {
+    workerData: { matchId: "lobby-minted-id-123", createGameStateOpts: { planetId: "ferros", seed: SEED } },
+  });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    assert.equal(ready.matchId, "lobby-minted-id-123");
+  } finally { await worker.terminate(); }
+});
+
 test("a worker given a dataDir containing a real snapshot restores from it instead of starting fresh — the restored unit's actual position wins over a fresh spawn from the seed the worker was otherwise given", async () => {
   const dir = mkdtempSync(join(tmpdir(), "spacecities-matchworker-restore-test-"));
   try {

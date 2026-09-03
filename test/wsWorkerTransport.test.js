@@ -137,6 +137,61 @@ test("a connection naming a seat the worker's match doesn't have is refused at t
   } finally { wsMatch.close(); server.close(); worker.terminate(); }
 });
 
+// T-034: multiple LIVE matches must be able to share one http.Server (the lobby's whole point) —
+// Node's "upgrade" event calls every registered listener, so each attachWsMatchWorker() attachment
+// must let an upgrade that isn't its own pass through untouched (never destroy a socket another
+// attachment on the same server is about to claim), and requireMatch/authorizeSeat are how a
+// connection actually finds and is let into the RIGHT one.
+test("T-034: two concurrent matches on the SAME server route a connection by ?match=<id>, with no cross-talk", async () => {
+  const workerA = spawnMatchWorker();
+  const workerB = spawnMatchWorker();
+  const server = createServer();
+  const wsA = await attachWsMatchWorker(server, workerA, { path: "/ws", requireMatch: true });
+  const wsB = await attachWsMatchWorker(server, workerB, { path: "/ws", requireMatch: true });
+  assert.notEqual(wsA.matchId, wsB.matchId, "fixture sanity: two freshly-spawned workers mint two different ids");
+  const port = await listen(server);
+  try {
+    // SEQUENTIAL on purpose, not two connections racing in flight together: the property under
+    // test is dispatch CORRECTNESS (does ?match=<id> reach the right worker), which has nothing to
+    // do with connection TIMING — two simultaneous pending connections from one test proved harder
+    // for this sandboxed CI environment to schedule promptly under a full-suite run's own worker-
+    // thread pressure than a real deploy (a couple of real players joining seconds apart, never
+    // hundreds of test processes fighting 4 cores) ever would be, and buys this test nothing a
+    // sequential proof doesn't already give it.
+    const tA = await createWsClientTransport(`ws://localhost:${port}/ws?match=${wsA.matchId}&seat=player`);
+    const stateA = await new Promise(resolve => tA.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    tA.close();
+    const tB = await createWsClientTransport(`ws://localhost:${port}/ws?match=${wsB.matchId}&seat=player`);
+    const stateB = await new Promise(resolve => tB.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    tB.close();
+    // Two independently-seeded workers generate two different maps — the simplest available proof
+    // each connection really reached its OWN match, not the other one's (a reassembled client-side
+    // projection carries no matchId/seed of its own; that's welcome-message-only wire metadata).
+    // This ALSO subsumes the narrower "an attachment leaves a non-matching upgrade unclaimed rather
+    // than destroying it" claim on its own, with no separate fixture needed: if wsA's own mismatch
+    // handling destroyed every socket that wasn't its, tB's connection to wsB right above could
+    // never have succeeded in the first place — two fresh workers per test is real overhead
+    // (worker_threads spawn cost adds up across a file with this many), so one fixture proving both
+    // properties beats two proving one property each.
+    assert.notEqual(JSON.stringify(stateA.map.nodes), JSON.stringify(stateB.map.nodes), "each connection really reached its OWN match's worker, not the other one's");
+  } finally { wsA.close(); wsB.close(); server.close(); workerA.terminate(); workerB.terminate(); }
+});
+
+test("T-034: authorizeSeat — a connection is refused at the upgrade when the callback returns false, e.g. a bad seat token", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker, {
+    path: "/ws", requireMatch: true,
+    authorizeSeat: (seat, url) => url.searchParams.get("token") === "the-real-token",
+  });
+  const port = await listen(server);
+  try {
+    await assert.rejects(createWsClientTransport(`ws://localhost:${port}/ws?match=${wsMatch.matchId}&seat=player&token=wrong`));
+    const ok = await createWsClientTransport(`ws://localhost:${port}/ws?match=${wsMatch.matchId}&seat=player&token=the-real-token`);
+    ok.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
 test("attachWsMatchWorker(...).close() stops accepting new upgrades and closes every live connection, without terminating the worker itself", async () => {
   const worker = spawnMatchWorker();
   const server = createServer();

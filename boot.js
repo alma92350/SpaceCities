@@ -559,7 +559,7 @@ export function bootState(newState, { intro, selfPlay = false, transport = null 
         // tools/selfplay.js entry point every simulated duel already runs through, so a match you
         // watch and the identical match the Worker would have simulated advance the same way.
         tickSelfPlay(game.state, dt);
-      } else if (transport) {
+      } else if (transport && typeof transport.tick === "function") {
         // The ADR-0003/ADR-0004 path (T-012): transport.tick(dt) is net/loopback.js's own
         // session.tick(dt) — aiSeats (empty for an ordinary human-played match) then
         // engine/sim.js's tick(state, dt), the SAME call the plain branch below makes, on the
@@ -569,6 +569,16 @@ export function bootState(newState, { intro, selfPlay = false, transport = null 
         // startCompetitionMatch, a loaded skirmish) reaches here; every other boot path's
         // game.transport is a directTransport with no tick() of its own, and keeps ticking below.
         transport.tick(dt);
+      } else if (transport) {
+        // T-034: a LIVE NETWORK transport (net/wsClientTransport.js's real shape — submitCommand/
+        // onEvent/close, deliberately no .tick of its own) — the SERVER'S OWN worker owns this
+        // match's ticking (T-029), so there is nothing to do here, every frame, on purpose. Found
+        // by an actual browser join: without this branch, `transport.tick(dt)` above threw on the
+        // very first frame, and engine/loop.js's own update() is deliberately UNGUARDED (its own
+        // header: "a throwing sim update is a correctness problem this catch isn't meant to paper
+        // over"), so that throw killed the whole render loop after one frame — a hard freeze, not a
+        // cosmetic bug. game.state itself is kept current by the caller's own ongoing
+        // transport.onEvent subscription (lobbyScreen.js's joinLive), never by ticking it here.
       } else tick(game.state, dt);
     },
     render: (alpha) => {

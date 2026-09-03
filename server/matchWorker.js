@@ -75,7 +75,12 @@ import { readSnapshot, writeSnapshot } from "./matchSnapshot.js";
 const { seed } = workerData.createGameStateOpts;
 const dataDir = workerData.dataDir || null;
 const restored = dataDir ? readSnapshot(dataDir) : null;
-const matchId = restored ? restored.matchId : randomUUID();
+// T-034: a snapshot restore always wins (unchanged) — but for a genuinely FRESH match, the lobby
+// that decided to spawn this worker already minted its own matchId (server/lobby.js's own
+// createMatch) and needs THIS worker's live match to answer to that SAME id, not a second,
+// independently-minted one nobody else knows about. workerData.matchId is that opt-in override;
+// omitted (every test and every pre-T-034 caller), this is exactly the old self-minting behavior.
+const matchId = restored ? restored.matchId : (workerData.matchId || randomUUID());
 const state = restored ? restored.state : createGameState({ ...workerData.createGameStateOpts, rng: mulberry32(seed) });
 const match = createMatch(state);
 

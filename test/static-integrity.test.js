@@ -218,13 +218,17 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // remove this line — matchWorker.js is a Node worker_threads entry point, never something a
   // browser import chain could reach even once every other multiplayer feature lands.
   //
-  // server/lobby.js and server/lobbySnapshot.js (T-033) are TEMPORARY exemptions, joining
-  // net/wsClientTransport.js's own wait, not matchSnapshot.js's permanent one: both exist and are
-  // tested (test/lobby.test.js, test/lobbySnapshot.test.js) but deliberately have no HTTP/WS
-  // wiring yet — tools/serve.js still boots exactly one fixed demo match, same as T-027 left it —
-  // because a lobby only matters once a browser can actually reach it (a shareable join link,
-  // T-034's own exit criterion), and that wiring is T-034's job, not this task's. Both lines come
-  // out together once tools/serve.js's boot path actually calls createLobby/restoreLobby.
+  // server/lobby.js and server/lobbySnapshot.js: T-033's own comment here predicted these would
+  // come out of the exemption list once tools/serve.js's boot path called createLobby/restoreLobby
+  // for real — T-034 is that wiring (createAppServer's own lobby, liveMatches, and the three
+  // /api/matches endpoints), but the prediction was wrong, corrected here rather than silently
+  // fixed: tools/ is this walk's own standing exclusion (browserJs()'s comment), so a real caller
+  // that lives ONLY in tools/serve.js is exactly as invisible to this check as net/ws.js's,
+  // net/wsWorkerTransport.js's and server/matchWorker.js's own real callers already are two
+  // paragraphs up — none of those came out on that same logic either. Both lines are PERMANENT
+  // exemptions now, the same class as server/matchSnapshot.js just above: real, tested, correctly
+  // wired code whose only path from index.html runs through a Node CLI/server entry point, never a
+  // browser import.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
@@ -463,7 +467,18 @@ test("the shipped module graph has no import cycle outside the known UI cluster 
   // "called at runtime, not at module-evaluation time" invariant as the other six (see
   // competition.js's own header for the TDZ hazard this would otherwise create, and how its
   // `compConfig.worlds` default is deferred specifically to avoid it).
-  const KNOWN = ["boot.js", "competition.js", "hud.js", "hudSelection.js", "overlays.js", "saveload.js", "setup.js"];
+  // lobbyScreen.js (T-034) joins as an 8th member, the same "called at runtime, not at
+  // module-evaluation time" invariant as every other member: setup.js's own new Multiplayer button
+  // reaches it through a DYNAMIC import(), never a static one, specifically so setup.js doesn't pay
+  // a TDZ hazard for a module it only needs after a real click — but this test's own IMPORT_SPEC
+  // regex (its header comment: "SIDE-EFFECT form... was missing") matches a dynamic import() edge
+  // exactly like a static one, so the edge is real to Tarjan even though it never fires at eval
+  // time. The back-edge closing the cycle is lobbyScreen.js's own (static) import of setup.js's
+  // renderMapSelect/MAP_CHOICES/SIZE_OPTIONS/RESOURCE_OPTIONS/MATCH_LENGTH_OPTIONS and boot.js's
+  // bootState — reused rather than redefined, the same CONTRIBUTING.md reason competition.js's own
+  // paragraph above already gives, and every one of those calls also lives inside a function
+  // (renderLobbyScreen/joinLive), never at this file's own module-evaluation time either.
+  const KNOWN = ["boot.js", "competition.js", "hud.js", "hudSelection.js", "lobbyScreen.js", "overlays.js", "saveload.js", "setup.js"];
   assert.deepEqual(sccs.map(c => c.join(" ")), [KNOWN.join(" ")],
     "import cycle(s) other than the documented UI cluster (see overlays.js's note on live bindings):\n" +
     sccs.map(c => c.join(", ")).join("\n"));

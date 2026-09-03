@@ -61,7 +61,7 @@ const doc = installFakeDom({ context: fakeCtx });
 doc.addEventListener = () => {};
 doc.removeEventListener = () => {};
 
-const { pauseLoop, resumeLoop, togglePause, startGame, startOdyssey, initiateJump, notifyColony, isUnderAttackEvent } = await import("../boot.js");
+const { pauseLoop, resumeLoop, togglePause, startGame, startOdyssey, initiateJump, notifyColony, isUnderAttackEvent, bootState } = await import("../boot.js");
 // dom.js is already loaded (boot.js imports it statically) — re-importing it here just returns
 // the SAME cached module, i.e. the SAME `pauseBtn` object boot.js's syncPause() mutates. A
 // second, independent observable of the same `manual` boolean: the topbar button's label.
@@ -807,6 +807,31 @@ test("an ORDINARY skirmish keeps its own sim rate — the self-play step is for 
     "the spectate change didn't slow normal play down");
   assert.ok(Math.abs(advanced.time - 4 * SELFPLAY_DT) < 1e-9,
     "…covering the same amount of SIM TIME, just in more, smaller steps");
+
+  game.state = null;
+  game.input = null;
+  hideObjectives();
+  resetPause();
+});
+
+// T-034: found by an actual browser join (Node's own transportContract tests never drive the real
+// loop against a non-loopback transport) — a LIVE network transport (net/wsClientTransport.js's
+// real shape: submitCommand/onEvent/close, no .tick() at all, since the SERVER's own worker owns
+// ticking, T-029) used to make the fixed-timestep loop's `update` callback throw
+// "transport.tick is not a function" on the very first frame. engine/loop.js's own update() is
+// DELIBERATELY unguarded (its header: "a throwing sim update is a correctness problem this catch
+// isn't meant to paper over"), so that throw unwound past the loop's own requestAnimationFrame
+// call and killed the whole match after one frame — a hard freeze, not a cosmetic bug.
+test("T-034: booting with a live network transport (no .tick() of its own) never throws from the loop, and never ticks the sim locally", () => {
+  resetPause();
+  resetSetup();
+  startGame("ferros");   // an ordinary boot first, just to get a real state object to re-wrap below
+  // net/transport.js's own generic Transport shape — deliberately NOT loopback-shaped (no .tick/
+  // .getState, the two loopback-only extensions net/loopback.js's own header names).
+  const fakeRemoteTransport = { submitCommand: () => Promise.resolve({ ok: true }), onEvent() {}, close() {} };
+  const advanced = driveFrames(() => bootState(game.state, { intro: false, transport: fakeRemoteTransport }),
+    { frames: 4, msPerFrame: 50 });
+  assert.equal(advanced.tick, 0, "the SERVER'S OWN worker owns this match's ticking — nothing here may advance it locally");
 
   game.state = null;
   game.input = null;

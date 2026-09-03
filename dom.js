@@ -27,6 +27,7 @@ export const scoreBarEl = byId("scoreBar");
 export const panelEl = byId("selectionPanel");
 export const gameOverEl = byId("gameOver");
 export const mapSelectEl = byId("mapSelect");
+export const lobbyScreenEl = byId("lobbyScreen");
 export const muteBtn = byId("muteBtn");
 export const underAttackEl = byId("underAttackAlert");
 export const gateChipEl = byId("gateChip");

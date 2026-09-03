@@ -19,15 +19,31 @@
    only job is to make sure nothing else quietly claims that path first, static serving and the
    game socket both included.
 
-   T-029: the demo match now runs inside its own worker_threads Worker (server/matchWorker.js),
-   relayed to real WebSocket connections by net/wsWorkerTransport.js — ADR-0011's own architecture,
-   not a shortcut this file invented. There is still no lobby (T-033, Phase 4) to hand a connection
-   a REAL choice of match, so this boots exactly one fixed-at-startup demo match (a fresh random
-   seed each boot) at the WebSocket root — the same `?seat=<owner>` binding T-026's own tests
-   already exercise — but it's now genuinely isolated in its own thread: a bug that crashes this
-   match's simulation can't take the whole server down with it, and a second concurrent match (once
-   T-033's lobby can create one) would run on its own CPU core rather than competing with this one
-   for Node's single event loop.
+   T-029: a match runs inside its own worker_threads Worker (server/matchWorker.js), relayed to real
+   WebSocket connections by net/wsWorkerTransport.js — ADR-0011's own architecture, not a shortcut
+   this file invented: a bug that crashes one match's simulation can't take the whole server down
+   with it, and a second concurrent match runs on its own CPU core rather than competing with the
+   first for Node's single event loop.
+
+   T-034: real matches now, not one fixed-at-startup demo. server/lobby.js decides what matches
+   exist; this file's own job is turning that model into three real HTTP endpoints (create match,
+   list open matches, join a seat) and a WebSocket upgrade that can find the RIGHT match among
+   however many are live: `?match=<id>&seat=<owner>&token=<token>`, replacing T-026's own bare
+   `?seat=<owner>` binding (still the shape net/wsWorkerTransport.js accepts underneath — this file
+   just also requires the match id to match AND the token to check out, via that function's new
+   requireMatch/authorizeSeat opts). Multiple matches share ONE http.Server, which is why
+   net/wsWorkerTransport.js's own upgrade handling had to stop destroying a socket that isn't meant
+   for IT — see that file's own header for the non-destructive-passthrough-plus-catch-all mechanism
+   this file's own catch-all (below) is the other half of.
+
+   KNOWN GAP, named rather than silently shipped: server/matchSnapshot.js is still "one demo match,
+   one fixed filename" (its own header says so) — with two or more concurrent matches BOTH getting a
+   real DATA_DIR (production only; unset in local dev and every test), their periodic snapshots would
+   overwrite the SAME file. Not fixed here: T-034's own exit criterion (a stranger joins from a link)
+   doesn't depend on crash-recovery persistence, and the Space this would matter on is unreachable
+   right now (T-008c, account locked) — see TASKS.md's new T-034b row for the tracked, not-yet-done
+   fix (per-matchId snapshot filenames). dataDir is still threaded through exactly as before so
+   single-match behavior (today's only reachable case) is unaffected.
    ============================================================ */
 
 "use strict";
@@ -41,6 +57,8 @@ import { Worker } from "node:worker_threads";
 import { runProbe } from "./dataProbe.js";
 import { runBenchSuite } from "./bench.js";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
+import { createLobby, OWNER_IDS } from "../server/lobby.js";
+import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -153,51 +171,175 @@ const requestHandler = async (req, res) => {
   }
 };
 
-// Builds one fresh HTTP server: static assets, the /mcp reservation, and one demo match's
-// WebSocket game transport, all on whatever port the caller eventually `.listen()`s. A factory
-// rather than a module-level singleton so tests can build an independent instance per test (its
-// own demo match, its own worker) and tear it down cleanly afterward — the same reason
-// net/wsWorkerTransport.js's attachWsMatchWorker is a function and not a side effect of importing
-// it. ASYNC (unlike T-027's original version): attachWsMatchWorker itself must wait for the
-// worker's own "ready" message before WebSocket handling can be wired up at all.
-//
-// The demo match: no lobby exists yet (T-033, Phase 4) to hand a connection a real choice, so this
-// boots exactly one fixed-at-startup skirmish (a fresh random seed each boot) inside its own
-// worker_threads Worker (T-029, ADR-0011 — see server/matchWorker.js's own header for why a worker,
-// not just another match object in this process) and binds net/wsWorkerTransport.js to it at the
-// WebSocket root ("/", the same pathname T-026's own tests already use). `path: "/"` keeps an
-// upgrade aimed at the reserved /mcp namespace above from also being accepted as this match's game
-// socket.
-export async function createAppServer() {
-  const server = createServer(requestHandler);
+// A safe, small JSON body reader for the /api/matches endpoints below — every request this server
+// ever expects a body from is tiny (a handful of scalar config fields), so no size-streaming
+// concern like static file serving has. Returns {} for an empty body (GET-shaped convenience for a
+// join call that doesn't care which seat), or null for a body that isn't valid JSON — the caller
+// turns that into a 400, never a thrown exception reaching the request handler's own catch.
+function readJsonBody(req) {
+  return new Promise(resolve => {
+    const chunks = [];
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => {
+      if (chunks.length === 0) { resolve({}); return; }
+      try { resolve(JSON.parse(Buffer.concat(chunks).toString("utf8"))); } catch { resolve(null); }
+    });
+  });
+}
 
-  const seed = (Math.floor(Math.random() * 0x100000000)) >>> 0;
-  // dataDir: T-029a snapshot/restore (server/matchWorker.js's own header). Unset in local dev,
-  // so `seed` above is always what actually boots there — production-only, same DATA_DIR gate
-  // dataProbeResult and /__bench already use above.
-  const worker = new Worker(MATCH_WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed }, dataDir: process.env.DATA_DIR || null } });
-  const wsMatch = await attachWsMatchWorker(server, worker, { path: "/" });
+function respondJson(res, status, body) {
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
+  res.end(JSON.stringify(body));
+}
+
+// The safe subset of a server/lobby.js match record a stranger browsing the open-match list may
+// see: never a seat's own token (a bearer credential — server/lobby.js's own header), never the
+// live createGameStateOpts seed (would let a spectator predict resource-node placement ahead of
+// discovering it in-fog).
+function publicMatch(match) {
+  return {
+    id: match.id, status: match.status, createdAt: match.createdAt,
+    planetId: match.config.planetId, sizeMult: match.config.sizeMult ?? 1, resourceMult: match.config.resourceMult ?? 1,
+    matchTimeLimit: match.config.matchTimeLimit ?? null,
+    seats: match.seats.map(s => ({ kind: s.kind, taken: !!s.owner })),
+  };
+}
+
+// Builds one fresh HTTP server: static assets, the /mcp reservation, the lobby's three HTTP
+// endpoints, and every LIVE match's own WebSocket game transport, all on whatever port the caller
+// eventually `.listen()`s. A factory rather than a module-level singleton so tests can build an
+// independent instance per test (its own lobby, its own matches) and tear it down cleanly
+// afterward — the same reason net/wsWorkerTransport.js's attachWsMatchWorker is a function and not
+// a side effect of importing it.
+export async function createAppServer() {
+  const dataDir = process.env.DATA_DIR || null;   // production only — same gate dataProbeResult/__bench already use above
+  const lobby = dataDir ? restoreLobby(dataDir) : createLobby();
+  const liveMatches = new Map();   // matchId -> {worker, wsMatch} — only matches THIS boot actually spawned a worker for
+
+  // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by
+  // this match's own id (server/matchWorker.js's workerData.matchId override, T-034) so the lobby's
+  // id and the live match's id are always the SAME id, never two independently-minted ones.
+  // aiEnabled follows seat 1's own kind directly: an "ai"-kind seat is an ordinary skirmish
+  // opponent (today's single-player default, unchanged); an "open"-kind seat starts with NOBODY
+  // driving it — not even the built-in AI (T-034a) — until a real human joins, exactly FR-3's own
+  // "AI fill for open seats" being T-035's job, not this one's.
+  async function spawnWorkerFor(match) {
+    const seed = (Math.floor(Math.random() * 0x100000000)) >>> 0;
+    const worker = new Worker(MATCH_WORKER_FILE, {
+      workerData: {
+        matchId: match.id,
+        createGameStateOpts: {
+          planetId: match.config.planetId, sizeMult: match.config.sizeMult, resourceMult: match.config.resourceMult,
+          matchTimeLimit: match.config.matchTimeLimit, seed, aiEnabled: match.seats[1].kind === "ai",
+        },
+        // KNOWN GAP (this file's own header): two+ concurrent matches with a real dataDir would
+        // collide on server/matchSnapshot.js's still-single fixed filename. Threaded through
+        // unchanged rather than silently dropped, since the single-match case (today's only
+        // reachable one) must keep working exactly as before — see TASKS.md T-034b.
+        dataDir,
+      },
+    });
+    const wsMatch = await attachWsMatchWorker(server, worker, {
+      path: "/ws", requireMatch: true,
+      // A connection's token must be the REAL one server/lobby.js minted for that exact seat —
+      // reusing reclaimSeat rather than a parallel check, since an initial connect right after
+      // joinMatch is really just the first "reclaim" of a token that already exists.
+      authorizeSeat: (seat, url) => {
+        const seatIndex = OWNER_IDS.indexOf(seat);
+        return lobby.reclaimSeat(match.id, seatIndex, url.searchParams.get("token")).ok;
+      },
+    });
+    liveMatches.set(match.id, { worker, wsMatch });
+  }
+
+  async function handleCreateMatch(req, res) {
+    const body = await readJsonBody(req);
+    if (body === null) { respondJson(res, 400, { error: "bad-json" }); return; }
+    let match;
+    try {
+      match = lobby.createMatch({
+        planetId: typeof body.planetId === "string" && body.planetId ? body.planetId : "ferros",
+        sizeMult: Number.isFinite(body.sizeMult) ? body.sizeMult : undefined,
+        resourceMult: Number.isFinite(body.resourceMult) ? body.resourceMult : undefined,
+        matchTimeLimit: Number.isFinite(body.matchTimeLimit) ? body.matchTimeLimit : undefined,
+        seatKinds: Array.isArray(body.seatKinds) ? body.seatKinds : undefined,
+      });
+    } catch (err) { respondJson(res, 400, { error: "bad-config", message: err.message }); return; }
+    // The host auto-claims seat 0 in the SAME request that creates the match — a stranger opening
+    // a shareable link should never find a match that exists but has nobody in it yet.
+    const joined = lobby.joinMatch(match.id, 0);
+    await spawnWorkerFor(match);
+    if (dataDir) writeLobbySnapshot(dataDir, lobby);
+    respondJson(res, 201, { matchId: match.id, seatIndex: 0, owner: joined.owner, token: joined.token });
+  }
+
+  function handleListMatches(req, res) {
+    respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch) });
+  }
+
+  async function handleJoinMatch(req, res, matchId) {
+    const body = await readJsonBody(req);
+    if (body === null) { respondJson(res, 400, { error: "bad-json" }); return; }
+    const match = lobby.getMatch(matchId);
+    if (!match) { respondJson(res, 404, { error: "no-such-match" }); return; }
+    let seatIndex = body.seatIndex;
+    if (seatIndex === undefined) {
+      // No seat named: pick the first still-open, still-unclaimed one — the common case, a
+      // stranger who just followed a shareable link and doesn't know or care about seat indices.
+      seatIndex = match.seats.findIndex(s => s.kind === "open" && !s.owner);
+      if (seatIndex === -1) { respondJson(res, 409, { error: "no-open-seat" }); return; }
+    }
+    const joined = lobby.joinMatch(matchId, seatIndex);
+    if (!joined.ok) { respondJson(res, 409, { error: joined.code }); return; }
+    if (dataDir) writeLobbySnapshot(dataDir, lobby);
+    respondJson(res, 200, { matchId, seatIndex, owner: joined.owner, token: joined.token });
+  }
+
+  const server = createServer((req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/api/matches" && req.method === "POST") { handleCreateMatch(req, res); return; }
+    if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res); return; }
+    const joinMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/join$/.exec(url.pathname);
+    if (joinMatch) { handleJoinMatch(req, res, decodeURIComponent(joinMatch[1])); return; }
+    requestHandler(req, res);
+  });
+
+  // T-034: several matches' own attachWsMatchWorker() attachments all share this ONE server, each
+  // only ever claiming an upgrade meant for IT (net/wsWorkerTransport.js's own header explains the
+  // non-destructive-passthrough half of this). This is the other half: once every "upgrade"
+  // listener registered so far has had its synchronous turn, destroy whatever none of them marked
+  // handled — a bogus match id, a stale link to a match that already ended, /mcp, or any other
+  // upgrade nothing here was ever going to accept. queueMicrotask defers past that whole synchronous
+  // dispatch regardless of how many matches are live or in what order they were created.
+  server.on("upgrade", (req, socket) => {
+    queueMicrotask(() => { if (!socket.__scHandled && !socket.destroyed) socket.destroy(); });
+  });
+
+  // Periodic, not per-write — mirrors server/matchWorker.js's own SNAPSHOT_INTERVAL_MS reasoning
+  // exactly (bounds an unexpected-crash loss window, not perfectly current). Unset in local dev and
+  // every test, same DATA_DIR gate every other production-only feature in this file already uses.
+  const LOBBY_SNAPSHOT_INTERVAL_MS = 5000;
+  const snapshotTimer = dataDir ? setInterval(() => writeLobbySnapshot(dataDir, lobby), LOBBY_SNAPSHOT_INTERVAL_MS) : null;
 
   return {
     server,
-    owners: wsMatch.owners,
-    seed,
-    // Stops this app's own WebSocket attachment and terminates the match's own worker — unlike
-    // attachWsMatchWorker's own close() (which deliberately leaves worker lifecycle to its
-    // caller), THIS close() is that caller, so it owns ending it. The http.Server itself stays the
-    // caller's to close, same convention attachWsMatch/attachWsMatchWorker's own close() already keep.
-    close() { wsMatch.close(); worker.terminate(); },
+    lobby,
+    close() {
+      if (snapshotTimer) clearInterval(snapshotTimer);
+      for (const { worker, wsMatch } of liveMatches.values()) { wsMatch.close(); worker.terminate(); }
+      liveMatches.clear();
+    },
   };
 }
 
 // Only bind a port when this file is run directly (`node tools/serve.js` / `npm start`), not when
 // it's imported — e.g. by a test — for `resolveSafePath` or `createAppServer`.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { server, owners, seed } = await createAppServer();
+  const { server } = await createAppServer();
   server.listen(PORT, () => {
     console.log(`SpaceCities — serving ${ROOT}`);
     console.log(`  open  http://localhost:${PORT}/`);
-    console.log(`  demo match live: seed ${seed}, seats [${owners.join(", ")}] — connect ws://localhost:${PORT}/?seat=<owner>`);
+    console.log(`  lobby  POST /api/matches to host, GET /api/matches to list, POST /api/matches/:id/join to join`);
     console.log("  stop  Ctrl+C");
   });
 }

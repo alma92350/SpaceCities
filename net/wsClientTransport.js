@@ -115,6 +115,9 @@ export function createWsClientTransport(url, opts = {}) {
                        // same-match reconnect (T-029b), only recreated for a genuinely new match
     let seat = null;
     let matchId = null;   // T-029b — this connection's last-seen match identity
+    let seed = null, planetId = null;   // T-034 — carried from the welcome handshake onto every
+                                         // reassembled state (see the "state" handler below); a
+                                         // per-tick projection has no match-identity fields of its own
     let lastProj = null;   // the last reconstructed projectFor(...)-shaped snapshot (ADR-0009 M3,
                             // T-028b) — a full push replaces it outright; a delta is applied against it
 
@@ -173,13 +176,18 @@ export function createWsClientTransport(url, opts = {}) {
           if (welcomedThisConnection) return;   // a stray duplicate welcome on this SAME connection
           welcomedThisConnection = true;
 
-          const { planetId, seed, sizeMult, resourceMult, swapAsym } = msg.createGameState;
-          map = generateMap(planetId, mulberry32(seed), { sizeMult, resourceMult, swapAsym });
+          // Named distinctly from the outer seed/planetId (T-034) they get assigned to just below —
+          // a bare `const { planetId, seed }` here would SHADOW those for the rest of this block
+          // instead of setting them.
+          const { planetId: welcomePlanetId, seed: welcomeSeed, sizeMult, resourceMult, swapAsym } = msg.createGameState;
+          map = generateMap(welcomePlanetId, mulberry32(welcomeSeed), { sizeMult, resourceMult, swapAsym });
           const isReconnect = settled;   // the outer promise already resolved once before -> this welcome is from a RETRY, not the original connect
           const sameMatch = isReconnect && matchId === msg.matchId;
           if (!sameMatch) fog = createFog(map);   // no exploration memory worth preserving for a genuinely different match (or the very first connect)
           matchId = msg.matchId;
           seat = msg.seat;
+          seed = welcomeSeed;
+          planetId = welcomePlanetId;
           lastProj = null;
 
           if (!isReconnect) {
@@ -197,7 +205,12 @@ export function createWsClientTransport(url, opts = {}) {
           // is no separate ack to send — the WebSocket itself is the ack (see that file's own header
           // for why TCP's in-order delivery already gives the server everything "acknowledged" needs).
           lastProj = msg.full ? msg.proj : applyDelta(lastProj, msg.delta);
-          emit({ type: "state", state: reassembleProjection(lastProj, map, fog, seat) });
+          // T-034: seed/planetId ride along from the welcome handshake (already parsed above, into
+          // `map` — these two are what regenerated it), never from the per-tick projection itself,
+          // which carries no match-identity metadata of its own. Found by an actual browser join:
+          // without this, overlays.js's seed chip read "Seed undefined" for a live network match —
+          // a locally-created State always has a real state.seed, so a wire-reconstructed one must too.
+          emit({ type: "state", state: { ...reassembleProjection(lastProj, map, fog, seat), seed, planetId } });
           return;
         }
         if (msg.type === "commandResult") {

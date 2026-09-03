@@ -161,7 +161,19 @@ if (typeof window !== "undefined") window.addEventListener("touchstart", () => {
 // ---- kickoff (all modules are evaluated by now, so these cross-module calls
 // are safe) ----
 buildHelpOverlay();
-renderMapSelect();
+// T-034's exit criterion: a stranger opens a shareable ?join=<matchId> link and lands straight in
+// the join flow — never the ordinary map-select screen first. `typeof location` guarded the same
+// way the touchstart listener above guards `window`, so this file stays import-safe under Node
+// (C10) — main.js's own top-level kickoff never touches a browser global directly anywhere else
+// either, always through a function (renderMapSelect included) that does its own dom.js-style
+// null check. Dynamic import: lobbyScreen.js's own header explains why setup.js's lone other call
+// site reaches it the same way; staying consistent avoids two conventions for the same module.
+const joinMatchId = typeof location !== "undefined" ? new URL(location.href).searchParams.get("join") : null;
+if (joinMatchId) {
+  import("./lobbyScreen.js").then(({ renderLobbyScreen }) => renderLobbyScreen({ joinMatchId }));
+} else {
+  renderMapSelect();
+}
 resizeCanvas();
 resizeMinimap();
 watchDPR();

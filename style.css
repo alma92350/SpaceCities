@@ -910,6 +910,35 @@ body.paused::after {
   flex-wrap: wrap;
   flex: 1 1 auto;
 }
+
+/* ---- Multiplayer lobby (lobbyScreen.js, T-034): reuses .map-select/.setup/.btn/.cards-heading/
+   .setup-hint throughout (same overlay + card visual language as the skirmish setup screen); these
+   rules are only what's genuinely new — the two-card host/browse row, the plain label+select dial
+   rows, the copyable share-link row, and the open-match list. ---- */
+.lobby-cards-row { display: flex; gap: 16px; flex-wrap: wrap; justify-content: center; max-width: 900px; }
+.lobby-card { width: min(420px, 92vw); }
+.lobby-back { width: auto; padding: 8px 14px; }
+.lobby-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 10px; font-size: 0.85rem; color: var(--muted);
+}
+.lobby-row select {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 4px;
+  color: var(--text); padding: 6px 8px; font-size: 0.85rem; max-width: 60%;
+}
+.lobby-link-row { display: flex; gap: 8px; margin-top: 10px; }
+.lobby-link-row.hidden { display: none; }
+.lobby-link-row .btn { width: auto; margin-top: 0; padding: 8px 12px; }
+.lobby-link-input {
+  flex: 1 1 auto; min-width: 0; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 4px; color: var(--text); padding: 8px; font-size: 0.78rem;
+}
+.lobby-match-list { margin-top: 10px; display: flex; flex-direction: column; gap: 6px; }
+.lobby-match-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2);
+}
+.lobby-match-row .btn { width: auto; margin-top: 0; padding: 6px 14px; }
 /* The mode toggle is a direct child of the .map-select flex COLUMN, so flex-grow:1
    makes it (and its stretched buttons) balloon vertically to fill spare space — huge
    when a mode like Odyssey shows no card grid below. Only the nested setup-row groups

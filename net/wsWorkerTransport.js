@@ -30,7 +30,9 @@ import { buildStateMessage } from "./wsServerTransport.js";
 /**
  * @param {import("http").Server} httpServer
  * @param {import("worker_threads").Worker} worker - already spawned (new Worker("server/matchWorker.js", {workerData}))
- * @param {{allowedOrigins?: string[], path?: string}} [opts]
+ * @param {{allowedOrigins?: string[], path?: string, requireMatch?: boolean, authorizeSeat?: (seat: string, url: URL) => boolean}} [opts]
+ *   requireMatch/authorizeSeat are T-034's own lobby seam — see this file's header for the
+ *   multi-match dispatch they exist for.
  * @returns {Promise<{owners: string[], createGameStateOpts: Object, matchId: string, close: () => void}>}
  *   resolves once the worker's own "ready" message arrives; owners/createGameStateOpts/matchId are
  *   that same message's own data, exposed here so a caller doesn't need its own separate copy or a
@@ -40,7 +42,7 @@ import { buildStateMessage } from "./wsServerTransport.js";
  *   createGameStateOpts.
  */
 export function attachWsMatchWorker(httpServer, worker, opts = {}) {
-  const { allowedOrigins, path } = opts;
+  const { allowedOrigins, path, requireMatch, authorizeSeat } = opts;
 
   return new Promise(resolve => {
     worker.once("message", readyMsg => {
@@ -54,9 +56,18 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
 
       function onUpgrade(req, socket, head) {
         const url = new URL(req.url, "http://localhost");
-        if (path && url.pathname !== path) { socket.destroy(); return; }
+        // T-034: a MISMATCH here means "not for this attachment", never "not for anyone" — several
+        // matches share one http.Server (each call to this function adds its OWN "upgrade"
+        // listener, and Node invokes every listener registered for an event), so destroying the
+        // socket here would break whichever OTHER attachment the request was actually meant for.
+        // Leaving it unclaimed is safe: tools/serve.js's own dispatcher owns a single catch-all that
+        // destroys anything no attachment marked handled, once every "upgrade" listener has run.
+        if (path && url.pathname !== path) return;
+        if (requireMatch && url.searchParams.get("match") !== matchId) return;
+        socket.__scHandled = true;   // this request IS for this match — nobody else gets to destroy it
         const seat = url.searchParams.get("seat");
         if (!seat || !owners.includes(seat)) { socket.destroy(); return; }
+        if (authorizeSeat && !authorizeSeat(seat, url)) { socket.destroy(); return; }
 
         acceptUpgrade(req, socket, head, { allowedOrigins }).then(result => {
           if (!result.ok) return;

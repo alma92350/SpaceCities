@@ -37,13 +37,15 @@ const ODYSSEY_START_CHOICES = [...MAP_CHOICES, ...Object.keys(ODYSSEY_EXTRA_ARCH
 // Splash-screen game setup, carried across "choose another battlefield"
 // restarts. sizeMult scales the map (map.js); resourceMult scales every
 // deposit's amount; aiApm caps the opponent's actions per minute (ai.js).
-const SIZE_OPTIONS = [
+// Exported: lobbyScreen.js's own host form (T-034) reuses these exact same three dials rather than
+// redefining them, the same single-source-of-truth reason MATCH_LENGTH_OPTIONS below is exported.
+export const SIZE_OPTIONS = [
   { label: "Small", mult: 1, note: "1600×1000" },
   { label: "Standard", mult: 2, note: "2× · room to expand" },
   { label: "Large", mult: 3, note: "3× · long game" },
   { label: "Gigantic", mult: 4, note: "4× · sprawling war" },
 ];
-const RESOURCE_OPTIONS = [
+export const RESOURCE_OPTIONS = [
   { label: "Rare", mult: 0.6, note: "lean deposits" },
   { label: "Normal", mult: 1.0, note: "balanced" },
   { label: "Abundant", mult: 1.5, note: "rich deposits" },
@@ -346,6 +348,18 @@ export function renderMapSelect() {
     resume.title = "Resume your last skirmish from its browser autosave";
     resume.addEventListener("click", loadGame);
     mapSelectEl.appendChild(resume);
+  }
+
+  // T-034: the lobby's own entry point — host or join a real match over the network. Skirmish
+  // only, the same scope FR-1/FR-2 describe ("a player may create a match..."); Odyssey/scenario/
+  // competition stay exactly as they are today, untouched by any of this.
+  if (setup.mode === "skirmish") {
+    const multiplayer = document.createElement("button");
+    multiplayer.className = "btn";
+    multiplayer.textContent = "🌐 Multiplayer — host or join";
+    multiplayer.title = "Play a match with another person over the network";
+    multiplayer.addEventListener("click", async () => { const { renderLobbyScreen } = await import("./lobbyScreen.js"); renderLobbyScreen(); });
+    mapSelectEl.appendChild(multiplayer);
   }
 
   // Scenarios and Odyssey get a brief blurb above the setup.
