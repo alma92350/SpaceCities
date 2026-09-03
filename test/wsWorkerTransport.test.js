@@ -322,3 +322,137 @@ test("T-035 (FR-6): once a match ends, BOTH connected seats receive over:true an
     } finally { wsMatch.close(); server.close(); worker.terminate(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+/* ---------- T-037 (FR-7): spectator connections — full-vision, read-only, host-toggleable ----------
+   Raw `WebSocket`, not createWsClientTransport, throughout: a spectator's own wire scheme has no
+   `seat` of its own and no fog to reconstruct (net/wsClientTransport.js's reassembleProjection would
+   run updateFog for a seat that doesn't exist), so these tests inspect the wire messages directly —
+   the same "test the real thing, at the level that actually matters" reasoning test/ws.test.js's own
+   raw-socket tests already use for refusal cases. */
+
+test("T-037: a spectator connection (?spectate=1) receives full-vision state pushes — both seats' bases, never fogged to one side", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const ws = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    const proj = await new Promise((resolve, reject) => {
+      ws.addEventListener("error", reject);
+      ws.addEventListener("message", ev => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "state") resolve(msg.proj);
+      });
+    });
+    const owners = new Set(proj.buildings.map(b => b.owner));
+    assert.ok(owners.has("player") && owners.has("ai"), "a spectator must see both seats' bases at once, never a single seat's own fogged view");
+    ws.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-037: a spectator's welcome message identifies it as a spectator, with no seat of its own", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const ws = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    const welcome = await new Promise((resolve, reject) => {
+      ws.addEventListener("error", reject);
+      ws.addEventListener("message", ev => {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "welcome") resolve(msg);
+      });
+    });
+    assert.equal(welcome.spectator, true);
+    assert.equal(welcome.seat, null);
+    assert.equal(welcome.matchId, wsMatch.matchId);
+    ws.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-037: a spectator's own message is never relayed to the worker — a raw command envelope gets no commandResult back, ever", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const ws = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    await new Promise((resolve, reject) => {
+      ws.addEventListener("error", reject);
+      ws.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "welcome") resolve(); });
+    });
+    let sawCommandResult = false;
+    ws.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "commandResult") sawCommandResult = true; });
+    ws.send(JSON.stringify({ t: "move", seq: 1, ids: ["whatever"], x: 0, y: 0 }));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(sawCommandResult, false, "a spectator has no seat to submit a command as — nothing should ever answer one, success or rejection");
+    ws.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-037: spectatorsEnabled:false refuses a spectate connection at the upgrade — the host disabled spectating", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker, { spectatorsEnabled: false });
+  const port = await listen(server);
+  try {
+    const ws = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    const refused = await new Promise(resolve => {
+      ws.addEventListener("error", () => resolve(true));
+      ws.addEventListener("open", () => resolve(false));
+    });
+    assert.equal(refused, true, "the host disabled spectators — the connection must be refused, never accepted");
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-037: spectatorsEnabled defaults to true — an attachWsMatchWorker call that doesn't mention it still accepts spectators", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);   // no spectatorsEnabled opt at all
+  const port = await listen(server);
+  try {
+    const ws = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    await new Promise((resolve, reject) => {
+      ws.addEventListener("error", reject);
+      ws.addEventListener("open", resolve);
+    });
+    ws.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-037: multiple spectators can connect at once, each independently receiving state pushes", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const wsA = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    const wsB = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    const firstState = ws => new Promise((resolve, reject) => {
+      ws.addEventListener("error", reject);
+      ws.addEventListener("message", ev => { const msg = JSON.parse(ev.data); if (msg.type === "state") resolve(msg); });
+    });
+    const [msgA, msgB] = await Promise.all([firstState(wsA), firstState(wsB)]);
+    assert.equal(msgA.full, true, "each spectator's own FIRST push must be full, exactly like an ordinary seat's own connection");
+    assert.equal(msgB.full, true);
+    wsA.close(); wsB.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("attachWsMatchWorker(...).close() also closes every live spectator connection, not just seated ones", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const ws = new WebSocket(`ws://localhost:${port}/?spectate=1`);
+    const closed = new Promise(resolve => ws.addEventListener("close", resolve));
+    await new Promise((resolve, reject) => {
+      ws.addEventListener("error", reject);
+      ws.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "welcome") resolve(); });
+    });
+    wsMatch.close();
+    await closed;
+  } finally { server.close(); worker.terminate(); }
+});

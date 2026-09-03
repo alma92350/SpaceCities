@@ -25,6 +25,14 @@ import { sanitizeUnitForExternal, sanitizeBuildingForExternal } from "./persist.
 import { supplyUsed, supplyCap } from "./supply.js";
 import { playerScore } from "./victory.js";
 
+// T-037: the sentinel "seat" name server/matchWorker.js posts a projectForSpectator(...) payload
+// under, and net/wsWorkerTransport.js matches on to fan it out to every connected spectator instead
+// of looking it up in bySeat. Never a real value in state.owners (ADR-0008's own fixed ["player",
+// "ai"] pair today, any future N-seat roster tomorrow) — double-underscored so it reads as an
+// implementation sentinel on sight, the same convention socket.__scHandled already uses in
+// tools/serve.js/net/wsWorkerTransport.js for the same "this is plumbing, not game data" reason.
+export const SPECTATOR_SEAT = "__spectator__";
+
 // order/orderQueue/homeCC/targetId reveal an enemy's current intent, not what fog is supposed to
 // reveal (position, hp, type) — ADR-0009's own list. order/orderQueue are reset to their "idle"
 // shape rather than just omitted, so a consumer reading seen.order doesn't need an own-vs-enemy
@@ -91,6 +99,42 @@ export function projectFor(state, seat) {
     // was itself produced by, one layer up in engine/sim.js. See reassembleProjection below for the
     // client-side half of this.
     events,
+  };
+}
+
+/**
+ * T-037 (FR-7): the ONE deliberate exception to this file's own "deliberately security-critical,
+ * a leak is a defect" header — a spectator gets full-map vision BY DESIGN (the PRD's own words),
+ * so there is no fog to filter by and no seat whose intel needs stripping from anyone else's view.
+ * Every unit/building ships with its full, un-stripped fields (order/orderQueue/homeCC/targetId
+ * included) for BOTH seats, every player's real resources/upgrades are included, and every node —
+ * hidden-and-undiscovered ones too — is included. Still never the map (same deterministic-
+ * regeneration contract as projectFor: the spectator's own client regenerates it from the welcome
+ * handshake's opts, exactly as an ordinary seat's client already does) and still only the dynamic
+ * {id, amount} per node (everything else about it is deterministic from the seed the client
+ * already has). Reuses sanitizeUnitForExternal/sanitizeBuildingForExternal — still real, live
+ * engine objects underneath, so the same "strip transient, non-serializable bookkeeping" pass
+ * projectFor itself needs applies here too; only the FOG-shaped filtering (ownOrVisible, stripIntel)
+ * is skipped.
+ * @param {State} state @returns {Object}
+ */
+export function projectForSpectator(state) {
+  const units = [...state.units.values()].map(u => sanitizeUnitForExternal(u));
+  const buildings = [...state.buildings.values()].map(b => sanitizeBuildingForExternal(b));
+  const nodes = state.map.nodes.map(n => ({ id: n.id, amount: n.amount }));
+
+  /** @type {Object.<string, Object>} */
+  const players = {};
+  for (const id of state.owners) {
+    players[id] = { ...publicPlayer(state, id), resources: { ...state.players[id].resources }, upgrades: { ...state.players[id].upgrades } };
+  }
+
+  return {
+    tick: state.tick, time: state.time, over: state.over, winner: state.winner, winReason: state.winReason ?? null,
+    owners: state.owners,
+    players,
+    units, buildings, nodes,
+    events: [...state.events],
   };
 }
 

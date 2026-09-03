@@ -31,6 +31,7 @@ import { createGameState } from "../engine/state.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createMatch, admit, stepMatch, INPUT_DELAY_TICKS } from "../server/matchLoop.js";
 import { writeSnapshot } from "../server/matchSnapshot.js";
+import { SPECTATOR_SEAT } from "../engine/projection.js";
 
 const WORKER_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "server", "matchWorker.js");
 const SEED = 909090;
@@ -441,5 +442,34 @@ test("T-036 (FR-5): a reconnect AFTER the grace period (AI already took over) ha
     // ticking" test already established.
     const grewAgain = await watchForBuildingGrowth(worker, "ai", 2000);
     assert.equal(grewAgain, false, "once reconnected, the built-in AI must not keep building on its own");
+  } finally { await worker.terminate(); }
+});
+
+/* ---------- T-037 (FR-7): spectator projection, posted every tick regardless of connection count ---------- */
+
+test("T-037 (FR-7): the worker posts a spectator-shaped state message every tick, with full vision — not fogged to either seat", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    const spectatorMsg = await waitFor(worker, m => m.type === "state" && m.seat === SPECTATOR_SEAT);
+    // A fresh match's two bases start far enough apart that neither seat's OWN fog would reveal the
+    // other's — seeing BOTH owners here is what proves this is genuinely unfiltered, not merely
+    // "happens to equal one seat's own fogged view".
+    const owners = new Set(spectatorMsg.proj.buildings.map(b => b.owner));
+    assert.ok(owners.has("player") && owners.has("ai"), "a spectator must see BOTH seats' bases, never just one seat's own fogged view");
+  } finally { await worker.terminate(); }
+});
+
+test("T-037 (FR-7): the worker posts a spectator state message unconditionally — no message from the parent is needed to turn it on", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    // Deliberately sends NOTHING else — the ordinary per-seat pushes prove this the same way (no
+    // "start sending me state" handshake exists for them either): the worker doesn't know or care
+    // whether any real connection — spectator or seat — is currently listening; that's entirely the
+    // parent's (net/wsWorkerTransport.js's) own job, mirroring exactly how a real seat's own state
+    // push already works regardless of whether anyone is connected to receive it.
+    const msg = await waitFor(worker, m => m.type === "state" && m.seat === SPECTATOR_SEAT);
+    assert.equal(typeof msg.proj, "object");
   } finally { await worker.terminate(); }
 });

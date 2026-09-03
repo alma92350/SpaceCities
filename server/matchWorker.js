@@ -46,6 +46,12 @@
                                                    parent; RAW projectFor output, never quantized or
                                                    delta-encoded here (T-028b/c is a per-CONNECTION
                                                    concern, and only the parent knows connections)
+       {type:"state", seat:SPECTATOR_SEAT, proj}  (T-037) the SAME cadence, ONE extra message per
+                                                   tick, carrying projectForSpectator(...)'s full,
+                                                   unfiltered view — posted unconditionally, exactly
+                                                   like a real seat's own push, whether or not any
+                                                   spectator is actually connected right now (again,
+                                                   only the parent knows)
      parent -> worker
        {type:"command", seat, envelope}           relay one client's raw envelope for admission
        {type:"seatDisconnected", seat}   (T-036)   that seat's live connection just closed — starts
@@ -98,7 +104,7 @@ import { randomUUID } from "node:crypto";
 import { createGameState, createAiController } from "../engine/state.js";
 import { runAI } from "../engine/ai.js";
 import { mulberry32 } from "../engine/rng.js";
-import { projectFor } from "../engine/projection.js";
+import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
 import { readSnapshot, writeSnapshot } from "./matchSnapshot.js";
 
@@ -193,6 +199,10 @@ const tickTimer = setInterval(() => {
   for (const seat of match.state.owners) {
     parentPort.postMessage({ type: "state", seat, proj: projectFor(match.state, seat) });
   }
+  // T-037 (FR-7): posted unconditionally, every tick, exactly like each real seat's own push above
+  // — this worker has no idea whether any spectator is actually connected (that bookkeeping is
+  // entirely net/wsWorkerTransport.js's own job, one hop further out), so it doesn't try to know.
+  parentPort.postMessage({ type: "state", seat: SPECTATOR_SEAT, proj: projectForSpectator(match.state) });
   if (match.state.over) {
     clearInterval(tickTimer);
     if (snapshotTimer) clearInterval(snapshotTimer);

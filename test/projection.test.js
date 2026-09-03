@@ -6,7 +6,7 @@ import { generateMap } from "../engine/map.js";
 import { mulberry32 } from "../engine/rng.js";
 import { supplyUsed, supplyCap } from "../engine/supply.js";
 import { playerScore } from "../engine/victory.js";
-import { projectFor, reassembleProjection } from "../engine/projection.js";
+import { projectFor, reassembleProjection, projectForSpectator } from "../engine/projection.js";
 
 /* ============================================================
    ADR-0009's M0 step: projectFor(state, seat) must exist and be tested before anything depends
@@ -253,6 +253,70 @@ test("no-leak crawler: nothing outside the seat's fog survives a JSON round-trip
       }
     }
   })(wire);
+});
+
+/* ============================================================
+   T-037 (FR-7): projectForSpectator(state) — the ONE deliberate exception to this file's own
+   "no-leak" rule. A spectator gets full-map vision by design (the PRD's own words), so every
+   assertion here is the mirror image of the no-leak crawler above: nothing is stripped, nothing is
+   filtered, everything both seats have is visible to a client that plays neither of them.
+   ============================================================ */
+
+test("projectForSpectator includes every unit and building, own-shaped for BOTH seats — no fog filtering, no intel stripping", () => {
+  const { state, visibleEnemy, playerUnit } = buildScenario();
+  const proj = projectForSpectator(state);
+
+  const enemy = proj.units.find(u => u.id === visibleEnemy.id);
+  assert.ok(enemy, "the AI's unit must be present regardless of whether any seat's fog would show it");
+  assert.deepEqual(enemy.order, { type: "attack-move", x: playerUnit.x + 10, y: playerUnit.y });
+  assert.deepEqual(enemy.orderQueue, [{ type: "move", x: playerUnit.x + 50, y: playerUnit.y }]);
+  assert.equal(enemy.homeCC, "some-ai-cc-id");
+  assert.equal(enemy.targetId, "some-target-id");
+
+  const own = proj.units.find(u => u.id === playerUnit.id);
+  assert.deepEqual(own.order, { type: "move", x: playerUnit.x + 5, y: playerUnit.y });
+  assert.equal(own.homeCC, "some-player-cc-id");
+});
+
+test("projectForSpectator includes every AI unit, not just the ones inside some seat's fog", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  const outOfVisionAiUnitIds = [...state.units.values()].filter(u => u.owner === "ai" && u.type !== "skiff").map(u => u.id);
+  assert.ok(outOfVisionAiUnitIds.length > 0, "fixture sanity");
+  const projIds = new Set(proj.units.map(u => u.id));
+  for (const id of outOfVisionAiUnitIds) assert.ok(projIds.has(id), `unit ${id} must be visible to a spectator even though no seat's own fog reveals it`);
+});
+
+test("projectForSpectator includes every player's real resources and upgrades, not the public-only summary", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  assert.equal(proj.players.ai.resources.ore, 424242);
+  assert.equal(proj.players.ai.upgrades.someUpgrade, true);
+  assert.ok(proj.players.player.resources, "the player's own resources must also be present (both seats, symmetrically)");
+});
+
+test("projectForSpectator includes every node, hidden-and-undiscovered ones included — full-map vision has no discovery gate", () => {
+  const { state, undiscovered } = buildScenario();
+  const proj = projectForSpectator(state);
+  assert.ok(proj.nodes.some(n => n.id === undiscovered.id), "an undiscovered hidden node must still be visible to a spectator");
+});
+
+test("projectForSpectator includes every event regardless of location or owner", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  assert.equal(proj.events.length, state.events.length);
+});
+
+test("projectForSpectator never includes the map — same deterministic-regeneration contract as the ordinary per-seat projection", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  assert.equal(proj.map, undefined);
+});
+
+test("projectForSpectator survives a JSON round-trip (no live object references / circular structures left in)", () => {
+  const { state } = buildScenario();
+  const proj = projectForSpectator(state);
+  assert.doesNotThrow(() => JSON.parse(JSON.stringify(proj)));
 });
 
 /* ============================================================

@@ -205,13 +205,16 @@ function respondJson(res, status, body) {
 // The safe subset of a server/lobby.js match record a stranger browsing the open-match list may
 // see: never a seat's own token (a bearer credential — server/lobby.js's own header), never the
 // live createGameStateOpts seed (would let a spectator predict resource-node placement ahead of
-// discovering it in-fog).
+// discovering it in-fog). spectatorsEnabled (T-037) IS meant for exactly this audience — a
+// prospective spectator needs to know before attempting to watch, same reason a seat's own
+// kind/taken state is public.
 function publicMatch(match) {
   return {
     id: match.id, status: match.status, createdAt: match.createdAt,
     planetId: match.config.planetId, sizeMult: match.config.sizeMult ?? 1, resourceMult: match.config.resourceMult ?? 1,
     matchTimeLimit: match.config.matchTimeLimit ?? null,
     seats: match.seats.map(s => ({ kind: s.kind, taken: !!s.owner })),
+    spectatorsEnabled: match.config.spectatorsEnabled !== false,
   };
 }
 
@@ -261,6 +264,11 @@ export async function createAppServer() {
         const seatIndex = OWNER_IDS.indexOf(seat);
         return lobby.reclaimSeat(match.id, seatIndex, url.searchParams.get("token")).ok;
       },
+      // T-037 (FR-7): "unless the host has disabled spectators" — read from this match's OWN
+      // config at the moment its worker actually spawns, same as aiEnabled just above; !== false
+      // so an omitted field (every caller before this task, and any caller that just doesn't care)
+      // defaults to enabled.
+      spectatorsEnabled: match.config.spectatorsEnabled !== false,
     });
     liveMatches.set(match.id, { worker, wsMatch });
   }
@@ -297,6 +305,10 @@ export async function createAppServer() {
         resourceMult: Number.isFinite(body.resourceMult) ? body.resourceMult : undefined,
         matchTimeLimit: Number.isFinite(body.matchTimeLimit) ? body.matchTimeLimit : undefined,
         seatKinds: Array.isArray(body.seatKinds) ? body.seatKinds : undefined,
+        // T-037 (FR-7): opaque to server/lobby.js's own createMatch (it already spreads whatever
+        // config it's given into match.config, same as every other field here) — omitted stays
+        // undefined, which spawnWorkerFor's own `!== false` check already reads as enabled.
+        spectatorsEnabled: typeof body.spectatorsEnabled === "boolean" ? body.spectatorsEnabled : undefined,
       });
     } catch (err) { respondJson(res, 400, { error: "bad-config", message: err.message }); return; }
     // The host auto-claims seat 0 in the SAME request that creates the match — a stranger opening

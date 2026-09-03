@@ -318,6 +318,48 @@ test("a WebSocket upgrade naming a match id that was never created is refused, n
   });
 });
 
+/* ---------- T-037 (FR-7): spectators, wired end to end through the real lobby + app server ---------- */
+
+test("a real spectator connects to a live match created via POST /api/matches and receives full-vision state — spectatorsEnabled defaults to true", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
+    assert.equal(created.json.started, true, "fixture sanity: live immediately");
+    const ws = new WebSocket(`ws://localhost:${port}/ws?match=${created.json.matchId}&spectate=1`);
+    try {
+      const proj = await new Promise((resolve, reject) => {
+        ws.addEventListener("error", reject);
+        ws.addEventListener("message", ev => { const msg = JSON.parse(ev.data); if (msg.type === "state") resolve(msg.proj); });
+      });
+      const owners = new Set(proj.buildings.map(b => b.owner));
+      assert.ok(owners.has("player") && owners.has("ai"), "a spectator reached through the real app server must still see both seats at once");
+    } finally { ws.close(); }
+  });
+});
+
+test("POST /api/matches with spectatorsEnabled:false creates a match that refuses a real spectate connection", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"], spectatorsEnabled: false });
+    const ws = new WebSocket(`ws://localhost:${port}/ws?match=${created.json.matchId}&spectate=1`);
+    const refused = await new Promise(resolve => {
+      ws.addEventListener("error", () => resolve(true));
+      ws.addEventListener("open", () => resolve(false));
+    });
+    assert.equal(refused, true, "the host disabled spectators at creation time — a watch attempt must be refused");
+  });
+});
+
+test("GET /api/matches exposes spectatorsEnabled in the public listing, so a client can know before attempting to watch", async () => {
+  await withApp(async (app, port) => {
+    const enabled = await postJson(port, "/api/matches", { planetId: "ferros" });
+    const disabled = await postJson(port, "/api/matches", { planetId: "ferros", spectatorsEnabled: false });
+    const list = JSON.parse((await get(port, "/api/matches")).body);
+    const mEnabled = list.matches.find(m => m.id === enabled.json.matchId);
+    const mDisabled = list.matches.find(m => m.id === disabled.json.matchId);
+    assert.equal(mEnabled.spectatorsEnabled, true);
+    assert.equal(mDisabled.spectatorsEnabled, false);
+  });
+});
+
 test("createAppServer().close() stops every live match's worker and ws attachment, without touching the http.Server itself", async () => {
   const app = await createAppServer();
   const port = await listen(app.server);

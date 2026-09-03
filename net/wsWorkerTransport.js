@@ -20,19 +20,38 @@
    admit()/toCommandResult() DON'T appear here at all — those run INSIDE the worker
    (server/matchWorker.js imports them directly); this file only ever relays raw envelopes in and
    commandResult messages back out.
+
+   T-037 (FR-7): SPECTATORS, a second, deliberately much simpler connection kind alongside the seat
+   scheme above — `?spectate=1` instead of `?seat=<owner>&token=<token>`, no owners.includes/
+   authorizeSeat check (there is no seat to own or reclaim), no seatConnected/seatDisconnected
+   message to the worker (a spectator is never a seat server/matchWorker.js's own grace-period logic
+   needs to know about), and no command relay AT ALL — conn.onmessage is simply never wired for a
+   spectator connection, so "a spectator cannot issue any command" (the PRD's own exit criterion) is
+   true by construction here, not merely enforced by the worker rejecting an unrecognized seat later.
+   `spectators` (a Set, not a Map — unlike bySeat there is no owner identity to key by, and FR-7
+   allows any NUMBER of them at once) tracks live connections; `lastSnapshotBySpectator` (keyed by
+   the connection object itself) gives each one its OWN independent T-028b delta baseline, reusing
+   buildStateMessage exactly as the seat path does — the wire SHAPE server/matchWorker.js's
+   projectForSpectator(...) output carries (units/buildings/nodes arrays) is identical to an ordinary
+   projectFor(...) payload, just unfiltered, so quantizeForWire/computeDelta need no changes at all
+   to work on it. `spectatorsEnabled` (default true — FR-7's own "unless the host has disabled
+   spectators") is a plain opt, not a callback like authorizeSeat: there is no per-connection identity
+   to authorize, only a single host-wide on/off switch.
    ============================================================ */
 
 "use strict";
 
 import { acceptUpgrade } from "./ws.js";
 import { buildStateMessage } from "./wsServerTransport.js";
+import { SPECTATOR_SEAT } from "../engine/projection.js";
 
 /**
  * @param {import("http").Server} httpServer
  * @param {import("worker_threads").Worker} worker - already spawned (new Worker("server/matchWorker.js", {workerData}))
- * @param {{allowedOrigins?: string[], path?: string, requireMatch?: boolean, authorizeSeat?: (seat: string, url: URL) => boolean}} [opts]
+ * @param {{allowedOrigins?: string[], path?: string, requireMatch?: boolean, authorizeSeat?: (seat: string, url: URL) => boolean, spectatorsEnabled?: boolean}} [opts]
  *   requireMatch/authorizeSeat are T-034's own lobby seam — see this file's header for the
- *   multi-match dispatch they exist for.
+ *   multi-match dispatch they exist for. spectatorsEnabled (T-037, default true) gates the
+ *   `?spectate=1` connection kind — see this file's header for why it's a plain flag, not a callback.
  * @returns {Promise<{owners: string[], createGameStateOpts: Object, matchId: string, close: () => void}>}
  *   resolves once the worker's own "ready" message arrives; owners/createGameStateOpts/matchId are
  *   that same message's own data, exposed here so a caller doesn't need its own separate copy or a
@@ -42,16 +61,21 @@ import { buildStateMessage } from "./wsServerTransport.js";
  *   createGameStateOpts.
  */
 export function attachWsMatchWorker(httpServer, worker, opts = {}) {
-  const { allowedOrigins, path, requireMatch, authorizeSeat } = opts;
+  const { allowedOrigins, path, requireMatch, authorizeSeat, spectatorsEnabled = true } = opts;
 
   return new Promise(resolve => {
     worker.once("message", readyMsg => {
       const { owners, createGameStateOpts, matchId } = readyMsg;
       const bySeat = new Map();               // owner -> live connection, at most one per seat
       const lastSnapshotBySeat = new Map();    // owner -> last quantized snapshot sent (T-028b)
+      const spectators = new Set();                  // every live spectator connection, unbounded (T-037)
+      const lastSnapshotBySpectator = new Map();      // connection -> its own last quantized snapshot (T-028b, per spectator)
 
       function welcomePayload(seat) {
         return JSON.stringify({ type: "welcome", seat, matchId, createGameState: createGameStateOpts });
+      }
+      function spectatorWelcomePayload() {
+        return JSON.stringify({ type: "welcome", seat: null, spectator: true, matchId, createGameState: createGameStateOpts });
       }
 
       function onUpgrade(req, socket, head) {
@@ -65,6 +89,22 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
         if (path && url.pathname !== path) return;
         if (requireMatch && url.searchParams.get("match") !== matchId) return;
         socket.__scHandled = true;   // this request IS for this match — nobody else gets to destroy it
+
+        if (url.searchParams.get("spectate") === "1") {
+          if (!spectatorsEnabled) { socket.destroy(); return; }
+          acceptUpgrade(req, socket, head, { allowedOrigins }).then(result => {
+            if (!result.ok) return;
+            const conn = result.connection;
+            spectators.add(conn);
+            conn.send(spectatorWelcomePayload());
+            // Deliberately NO conn.onmessage: see this file's own header on why "cannot issue any
+            // command" is true by construction here rather than relying on the worker to reject an
+            // unrecognized seat later (defense that never needs testing at that later layer at all).
+            conn.onclose = () => { spectators.delete(conn); lastSnapshotBySpectator.delete(conn); };
+          });
+          return;
+        }
+
         const seat = url.searchParams.get("seat");
         if (!seat || !owners.includes(seat)) { socket.destroy(); return; }
         if (authorizeSeat && !authorizeSeat(seat, url)) { socket.destroy(); return; }
@@ -100,6 +140,12 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
       httpServer.on("upgrade", onUpgrade);
 
       function onWorkerMessage(msg) {
+        if (msg.type === "state" && msg.seat === SPECTATOR_SEAT) {
+          for (const conn of spectators) {
+            conn.send(JSON.stringify({ type: "state", ...buildStateMessage(msg.proj, lastSnapshotBySpectator, conn) }));
+          }
+          return;
+        }
         const conn = bySeat.get(msg.seat);
         if (!conn) return;   // that seat isn't currently connected — nothing to relay to
         if (msg.type === "commandResult") {
@@ -115,14 +161,18 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
         createGameStateOpts,
         matchId,
         /** Stop accepting new upgrades on this httpServer for this match and close every live
-         *  connection. Idempotent. Does NOT terminate the worker — that's owned by whoever spawned
-         *  it, the same way attachWsMatch's own close() never owns the httpServer it was given. */
+         *  connection — every seat's AND every spectator's. Idempotent. Does NOT terminate the
+         *  worker — that's owned by whoever spawned it, the same way attachWsMatch's own close()
+         *  never owns the httpServer it was given. */
         close() {
           httpServer.off("upgrade", onUpgrade);
           worker.off("message", onWorkerMessage);
           for (const conn of bySeat.values()) conn.close();
           bySeat.clear();
           lastSnapshotBySeat.clear();
+          for (const conn of spectators) conn.close();
+          spectators.clear();
+          lastSnapshotBySpectator.clear();
         },
       });
     });
