@@ -64,11 +64,11 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
 
     function entityAt(x, y) {
       for (const u of state.units.values()) {
-        if (u.owner !== "player" && !isVisibleAt(state.fog, u.x, u.y)) continue;
+        if (u.owner !== game.localOwner && !isVisibleAt(state.fog, u.x, u.y)) continue;
         if (Math.hypot(u.x - x, u.y - y) <= UNIT_PICK_RADIUS) return u;
       }
       for (const b of state.buildings.values()) {
-        if (b.owner !== "player" && !isVisibleAt(state.fog, b.x, b.y)) continue;
+        if (b.owner !== game.localOwner && !isVisibleAt(state.fog, b.x, b.y)) continue;
         if (Math.abs(b.x - x) <= b.radius && Math.abs(b.y - y) <= b.radius) return b;
       }
       return null;
@@ -109,7 +109,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
     }
 
     function alivePlayerUnitIds(ids) {
-      return ids.filter(id => { const u = state.units.get(id); return u && u.owner === "player"; });
+      return ids.filter(id => { const u = state.units.get(id); return u && u.owner === game.localOwner; });
     }
 
     function selectedUnits() {
@@ -141,12 +141,12 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
       let picks;
       if (dx < CLICK_THRESHOLD && dy < CLICK_THRESHOLD) {
         const hit = entityAt(box.x1, box.y1);
-        picks = hit && hit.owner === "player" ? [hit.id] : [];
+        picks = hit && hit.owner === game.localOwner ? [hit.id] : [];
       } else {
         const x1 = Math.min(box.x1, box.x2), x2 = Math.max(box.x1, box.x2);
         const y1 = Math.min(box.y1, box.y2), y2 = Math.max(box.y1, box.y2);
         let inBox = [...state.units.values()]
-          .filter(u => u.owner === "player" && u.x >= x1 && u.x <= x2 && u.y >= y1 && u.y <= y2);
+          .filter(u => u.owner === game.localOwner && u.x >= x1 && u.x <= x2 && u.y >= y1 && u.y <= y2);
         // Prioritise the army: a box that catches any fighter drops the workers, so
         // sweeping across your base to grab your army doesn't drag the workers along
         // (standard RTS). A box with no fighters still selects the workers as before.
@@ -180,7 +180,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
     // your units.
     function selectSameTypeAt(p, mapWide = false) {
       const hit = entityAt(p.x, p.y);
-      if (!hit || hit.owner !== "player" || hit.kind !== "unit") return false;
+      if (!hit || hit.owner !== game.localOwner || hit.kind !== "unit") return false;
       // bounds stays null for the map-wide path, skipping the tl/br screen clamp below entirely.
       let bounds = null;
       if (!mapWide) {
@@ -188,7 +188,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
         bounds = { tl: screenToWorld(camera, vw, vh, 0, 0), br: screenToWorld(camera, vw, vh, vw, vh) };
       }
       state.selection = [...state.units.values()]
-        .filter(u => u.owner === "player" && u.type === hit.type
+        .filter(u => u.owner === game.localOwner && u.type === hit.type
           && (!bounds || (u.x >= bounds.tl.x && u.x <= bounds.br.x && u.y >= bounds.tl.y && u.y <= bounds.br.y)))
         .map(u => u.id);
       onChange();
@@ -207,7 +207,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
     function commandAt(p, queue, heading) {
       if (state.selection.length === 1) {
         const building = state.buildings.get(state.selection[0]);
-        if (building && building.owner === "player" && BUILDINGS[building.type].produces) {
+        if (building && building.owner === game.localOwner && BUILDINGS[building.type].produces) {
           const node = nodeAt(p.x, p.y);
           transport.submitCommand({ t: "setRally", building: building.id, x: p.x, y: p.y, node: node ? node.id : null });
           sound.playOrder();
@@ -220,7 +220,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
       if (!selected.length) return;
 
       const target = entityAt(p.x, p.y);
-      if (target && target.owner === "player" && target.kind === "building" && target.constructing) {
+      if (target && target.owner === game.localOwner && target.kind === "building" && target.constructing) {
         const workers = selected.filter(u => canBuildCategory(u.type, BUILDINGS[target.type]?.category));
         if (workers.length) { transport.submitCommand({ t: "assistBuild", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); }
         return;
@@ -233,7 +233,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
       // internals gate on the exact same `recipeOf(b) || BUILDINGS[b.type]?.combust`) — without it, a
       // power station never matched here, so right-clicking a Worker onto a Reactor that needed
       // radioactives just silently walked it there instead of fetching fuel.
-      if (target && target.owner === "player" && target.kind === "building" && !target.constructing
+      if (target && target.owner === game.localOwner && target.kind === "building" && !target.constructing
           && (recipeOf(target) || storeCapOf(target.type) > 0 || BUILDINGS[target.type]?.combust)) {
         const workers = selected.filter(u => canLogisticsType(u.type));
         if (workers.length) { transport.submitCommand({ t: "service", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
@@ -242,7 +242,7 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
       // branch above (a damaged factory keeps its existing "service" behaviour): selected workers
       // patch it up instead — a turret, a Habitat, the Command Center itself, whatever soaked damage
       // or Odyssey wear (engine/commands.js issueRepair).
-      if (target && target.owner === "player" && target.kind === "building" && !target.constructing
+      if (target && target.owner === game.localOwner && target.kind === "building" && !target.constructing
           && target.hp < target.maxHp) {
         const workers = selected.filter(u => canLogisticsType(u.type));
         if (workers.length) { transport.submitCommand({ t: "repair", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
@@ -252,12 +252,12 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
       // issueSetHomeBase) — an explicit override for zoneFirst's usual nearest-CC guess, so the player
       // decides which base's territory a unit's logistics/repair jobs stay loyal to. Passive: it never
       // interrupts whatever the unit is currently doing.
-      if (target && target.owner === "player" && target.kind === "building" && target.type === "command"
+      if (target && target.owner === game.localOwner && target.kind === "building" && target.type === "command"
           && !target.constructing) {
         const eligible = selected.filter(u => canLogisticsType(u.type) || UNITS[u.type]?.role === "support" || UNITS[u.type]?.role === "freighter");
         if (eligible.length) { transport.submitCommand({ t: "setHomeBase", ids: eligible.map(u => u.id), target: target.id }); sound.playOrder(); onChange(); return; }
       }
-      if (target && target.owner !== "player") {
+      if (target && target.owner !== game.localOwner) {
         const attackers = selected.filter(u => UNITS[u.type].attack);
         if (attackers.length) { transport.submitCommand({ t: "attack", ids: attackers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); }
         return;
@@ -267,21 +267,21 @@ export function createInputCommands({ canvas, state, camera, transport, onChange
       // mobile collection point — instead of escorting it. Any non-worker selection (or a selection
       // with no workers at all) falls through to the general friendly-ship escort branch below, so
       // e.g. combat ships still escort a freighter through hostile space.
-      if (target && target.owner === "player" && target.kind === "unit" && UNITS[target.type]?.role === "freighter") {
+      if (target && target.owner === game.localOwner && target.kind === "unit" && UNITS[target.type]?.role === "freighter") {
         const workers = selected.filter(u => canLogisticsType(u.type));
         if (workers.length) { transport.submitCommand({ t: "ferry", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       // A damaged friendly UNIT as the target (not claimed by the ferry branch above — a freighter
       // needing ferried always wins that click): selected workers patch it up directly instead of
       // escorting it (engine/commands.js issueRepair) — the same worker repair job a building gets.
-      if (target && target.owner === "player" && target.kind === "unit" && target.hp < target.maxHp) {
+      if (target && target.owner === game.localOwner && target.kind === "unit" && target.hp < target.maxHp) {
         const workers = selected.filter(u => canLogisticsType(u.type) && u.id !== target.id);
         if (workers.length) { transport.submitCommand({ t: "repair", ids: workers.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }
       // A friendly SHIP as the target: the selection forms a protective escort ring around it and
       // follows it wherever it's ordered (engine/commands.js issueEscort). The target itself is
       // excluded, so right-clicking a ship that's part of the selection escorts it with the rest.
-      if (target && target.owner === "player" && target.kind === "unit") {
+      if (target && target.owner === game.localOwner && target.kind === "unit") {
         const escorts = selected.filter(u => u.id !== target.id);
         if (escorts.length) { transport.submitCommand({ t: "escort", ids: escorts.map(u => u.id), target: target.id, q: queue }); sound.playOrder(); onChange(); return; }
       }

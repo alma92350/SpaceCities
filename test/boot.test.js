@@ -826,3 +826,16 @@ test("T-019b: isUnderAttackEvent fires for anyone else's event, not just a hardc
 test("T-019b: isUnderAttackEvent never fires for the local seat's own event", () => {
   assert.equal(isUnderAttackEvent({ owner: "player" }), false, "you attacking someone is not you being attacked");
 });
+
+// T-030: the SAME reasoning one step further — isUnderAttackEvent reads game.localOwner, not a
+// hardcoded "player", so the local seat isn't always the same literal either. Not pure any more
+// (it now reads session.js's game object), but still testable directly with plain objects, no
+// DOM needed.
+test("T-030: isUnderAttackEvent respects game.localOwner, not a hardcoded \"player\"", () => {
+  const original = game.localOwner;
+  try {
+    game.localOwner = "ai";
+    assert.equal(isUnderAttackEvent({ owner: "ai" }), false, "seat B's own event is never an alarm for seat B");
+    assert.equal(isUnderAttackEvent({ owner: "player" }), true, "seat B is alarmed by the OTHER seat's event now");
+  } finally { game.localOwner = original; }
+});

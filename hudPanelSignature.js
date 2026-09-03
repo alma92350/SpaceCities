@@ -143,10 +143,10 @@ export function counterInfo(def) {
 // buildings they hold — the two inputs to every button's greyed/locked state.
 function availabilitySignature() {
   const { state } = game;
-  const res = state.players.player.resources;
+  const res = state.players[game.localOwner].resources;
   const afford = ALL_COSTS.map(c => (canAfford(res, c) ? 1 : 0)).join("");
   const built = [...new Set([...state.buildings.values()]
-    .filter(b => b.owner === "player" && !b.constructing).map(b => b.type))].sort().join(",");
+    .filter(b => b.owner === game.localOwner && !b.constructing).map(b => b.type))].sort().join(",");
   return afford + "|" + built;
 }
 
@@ -177,7 +177,7 @@ function factorySignature(sel) {
 export function panelSignature(sel, state, input, aggregated) {
   return sel.map(e => `${e.id}:${e.kind === "building" ? e.constructing : ""}`).join(",")
     + "|" + (input.building ? input.building.buildingType : "")
-    + "|" + Object.keys(state.players.player.upgrades).sort().join(",")
+    + "|" + Object.keys(state.players[game.localOwner].upgrades).sort().join(",")
     + "|" + aggregated
     // Rebuild when attack-move arms/disarms so the Attack-Move button's ARMED label +
     // .armed class actually appear — without this the state changed with no panel cue.
@@ -224,14 +224,14 @@ export function panelSignature(sel, state, input, aggregated) {
     + "|" + (game.galaxy && state.diplomacy
         ? `${state.diplomacy.stance < 0.25}:${tributeCost(state.diplomacy)}:${game.galaxy.credits >= tributeCost(state.diplomacy)}`
           + `:${!!state.diplomacy.request}:${state.diplomacy.request
-              ? Math.floor(state.players.player.resources[state.diplomacy.request.com] || 0) >= state.diplomacy.request.qty : ""}`
-          + `:${Object.keys(COM).filter(c => Math.floor(state.players.player.resources[c] || 0) >= TRADE_LOT).join(",")}`
+              ? Math.floor(state.players[game.localOwner].resources[state.diplomacy.request.com] || 0) >= state.diplomacy.request.qty : ""}`
+          + `:${Object.keys(COM).filter(c => Math.floor(state.players[game.localOwner].resources[c] || 0) >= TRADE_LOT).join(",")}`
         : "")
     // Rebuild when the Capital state changes (a CC upgraded to Capital → anchored note), a
     // staged colony ship appears/vanishes (the jump panel's "ship loaded?" hint), or the
     // credits cross the new-world jump cost (those Jump buttons enable/lock).
     + "|" + (game.galaxy
-        ? `${jumpVessel(state) ? 1 : 0}:${game.galaxy.credits >= JUMP_COST ? 1 : 0}:${[...state.buildings.values()].filter(b => b.owner === "player" && b.capital).length}`
+        ? `${jumpVessel(state) ? 1 : 0}:${game.galaxy.credits >= JUMP_COST ? 1 : 0}:${[...state.buildings.values()].filter(b => b.owner === game.localOwner && b.capital).length}`
         : "")
     // Rebuild when a selected colony ship crosses a deploy-placement boundary, so its
     // "Deploy as Command Center" button locks/unlocks live as you move it to clear ground.
@@ -261,7 +261,7 @@ export function panelSignature(sel, state, input, aggregated) {
     + "|" + (() => {
         const f = game.galaxy && sel.find(e => e.kind === "unit" && UNITS[e.type].cargoHold);
         if (!f) return "";
-        const res = state.players.player.resources;
+        const res = state.players[game.localOwner].resources;
         return freightUsed(f) + ":" + JSON.stringify(f.freight) + ":" + loadableComs(state, f).map(c => Math.floor(res[c] || 0)).join(",");
       })()
     // Rebuild the freighter AI-logistics toggle when it flips or the treasury's AI Cores count
@@ -269,7 +269,7 @@ export function panelSignature(sel, state, input, aggregated) {
     // label and the burning/stalled note stay live without a per-tick rebuild.
     + "|" + (() => {
         const f = game.galaxy && sel.find(e => e.kind === "unit" && UNITS[e.type].cargoHold);
-        return f ? `${!!f.aiLogistics}:${Math.round(state.players.player.resources.ai || 0)}` : "";
+        return f ? `${!!f.aiLogistics}:${Math.round(state.players[game.localOwner].resources.ai || 0)}` : "";
       })()
     // Rebuild the freighter Collection-Point toggle when it flips or a shuttle run starts/changes
     // leg, so the ON/OFF label and the "shuttling to CC / back to anchor" note stay live.
@@ -287,7 +287,7 @@ export function panelSignature(sel, state, input, aggregated) {
       })()
     // Rebuild a selected non-recipe output buffer's (the Plasma Rig) intake line as workers clear it.
     + "|" + (() => {
-        const d = sel.find(e => e.kind === "building" && e.owner === "player" && !e.constructing
+        const d = sel.find(e => e.kind === "building" && e.owner === game.localOwner && !e.constructing
           && storeCapOf(e.type) > 0 && !BUILDINGS[e.type].recipe && !BUILDINGS[e.type].isCommandCenter);
         return d ? Math.round((storeTotal(d) / (storeCapOf(d.type) || 1)) * 10) : "";
       })()
@@ -309,7 +309,7 @@ export function panelSignature(sel, state, input, aggregated) {
     // Rebuild the electrify panel when a selected building's electrified flag flips or its live boost
     // band shifts (the grid gaining/losing Power), so the toggle label + gain readout stay current.
     + "|" + (() => {
-        const e = game.galaxy && sel.find(x => x.kind === "building" && x.owner === "player"
+        const e = game.galaxy && sel.find(x => x.kind === "building" && x.owner === game.localOwner
           && !x.constructing && isElectrifiable(x.type));
         return e ? `${!!e.electrified}:${Math.round(electrifyBoost(state, e.owner) * 100)}` : "";
       })()
@@ -341,7 +341,7 @@ export function panelSignature(sel, state, input, aggregated) {
 // plasma torpedoes) — which no market buys — can still be loaded and shipped to the world charging
 // your Antimatter Gate or building Leviathans at a Stardock, their only real sinks.
 export function loadableComs(state, f) {
-  const res = state.players.player.resources;
+  const res = state.players[game.localOwner].resources;
   return [...new Set([
     ...Object.keys(f.freight || {}),
     ...Object.keys(COM).filter(c => c !== "energy" && Math.floor(res[c] || 0) >= 1),

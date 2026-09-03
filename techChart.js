@@ -31,10 +31,6 @@ import { pauseLoop, resumeLoop } from "./boot.js";
 import { flashHint } from "./overlays.js";
 import * as sound from "./sound.js";
 
-// The player only ever looks at their OWN ladder here — same player-centric convention
-// hudSelection.js's whole panel uses (prereqsMet(state, "player", …) throughout).
-const OWNER = "player";
-
 /* ---------- node set: which defs belong on the chart, and in which mode ---------- */
 
 // odysseyOnly buildings/units "never appear in a skirmish build menu" (entities.js's own header
@@ -305,7 +301,7 @@ export function renderTechChart() {
     // Grouped building / unit / tech / doctrine within a tier, so the column reads as a scan,
     // not a shuffled pile — a fixed, stable order regardless of Object.values() enumeration order.
     for (const kind of ["building", "unit", "tech", "upgrade"]) {
-      for (const n of inTier.filter(x => x.kind === kind)) col.appendChild(nodeCard(n, state, OWNER, index));
+      for (const n of inTier.filter(x => x.kind === kind)) col.appendChild(nodeCard(n, state, game.localOwner, index));
     }
     body.appendChild(col);
   }

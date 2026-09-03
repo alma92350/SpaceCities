@@ -459,6 +459,25 @@ test("showGameOver (elimination): keeps the classic conquest copy, and shows no 
   assert.equal(gameOverBreakdownEl(), undefined);
 });
 
+// T-030: WIN_REASON_COPY used to be keyed by the literal winner id ("player"/"ai"), which is only
+// "Victory" from the local viewer's own point of view when the local viewer genuinely IS "player"
+// — for seat B (game.localOwner "ai"), winner:"ai" is a WIN for them, not the "Defeat" text a
+// literal-keyed lookup would have shown. Same fixture/winReason as the test just above, mirrored.
+test("showGameOver: keyed off game.localOwner, not a hardcoded \"player\" — seat B's own win reads as Victory", () => {
+  const state = createGameState({ planetId: "ferros", seed: 301, rng: mulberry32(301) });
+  const original = game.localOwner;
+  try {
+    game.localOwner = "ai";
+    showGameOver("ai", 301, () => {}, { winReason: "elimination", state });
+    assert.equal(gameOverEl.children[0].textContent, "Victory — the enemy's last Command Center is destroyed.",
+      "seat B won this match (winner === game.localOwner), so seat B's own screen must say Victory");
+
+    showGameOver("player", 301, () => {}, { winReason: "elimination", state });
+    assert.equal(gameOverEl.children[0].textContent, "Defeat — your last Command Center was destroyed.",
+      "the OTHER seat won, so seat B's own screen must say Defeat");
+  } finally { game.localOwner = original; }
+});
+
 test("showGameOver (mutual-wipe-score / timeout-score): honest score-decision copy instead of a false conquest claim, plus a real breakdown", () => {
   const state = createGameState({ planetId: "ferros", seed: 302, rng: mulberry32(302) });
 

@@ -276,7 +276,7 @@ function marketTrend(market, com) {
 function marketRowFields(state, com) {
   // Reuse the commodity's data icon (data.js COM) — the same emblem the resource readout uses.
   const meta = COM[com];
-  const res = state.players.player.resources;
+  const res = state.players[game.localOwner].resources;
   const have = Math.floor(res[com] || 0);
   const sellPrice = unitPrice(state.market, com, "sell");
   const buyPrice = unitPrice(state.market, com, "buy");
@@ -367,7 +367,7 @@ function renderMarket(state) {
   panelEl.appendChild(head);
   if (collapsed) return;
 
-  const res = state.players.player.resources;
+  const res = state.players[game.localOwner].resources;
   for (const com of coms) {
     const row = document.createElement("div");
     row.className = "market-row";
@@ -436,7 +436,7 @@ function renderMarket(state) {
 // empty (to load on the way back only) actually arrives empty. Reuses the market row styling.
 function renderFreight(state, f) {
   const cap = UNITS[f.type].cargoHold, used = freightUsed(f), room = freightRoom(f);
-  const res = state.players.player.resources;
+  const res = state.players[game.localOwner].resources;
 
   const head = document.createElement("div");
   head.className = "market-head";
@@ -512,7 +512,7 @@ function renderFreight(state, f) {
 // (engine/commands.js) rather than a bare direct mutation (the Mender/Bomb toggles' usual idiom)
 // because turning it ON has to re-check the research gate.
 function renderAILogistics(state, f) {
-  const upgrades = state.players.player.upgrades;
+  const upgrades = state.players[game.localOwner].upgrades;
   if (!upgrades[FREIGHTER_AI_TECH]) {
     const hint = document.createElement("p");
     hint.className = "hint";
@@ -526,7 +526,7 @@ function renderAILogistics(state, f) {
     { tip: on ? "Stand down — it stops auto-hauling and waits for your orders"
               : `Put it to work in the local haul/service chain like a worker, at its full ${UNITS[f.type].cargoHold} cargo hold per trip` }));
   if (on) {
-    const res = state.players.player.resources;
+    const res = state.players[game.localOwner].resources;
     const rate = aiUpkeepRate(f);
     const stalled = (res.ai || 0) <= 1e-6;
     const row = document.createElement("div");
@@ -655,7 +655,7 @@ function renderFavorRequest(state) {
   const req = state.diplomacy.request;
   if (!req || state.time >= req.until) return;
   const meta = COM[req.com];
-  const have = Math.floor(state.players.player.resources[req.com] || 0);
+  const have = Math.floor(state.players[game.localOwner].resources[req.com] || 0);
   const afford = have >= req.qty;
 
   const head = document.createElement("div");
@@ -684,7 +684,7 @@ function favorRowText(state, req) {
 // already gift-able for the full TRADE_LOT. Silent (no header, no rows) once nothing qualifies,
 // so a bare-stockpile early game doesn't clutter the panel with an empty picker.
 function renderGiftPicker(state) {
-  const res = state.players.player.resources;
+  const res = state.players[game.localOwner].resources;
   const held = Object.keys(COM).filter(c => Math.floor(res[c] || 0) >= TRADE_LOT);
   if (!held.length) return;
 
@@ -777,7 +777,7 @@ function renderLanes(state, spaceport) {
 
     // Every player freighter parked at THIS pad and not already committed to some lane.
     const available = [...state.units.values()].filter(u =>
-      u.owner === "player" && UNITS[u.type]?.cargoHold && !u.laneId
+      u.owner === game.localOwner && UNITS[u.type]?.cargoHold && !u.laneId
       && Math.hypot(u.x - spaceport.x, u.y - spaceport.y) <= JUMP_LOAD_RADIUS);
     for (const u of available) {
       panelEl.appendChild(makeButton(`Assign ${UNITS[u.type].name} (${UNITS[u.type].cargoHold} cap)`,
@@ -793,7 +793,7 @@ function renderLanes(state, spaceport) {
   // shipping cargo to a world you don't hold has nowhere useful to land.
   const targets = g.worlds.filter(w => w !== fromId).filter(w => {
     const s = g.planets.get(w);
-    return s && [...s.buildings.values()].some(b => b.owner === "player");
+    return s && [...s.buildings.values()].some(b => b.owner === game.localOwner);
   });
   for (const w of targets) {
     panelEl.appendChild(makeButton(`+ New Lane ▸ ${planetName(w)}`,
@@ -902,7 +902,7 @@ function renderCapital(state, cc) {
     panelEl.appendChild(row);
     return;
   }
-  if (![...state.buildings.values()].some(b => b.owner === "player" && b.capital)) {
+  if (![...state.buildings.values()].some(b => b.owner === game.localOwner && b.capital)) {
     panelEl.appendChild(makeButton(`◆ Upgrade to Capital (${costText(CAPITAL_UPGRADE_COST)})`,
       () => { upgradeToCapital(state, cc); },
       { cost: CAPITAL_UPGRADE_COST, icon: { kind: "building", type: "command" },
@@ -966,7 +966,7 @@ function producibleAt(state, type) {
     if (def.odysseyOnly && !state.endless && !game.galaxy) return false;
     // A specialty unit whose cost commodity this world can neither mine nor stock is hidden rather
     // than shown forever-greyed — the engine's own availability rule (engine/market.js).
-    return Object.keys(def.cost).every(c => commodityAvailable(state, "player", c));
+    return Object.keys(def.cost).every(c => commodityAvailable(state, game.localOwner, c));
   });
 }
 
@@ -1080,7 +1080,7 @@ function renderCommandCenter(state, cc) {
   // How many units are explicitly pinned to THIS Command Center as their home base
   // (engine/commands.js issueSetHomeBase) — right-click this CC with eligible units selected to
   // add more; right-click a DIFFERENT one to move them there instead.
-  const homedHere = [...state.units.values()].filter(u => u.owner === "player" && u.homeCC === cc.id).length;
+  const homedHere = [...state.units.values()].filter(u => u.owner === game.localOwner && u.homeCC === cc.id).length;
   if (homedHere > 0) {
     const homeRow = document.createElement("div");
     homeRow.className = "sel-note good";
@@ -1100,7 +1100,7 @@ function renderCommandCenter(state, cc) {
   if (sectionToggle("cc:produce", "Produce", ccCount)) {
     for (const t of ccUnits) {
       const def = UNITS[t];
-      const locked = !prereqsMet(state, "player", def);
+      const locked = !prereqsMet(state, game.localOwner, def);
       panelEl.appendChild(prodButton(`Produce ${def.name} (${costText(def.cost)})`,
         () => game.transport.submitCommand({ t: "queueProduction", building: cc.id, u: t }),
         { cost: def.cost, tip: unitTip(def), locked, lockTip: locked ? lockTipFor(def) : null, icon: { kind: "unit", type: t } }));
@@ -1126,8 +1126,8 @@ function renderCommandCenter(state, cc) {
 
 /** Refinery: the doctrine research list, tier- and doctrine-gated. */
 function renderRefinery(state, refinery) {
-  const upgrades = state.players.player.upgrades;
-  const chosen = committedDoctrine(state, "player");   // null until the first research commits (or queues) a doctrine
+  const upgrades = state.players[game.localOwner].upgrades;
+  const chosen = committedDoctrine(state, game.localOwner);   // null until the first research commits (or queues) a doctrine
   const label = { assault: "Assault", bulwark: "Bulwark", logistics: "Logistics" };
   const queue = refinery.researchQueue || [];
   const queued = new Set(queue.map(j => j.techId));
@@ -1148,7 +1148,7 @@ function renderRefinery(state, refinery) {
         return;
       }
       const doctrineLocked = chosen && chosen !== u.doctrine;
-      const tierLocked = !prereqsMet(state, "player", u);
+      const tierLocked = !prereqsMet(state, game.localOwner, u);
       const locked = doctrineLocked || tierLocked;
       const lockTip = doctrineLocked ? `Locked — committed to the ${label[chosen]} doctrine`
         : tierLocked ? `Requires ${UPGRADES[(u.requires || [])[0]]?.name || "its Tier 1"}` : null;
@@ -1161,7 +1161,7 @@ function renderRefinery(state, refinery) {
 
 /** Datacenter (Odyssey): the tech-tree research list. */
 function renderDatacenter(state, datacenter) {
-  const upgrades = state.players.player.upgrades;
+  const upgrades = state.players[game.localOwner].upgrades;
   const queue = datacenter.researchQueue || [];
   const queued = new Set(queue.map(j => j.techId));
   // Cancelable research queue with refunds: one row per queued node, each with its own ×
@@ -1181,7 +1181,7 @@ function renderDatacenter(state, datacenter) {
         return;
       }
       // Available if every prereq is researched, a completed building, or queued ahead.
-      const ready = (t.requires || []).every(r => queued.has(r) || prereqsMet(state, "player", { requires: [r] }));
+      const ready = (t.requires || []).every(r => queued.has(r) || prereqsMet(state, game.localOwner, { requires: [r] }));
       panelEl.appendChild(makeButton(`Research ${t.name} (${costText(t.cost)})`,
         () => game.transport.submitCommand({ t: "researchTech", building: datacenter.id, tech: t.id }),
         { cost: t.cost, tip: t.desc, locked: !ready, lockTip: !ready ? lockTipFor(t) : null, icon: t.ico ? { emoji: t.ico } : null }));
@@ -1195,7 +1195,7 @@ function renderStardock(state, stardock) {
   // hand-unrolled blocks — the third shape this same roster used to be written in.
   for (const t of producibleAt(state, "stardock")) {
     const def = UNITS[t];
-    const locked = !prereqsMet(state, "player", def);
+    const locked = !prereqsMet(state, game.localOwner, def);
     // The doomsday device gets an extra line about its blast (engine/bomb.js; it is built unarmed,
     // and arming is a separate step once it's out on the field).
     const tip = t === "heliumbomb"
@@ -1469,7 +1469,7 @@ function renderBuildMenu(state, builders, input) {
   const canBuild = t => builders.some(b => canBuildCategory(b.type, BUILDINGS[t].category));
   const buildBtn = t => {
     const def = BUILDINGS[t];
-    const locked = !prereqsMet(state, "player", def);
+    const locked = !prereqsMet(state, game.localOwner, def);
     return prodButton(`Build ${def.name} (${costText(def.cost)})`,
       () => input.startBuild(t),
       { cost: def.cost, tip: unitTip(def), locked, lockTip: locked ? lockTipFor(def) : null, icon: { kind: "building", type: t } });
@@ -1500,7 +1500,7 @@ function renderBuildMenu(state, builders, input) {
   // What's actually SHOWN (not just category-eligible) in each mode — the header's count
   // mirrors this exactly, so "▸ Build (N)" never promises more than expanding reveals.
   const shownGroups = state.endless
-    ? GROUPS.map(([title, types]) => [title, types.filter(t => canBuild(t) && (alwaysShow.has(t) || prereqsMet(state, "player", BUILDINGS[t])))])
+    ? GROUPS.map(([title, types]) => [title, types.filter(t => canBuild(t) && (alwaysShow.has(t) || prereqsMet(state, game.localOwner, BUILDINGS[t])))])
         .filter(([, shown]) => shown.length)
     : [[null, ["barracks", "foundry", "arsenal", "refinery", "turret", "bastille", "aegisbastion", "habitat", "command"].filter(canBuild)]];
   // Collapsible PER GROUP: a generalist Worker (every category) or a mixed selection can offer
@@ -1631,7 +1631,7 @@ function rebuildSelectionPanel(sel) {
     if (sectionToggle("barracks:produce", "Produce", trainable.length)) {
       for (const t of trainable) {
         const def = UNITS[t];
-        const locked = !prereqsMet(state, "player", def);
+        const locked = !prereqsMet(state, game.localOwner, def);
         panelEl.appendChild(prodButton(`Produce ${def.name} (${costText(def.cost)})`,
           () => game.transport.submitCommand({ t: "queueProduction", building: barracks.id, u: t }),
           { cost: def.cost, tip: unitTip(def), locked, lockTip: locked ? lockTipFor(def) : null, icon: { kind: "unit", type: t } }));
@@ -1700,7 +1700,7 @@ function rebuildSelectionPanel(sel) {
   // Any non-recipe building with a finite output buffer (storeCap, engine/entities.js) that
   // isn't the Command Center: surface how full it is and whether it's full, same finite-storage
   // idiom as the factory/Rig panels above.
-  const drop = sel.find(e => e.kind === "building" && e.owner === "player" && !e.constructing
+  const drop = sel.find(e => e.kind === "building" && e.owner === game.localOwner && !e.constructing
     && storeCapOf(e.type) > 0 && !BUILDINGS[e.type].recipe && !BUILDINGS[e.type].isCommandCenter);
   if (drop) {
     const cap = storeCapOf(drop.type), have = storeTotal(drop);
@@ -1717,7 +1717,7 @@ function rebuildSelectionPanel(sel) {
   // be wired into the power grid to run 30% better (produce faster; a Habitat houses 30% more), at the
   // cost of a steady grid draw. The bonus scales with the grid throttle, so it's only worth it once you
   // have Power to spare. Player + Odyssey only (game.galaxy), so a skirmish never surfaces the toggle.
-  const elec = game.galaxy && sel.find(e => e.kind === "building" && e.owner === "player"
+  const elec = game.galaxy && sel.find(e => e.kind === "building" && e.owner === game.localOwner
     && !e.constructing && isElectrifiable(e.type));
   if (elec) {
     const on = !!elec.electrified;
@@ -1726,7 +1726,7 @@ function rebuildSelectionPanel(sel) {
     panelEl.appendChild(makeButton(on ? "⚡ Electrified: ON" : "⚡ Electrify: OFF",
       () => {
         const v = !elec.electrified;
-        const ids = sel.filter(e => e.kind === "building" && e.owner === "player" && isElectrifiable(e.type)).map(e => e.id);
+        const ids = sel.filter(e => e.kind === "building" && e.owner === game.localOwner && isElectrifiable(e.type)).map(e => e.id);
         game.transport.submitCommand({ t: "setElectrified", ids, on: v });
         renderHUD();
       },
@@ -1833,7 +1833,7 @@ function rebuildSelectionPanel(sel) {
   const recyclable = sel.filter(e => canRecycle(e));
   if (recyclable.length) {
     const one = recyclable.length === 1 ? recyclable[0] : null;
-    const frac = recycleFrac(state, "player", recyclable[0]);
+    const frac = recycleFrac(state, game.localOwner, recyclable[0]);
     // recycleValue folds in whatever the entity is CURRENTLY holding (a factory's larder/backlog,
     // a freighter's freight, a worker's cargo) at full value, on top of the cost-based fraction —
     // so a single-entity preview shows the real total the player will actually get back, not just
@@ -1947,7 +1947,7 @@ function makeButton(label, onClick, { cost = null, tip = null, locked = false, l
     iconEl.className = "btn-icon btn-emoji";
     iconEl.textContent = icon.emoji;
   } else if (icon && icon.kind && icon.type) {
-    const url = spriteIcon(icon.kind, icon.type, state.players.player.color);
+    const url = spriteIcon(icon.kind, icon.type, state.players[game.localOwner].color);
     if (url) { iconEl = document.createElement("img"); iconEl.className = "btn-icon"; iconEl.src = url; iconEl.alt = ""; }
   }
   if (iconEl) {
@@ -1961,7 +1961,7 @@ function makeButton(label, onClick, { cost = null, tip = null, locked = false, l
   }
   const tipText = locked && lockTip ? lockTip : (tip || "");
   btn.title = tipText;
-  const affordable = !cost || canAfford(state.players.player.resources, cost);
+  const affordable = !cost || canAfford(state.players[game.localOwner].resources, cost);
   if (locked || !affordable) {
     btn.classList.add("disabled");   // a tech-locked or unaffordable option greys and just buzzes on click
     // On TOUCH there's no hover, so the reason a button is greyed is otherwise unreachable —

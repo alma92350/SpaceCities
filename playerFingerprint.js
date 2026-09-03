@@ -46,6 +46,11 @@ function costValue(cost) {
 /**
  * Measure how `owner` played, from ground truth.
  *
+ * T-030: `owner` defaults to "player" deliberately, not `game.localOwner` — this module stays
+ * pure and session-free (this file's own header: workable from a Worker, no DOM/session to read),
+ * so a caller that wants the LOCAL viewer's own fingerprint (overlays.js's "Save an AI that plays
+ * like you") passes `game.localOwner` in explicitly, same as any other caller measuring a
+ * specific, known side.
  * @param {State} state @param {string} [owner]
  * @returns {{ posture: number|null, mil: number, eco: number, workers: number, army: number,
  *   turrets: number, barracks: number, bases: number, mix: string[], total: number }}

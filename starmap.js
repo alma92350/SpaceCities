@@ -53,9 +53,9 @@ function alertBadge(planetId) {
 function garrisonOf(state) {
   let cc = 0, supply = 0;
   for (const b of state.buildings.values())
-    if (b.owner === "player" && b.type === "command" && !b.constructing) cc++;
+    if (b.owner === game.localOwner && b.type === "command" && !b.constructing) cc++;
   for (const u of state.units.values())
-    if (u.owner === "player" && UNITS[u.type]?.role === "combat") supply += UNITS[u.type].supplyCost || 0;
+    if (u.owner === game.localOwner && UNITS[u.type]?.role === "combat") supply += UNITS[u.type].supplyCost || 0;
   return { cc, supply };
 }
 

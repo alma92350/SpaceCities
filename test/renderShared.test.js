@@ -8,6 +8,7 @@ import {
 // Pure engine modules — no DOM anywhere in their import graph, safe to import statically here.
 import { createGameState } from "../engine/state.js";
 import { updateFog } from "../engine/fog.js";
+import { game } from "../session.js";
 
 const closeTo = (actual, expected, eps = 1e-9) =>
   assert.ok(Math.abs(actual - expected) < eps, `expected ${actual} to be within ${eps} of ${expected}`);
@@ -380,4 +381,17 @@ test("hiddenByFog's observer mode reveals everything without touching the fog it
 
   assert.equal(hiddenByFog(state, { owner: "ai" }, far.x, far.y, true), false, "observer sees it");
   assert.equal(JSON.stringify(state.fog), before, "and the fog itself is untouched by the look");
+});
+
+// T-030: hiddenByFog's "is this mine" half reads game.localOwner, not a hardcoded "player" — a
+// seat B viewer (localOwner "ai") must never hide their OWN entities the way a seat A viewer's
+// hardcoded check would have.
+test("T-030: hiddenByFog respects game.localOwner, not a hardcoded \"player\"", () => {
+  const original = game.localOwner;
+  try {
+    game.localOwner = "ai";
+    const dark = { fog: { w: 1, h: 1, vis: new Uint8Array(1) } };
+    assert.equal(hiddenByFog(dark, { owner: "ai" }, 0, 0), false, "seat B's own entity is never hidden from seat B");
+    assert.equal(hiddenByFog(dark, { owner: "player" }, 0, 0), true, "an unexplored enemy entity is hidden, same rule as before, just the other way round");
+  } finally { game.localOwner = original; }
 });

@@ -20,6 +20,7 @@ import { powerCap, powerDraw } from "./engine/industry.js";
 import { repairCost, repairConvoy, departNow } from "./engine/scenarios.js";
 import { stanceLabel, PEACE_THRESHOLD } from "./engine/diplomacy.js";
 import { playerScore, DEFAULT_MATCH_TIME_LIMIT } from "./engine/victory.js";
+import { otherOwner } from "./engine/aiCommon.js";
 import { COM } from "./data.js";
 import { clampCamera } from "./camera.js";
 // The per-selection button/row subsystem lives in hudSelection.js (this file drives
@@ -44,7 +45,7 @@ if (departBtn) departBtn.addEventListener("click", () => { if (game.state) { dep
 // state.buildings when this fires, so its position is looked up live rather than cached.
 if (gateChipEl) gateChipEl.addEventListener("click", () => {
   if (!game.input || !game.state) return;
-  const wonder = [...game.state.buildings.values()].find(b => BUILDINGS[b.type]?.wonder && b.owner === "player" && !b.constructing);
+  const wonder = [...game.state.buildings.values()].find(b => BUILDINGS[b.type]?.wonder && b.owner === game.localOwner && !b.constructing);
   if (!wonder) return;
   const cam = game.input.getCamera();
   cam.x = wonder.x;
@@ -96,7 +97,7 @@ export function resetPanelSignature() {
 function sampleFlowLedger(state) {
   if (lastFlowSampleTime !== null && state.time - lastFlowSampleTime < FLOW_SAMPLE_INTERVAL) return;
   lastFlowSampleTime = state.time;
-  flowHistory.push({ time: state.time, resources: { ...state.players.player.resources } });
+  flowHistory.push({ time: state.time, resources: { ...state.players[game.localOwner].resources } });
   if (flowHistory.length > FLOW_HISTORY_LEN) flowHistory.shift();
 }
 
@@ -134,7 +135,7 @@ function formatFlowRate(rounded) {
 function liveConsumers(state) {
   const coms = new Set();
   for (const b of state.buildings.values()) {
-    if (b.owner !== "player" || b.constructing) continue;
+    if (b.owner !== game.localOwner || b.constructing) continue;
     const def = BUILDINGS[b.type];
     if (!def) continue;
     if (def.combust) for (const com of def.combust.fuels) coms.add(com);
@@ -171,15 +172,15 @@ export function renderHUD() {
     idleProductionEl.classList.add("hidden");
     clockEl.textContent = "";
   } else {
-    const res = state.players.player.resources;
+    const res = state.players[game.localOwner].resources;
 
     // Sample the flow ledger every tick — see sampleFlowLedger's own comment for why this sits
     // here, unconditionally, ahead of the signature guard below rather than inside it.
     sampleFlowLedger(state);
 
-    const used = supplyUsed(state, "player"), cap = supplyCap(state, "player");
+    const used = supplyUsed(state, game.localOwner), cap = supplyCap(state, game.localOwner);
     const blocked = performance.now() < game.supplyBlockedUntil;
-    const pCap = game.galaxy ? powerCap(state, "player") : 0, pDraw = game.galaxy ? powerDraw(state, "player") : 0;
+    const pCap = game.galaxy ? powerCap(state, game.localOwner) : 0, pDraw = game.galaxy ? powerDraw(state, game.localOwner) : 0;
     const stance = game.galaxy && state.diplomacy ? state.diplomacy.stance : null;
 
     // Persistent Antimatter Gate charge strip (docs/improvement-proposals.md lines 745-753):
@@ -191,7 +192,7 @@ export function renderHUD() {
     // excluded to match chargingWonderOf/the wonder panel's own precedent: a building site isn't
     // charging or provoking anyone yet.
     const wonder = game.galaxy
-      ? [...state.buildings.values()].find(b => BUILDINGS[b.type]?.wonder && b.owner === "player" && !b.constructing)
+      ? [...state.buildings.values()].find(b => BUILDINGS[b.type]?.wonder && b.owner === game.localOwner && !b.constructing)
       : null;
     let gatePct = 0, gateStalled = false;
     if (wonder) {
@@ -311,15 +312,18 @@ export function renderHUD() {
       const m = Math.floor(clamped / 60), s = Math.floor(clamped % 60).toString().padStart(2, "0");
       clockEl.textContent = `-${m}:${s}`;
       clockEl.classList.add("endgame");
-      const you = Math.round(playerScore(state, "player")), foe = Math.round(playerScore(state, "ai"));
+      const you = Math.round(playerScore(state, game.localOwner)), foe = Math.round(playerScore(state, otherOwner(game.localOwner)));
       // In a WATCHED match there is no "you" — both seats are AI (docs/competitions-and-elo.md
       // Phase 5), so name the two entrants instead of addressing a commander who isn't playing.
       // game.spectateMatch carries them; it's null in every ordinary game, which keeps the
       // first-person copy exactly as it was for the mode that actually has a human in it.
       const watching = game.spectateMatch;
+      // T-030: "Opponent" rather than a hardcoded "AI" — true today (the opponent always IS the
+      // Odyssey/skirmish AI, since no live multiplayer boot path exists yet), and still honest
+      // once one does (the other seat is a live human then, not a computer).
       scoreBarEl.textContent = watching
         ? `⚔ ${watching.aName} ${you} · ${watching.bName} ${foe}`
-        : `⚔ You ${you} · AI ${foe}`;
+        : `⚔ You ${you} · Opponent ${foe}`;
       scoreBarEl.classList.remove("hidden");
     } else {
       const mins = Math.floor(state.time / 60);
@@ -333,7 +337,7 @@ export function renderHUD() {
     // the count in the topbar (click, or `, to jump to the next one).
     let idle = 0;
     for (const u of state.units.values()) {
-      if (u.owner === "player" && UNITS[u.type]?.role === "worker" && !u.order && (!u.orderQueue || !u.orderQueue.length)) idle++;
+      if (u.owner === game.localOwner && UNITS[u.type]?.role === "worker" && !u.order && (!u.orderQueue || !u.orderQueue.length)) idle++;
     }
     idleWorkersEl.textContent = `⚒ ${idle} idle`;
     // Hidden outright while WATCHING a match. These two chips are the only remaining route into
@@ -349,7 +353,7 @@ export function renderHUD() {
     // main.js) cycles to and selects the next one.
     let idleProduction = 0;
     for (const b of state.buildings.values()) {
-      if (b.owner === "player" && !b.constructing && BUILDINGS[b.type]?.produces && b.queue.length === 0) idleProduction++;
+      if (b.owner === game.localOwner && !b.constructing && BUILDINGS[b.type]?.produces && b.queue.length === 0) idleProduction++;
     }
     idleProductionEl.textContent = `🏭 ${idleProduction} idle`;
     idleProductionEl.classList.toggle("hidden", idleProduction === 0 || spectating);   // see the idle-worker chip above
@@ -426,7 +430,7 @@ function renderScenarioBar(state) {
     return;
   }
 
-  const alive = [...state.units.values()].filter(u => u.owner === "player" && u.type === "freighter").length;
+  const alive = [...state.units.values()].filter(u => u.owner === game.localOwner && u.type === "freighter").length;
   const shown = sc.outcome ? sc.delivered : alive;
   scenarioStatusEl.textContent =
     `Leg ${legNo}/${legs} · Freighters ${shown}/${sc.freightersTotal} · ⏱ ${clockStr(remain)} · 💰 ${Math.round(sc.budget)}`;

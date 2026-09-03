@@ -11,6 +11,7 @@
 "use strict";
 
 import { UNITS, rankMults } from "./engine/entities.js";
+import { game } from "./session.js";
 import { DETAIL, facing, updateFacing, lerpXY, inView, drawHealthBar,
          shade, polygonPoints, pathPoints, toWorld, pathOriented, hiddenByFog } from "./renderShared.js";
 
@@ -88,7 +89,7 @@ export function drawUnits(ctx, state, view, alpha = 1, selSet, observerMode = fa
     }
     // A small downward pip marks hostile units — a SHAPE cue, so telling friend from foe in a
     // melee doesn't rely on the cyan-vs-red colour alone. Friendlies carry no marker.
-    if (u.owner !== "player") drawEnemyPip(ctx, d.x, d.y + def.radius + 6);
+    if (u.owner !== game.localOwner) drawEnemyPip(ctx, d.x, d.y + def.radius + 6);
     // Veterancy chevrons (docs/improvement-proposals.md "Veterancy ranks"): drawn for EITHER
     // side (an enemy veteran's chevrons are exactly the intel a scout brings back, same as the
     // enemy pip above), and independent of drawHealthBar's own "hide at full hp" rule — a rank

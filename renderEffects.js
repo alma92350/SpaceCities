@@ -10,6 +10,7 @@
 "use strict";
 
 import { COM } from "./data.js";
+import { game } from "./session.js";
 import { UNITS, BUILDINGS } from "./engine/entities.js";
 import { isNodeDiscovered } from "./engine/fog.js";
 import { powerEfficiency } from "./engine/industry.js";
@@ -410,13 +411,13 @@ function drawGhostPowerCue(ctx, state, ghost, def) {
   let nearest = null, bestD = Infinity, nearestScale = 1;
   for (const b of state.buildings.values()) {
     const bd = BUILDINGS[b.type];
-    if (b.owner !== "player" || b.constructing || !(bd && bd.energyGrants > 0)) continue;
+    if (b.owner !== game.localOwner || b.constructing || !(bd && bd.energyGrants > 0)) continue;
     const scale = bd.powerRange || 1;
     const d = Math.hypot(b.x - ghost.x, b.y - ghost.y) / scale;
     if (d < bestD) { bestD = d; nearest = b; nearestScale = scale; }
   }
 
-  const tier = powerEfficiency(state, "player", ghost.x, ghost.y);
+  const tier = powerEfficiency(state, game.localOwner, ghost.x, ghost.y);
   const col = POWER_TIER_COLOR[tier.name];
 
   if (nearest) {
@@ -560,7 +561,7 @@ export function drawSelectionRings(ctx, state, alpha = 1) {
 export function drawRallyPoint(ctx, state) {
   if (state.selection.length !== 1) return;
   const building = state.buildings.get(state.selection[0]);
-  if (!building || building.owner !== "player" || !BUILDINGS[building.type].produces) return;
+  if (!building || building.owner !== game.localOwner || !BUILDINGS[building.type].produces) return;
 
   // Guard before destructuring: `rally` is optional on a Building and engine/persist.js's
   // cleanEntity never defaults it, so an older or hand-edited save reaches here with none. A
@@ -597,7 +598,7 @@ export function drawWaypoints(ctx, state) {
   ctx.setLineDash([4, 5]);
   for (const id of state.selection) {
     const unit = state.units.get(id);
-    if (!unit || unit.owner !== "player" || !unit.orderQueue || unit.orderQueue.length === 0) continue;
+    if (!unit || unit.owner !== game.localOwner || !unit.orderQueue || unit.orderQueue.length === 0) continue;
 
     const stops = [];
     for (const order of [unit.order, ...unit.orderQueue]) {
@@ -634,7 +635,7 @@ export function drawEscortLinks(ctx, state) {
   ctx.lineWidth = 1.1;
   for (const id of state.selection) {
     const u = state.units.get(id);
-    if (!u || u.owner !== "player" || !u.order || u.order.type !== "escort") continue;
+    if (!u || u.owner !== game.localOwner || !u.order || u.order.type !== "escort") continue;
     const t = state.units.get(u.order.targetId);
     if (!t || t.hp <= 0) continue;
     ctx.beginPath(); ctx.moveTo(u.x, u.y); ctx.lineTo(t.x, t.y); ctx.stroke();

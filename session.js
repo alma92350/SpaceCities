@@ -14,6 +14,20 @@
 
 export const game = {
   state: null,   // the current engine game state (engine/state.js), or null on the splash screen
+  // T-030 (ADR-0008's own "client localOwner seam", the largest single work item its Phase 1 row
+  // names): which owner id in `state.owners` IS the local human at this browser. Every existing
+  // boot path — single-player, Odyssey, a competition fixture, a spectated match — is UNCHANGED
+  // by this seam and always leaves it at the default "player", exactly the literal every one of
+  // those call sites hardcoded before this field existed. It becomes "ai" only for a live
+  // multiplayer connection's SECOND seat, once a lobby/join flow (Phase 4) actually sets it from
+  // the transport's own reported seat — ADR-0008's Option B interim design keeps state.owners as
+  // the verbatim ["player","ai"] pair, so seat B's local human is genuinely owner "ai" there, not
+  // a UI relabeling. UI code reads this — never the literal "player" — for "is this mine",
+  // reserving the literal "ai" for the ACTUAL Odyssey/skirmish AI opponent's own logic (untouched,
+  // still real single-player AI code) and for the handful of sites ADR-0008 calls out as needing
+  // individual redesign rather than a mechanical seam (an AI-difficulty display has no meaning
+  // once the "other side" is a live human, for instance).
+  localOwner: "player",
   input: null,   // the current input controller (input.js attachInput), or null before a game
   // The ADR-0004 seam every command-issuing UI module (input.js, inputCommands.js,
   // hudSelection.js) submits through — never null once a game is running, though which kind it

@@ -14,6 +14,8 @@
 
 "use strict";
 
+import { game } from "./session.js";
+
 import { isVisibleAt } from "./engine/fog.js";
 
 // A light, near-white accent used for hull details (sensor eyes, canopy
@@ -251,5 +253,5 @@ export function drawLabelChip(ctx, label, x, y, color, plate = "rgba(5, 7, 15, 0
 // state.fog, so what the player's own fog records is untouched (see observer.js's header).
 /** @param {State} state @param {{owner:string}} e @param {number} x @param {number} y @param {boolean} [observerMode] @returns {boolean} */
 export function hiddenByFog(state, e, x, y, observerMode = false) {
-  return e.owner !== "player" && !observerMode && !isVisibleAt(state.fog, x, y);
+  return e.owner !== game.localOwner && !observerMode && !isVisibleAt(state.fog, x, y);
 }

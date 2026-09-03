@@ -119,6 +119,17 @@ const FIXTURES = {
     s.selection = [[...s.buildings.values()].find(b => b.type === "command").id];
   },
 
+  // T-030: the SAME command-center panel, but as SEAT B sees it — game.localOwner "ai", an
+  // "ai"-owned Command Center selected. Must render as an OWN, ordinary command-center panel
+  // (build/produce controls, own economy readouts) — never as "an enemy building"'s stripped-down
+  // panel (compare that fixture below), which is exactly the bug a hardcoded "player" seam would
+  // have produced for this seat.
+  "command center, seat B (localOwner ai)": s => {
+    game.localOwner = "ai";
+    Object.assign(s.players.ai.resources, RICH);
+    s.selection = [[...s.buildings.values()].find(b => b.type === "command" && b.owner === "ai").id];
+  },
+
   "command center with a queued worker": s => {
     Object.assign(s.players.player.resources, RICH);
     const cc = [...s.buildings.values()].find(b => b.type === "command");
@@ -197,6 +208,10 @@ const FIXTURES = {
 
 function build(name) {
   const state = base(7000 + name.length);
+  // T-030: reset before EVERY fixture, not just the ones that care — a fixture that deliberately
+  // sets game.localOwner = "ai" (below) must never leak into whichever fixture Object.keys()
+  // happens to iterate next, regardless of insertion order.
+  game.localOwner = "player";
   FIXTURES[name](state);
   renderSelectionPanel();
   // game.state, not `state`: the galaxy fixture swaps in the active world's own state object.

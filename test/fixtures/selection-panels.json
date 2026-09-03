@@ -159,6 +159,74 @@
       }
     ]
   },
+  "command center, seat B (localOwner ai)": {
+    "tag": "div",
+    "kids": [
+      {
+        "tag": "div",
+        "cls": "sel-row sel-row-summary",
+        "text": "Command Center — 1000/1000 hp"
+      },
+      {
+        "tag": "button",
+        "cls": "sel-group sel-collapsible",
+        "text": "▾ Produce (3)"
+      },
+      {
+        "tag": "button",
+        "cls": "btn has-icon",
+        "kids": [
+          {
+            "tag": "img",
+            "cls": "btn-icon"
+          },
+          {
+            "tag": "span",
+            "cls": "btn-label",
+            "text": "Produce Worker (50 ore)  ( Z )"
+          }
+        ],
+        "title": "40 hp · 4 dmg · rng 15 · spd 60 · 1 supply"
+      },
+      {
+        "tag": "button",
+        "cls": "btn has-icon",
+        "kids": [
+          {
+            "tag": "img",
+            "cls": "btn-icon"
+          },
+          {
+            "tag": "span",
+            "cls": "btn-label",
+            "text": "Produce Worker (50 biomass)  ( C )"
+          }
+        ],
+        "title": "Worker paid in 50 biomass instead of ore"
+      },
+      {
+        "tag": "button",
+        "cls": "btn has-icon",
+        "kids": [
+          {
+            "tag": "img",
+            "cls": "btn-icon"
+          },
+          {
+            "tag": "span",
+            "cls": "btn-label",
+            "text": "Produce Ranger (45 ore)  ( V )"
+          }
+        ],
+        "title": "50 hp · 6 dmg · rng 22 · spd 115 · 1 supply"
+      },
+      {
+        "tag": "p",
+        "cls": "hint",
+        "text": "Right-click to set a rally point — right-click a resource node to rally new workers straight onto it."
+      }
+    ]
+  },
   "command center with a queued worker": {
     "tag": "div",
     "kids": [

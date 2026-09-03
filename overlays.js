@@ -14,6 +14,7 @@ import { FACTIONS } from "./engine/factions.js";
 import { UNITS, committedDoctrine, hasCompletedBuilding } from "./engine/entities.js";
 import { game } from "./session.js";
 import { scoreBreakdown, playerScore } from "./engine/victory.js";
+import { otherOwner } from "./engine/aiCommon.js";
 // PLAY AGAINST YOURSELF (playerFingerprint.js, docs/ai-evolution-design.md): the finished match
 // state is the only place a human's own play can be measured, so the offer belongs on this screen.
 import { mirrorOfPlayer } from "./playerFingerprint.js";
@@ -31,7 +32,7 @@ export function showSeedChip(seed) {
 // "You: Frontier ⚔ Miners" — your faction vs the opponent's. Hidden for a
 // neutral-vs-neutral match (a bare state with no factions picked).
 export function showFactionChip(st) {
-  const you = FACTIONS[st.players.player.faction], foe = FACTIONS[st.players.ai.faction];
+  const you = FACTIONS[st.players[game.localOwner].faction], foe = FACTIONS[st.players[otherOwner(game.localOwner)].faction];
   if (!you || you.id === "neutral") { factionChipEl.classList.add("hidden"); return; }
   factionChipEl.textContent = `You: ${you.short} ⚔ ${foe && foe.id !== "neutral" ? foe.short : "Foe"}`;
   factionChipEl.title = `You — ${you.name}: ${you.blurb}` + (foe && foe.id !== "neutral" ? `\nFoe — ${foe.name}: ${foe.blurb}` : "");
@@ -65,20 +66,20 @@ function countUnits(state, owner, pred) {
 
 const SKIRMISH_OBJECTIVES = [
   {
-    text: state => `Train Workers (${Math.min(countUnits(state, "player", d => d?.role === "worker"), WORKER_TARGET)}/${WORKER_TARGET})`,
-    done: state => countUnits(state, "player", d => d?.role === "worker") >= WORKER_TARGET,
+    text: state => `Train Workers (${Math.min(countUnits(state, game.localOwner, d => d?.role === "worker"), WORKER_TARGET)}/${WORKER_TARGET})`,
+    done: state => countUnits(state, game.localOwner, d => d?.role === "worker") >= WORKER_TARGET,
   },
-  { text: () => "Build a Barracks", done: state => hasCompletedBuilding(state, "player", "barracks") },
-  { text: () => `Field ${COMBAT_TARGET} combat units`, done: state => countUnits(state, "player", d => d?.role === "combat") >= COMBAT_TARGET },
-  { text: () => "Pick a doctrine at the Refinery", done: state => !!committedDoctrine(state, "player") },
-  { text: () => "Raise a Habitat before the supply cap", done: state => hasCompletedBuilding(state, "player", "habitat") },
+  { text: () => "Build a Barracks", done: state => hasCompletedBuilding(state, game.localOwner, "barracks") },
+  { text: () => `Field ${COMBAT_TARGET} combat units`, done: state => countUnits(state, game.localOwner, d => d?.role === "combat") >= COMBAT_TARGET },
+  { text: () => "Pick a doctrine at the Refinery", done: state => !!committedDoctrine(state, game.localOwner) },
+  { text: () => "Raise a Habitat before the supply cap", done: state => hasCompletedBuilding(state, game.localOwner, "habitat") },
 ];
 
 const ODYSSEY_OBJECTIVES = [
-  { text: () => "Deploy the colony ship", done: state => hasCompletedBuilding(state, "player", "command") },
-  { text: () => "Build a Market", done: state => hasCompletedBuilding(state, "player", "market") },
-  { text: () => "Reactor → Smelter", done: state => hasCompletedBuilding(state, "player", "reactor") && hasCompletedBuilding(state, "player", "smelter") },
-  { text: () => "Build a Datacenter", done: state => hasCompletedBuilding(state, "player", "datacenter") },
+  { text: () => "Deploy the colony ship", done: state => hasCompletedBuilding(state, game.localOwner, "command") },
+  { text: () => "Build a Market", done: state => hasCompletedBuilding(state, game.localOwner, "market") },
+  { text: () => "Reactor → Smelter", done: state => hasCompletedBuilding(state, game.localOwner, "reactor") && hasCompletedBuilding(state, game.localOwner, "smelter") },
+  { text: () => "Build a Datacenter", done: state => hasCompletedBuilding(state, game.localOwner, "datacenter") },
 ];
 
 const SKIRMISH_GOAL = "Objective — destroy every enemy Command Center.";
@@ -346,18 +347,24 @@ if (typeof window !== "undefined") {
 // clock endgame visible, honest, and configurable"). A missing/unrecognised reason (an older save
 // resuming into a game-over some other way, or any caller that predates this field) falls back to
 // the original conquest copy below, unchanged.
+// T-030: keyed by "you"/"them" (relative to game.localOwner), not the literal winner's owner id —
+// this table's whole POINT is text written from the local viewer's own point of view ("Victory",
+// "your last Command Center"), which a literal-owner key silently gets backwards the moment the
+// local seat isn't "player": WIN_REASON_COPY[reason]["ai"] used to mean "the ai LOST", which is
+// only true when the local viewer IS "player" — for seat B's own screen, a win keyed "ai" would
+// have rendered as a "Defeat" message. See showGameOver's own lookup below.
 const WIN_REASON_COPY = {
   elimination: {
-    player: "Victory — the enemy's last Command Center is destroyed.",
-    ai: "Defeat — your last Command Center was destroyed.",
+    you: "Victory — the enemy's last Command Center is destroyed.",
+    them: "Defeat — your last Command Center was destroyed.",
   },
   "mutual-wipe-score": {
-    player: "Victory — both sides' last Command Centers fell, and you held the higher score.",
-    ai: "Defeat — both sides' last Command Centers fell, and the enemy held the higher score.",
+    you: "Victory — both sides' last Command Centers fell, and you held the higher score.",
+    them: "Defeat — both sides' last Command Centers fell, and the enemy held the higher score.",
   },
   "timeout-score": {
-    player: "Victory — the match went the distance, and you held the higher score at the bell.",
-    ai: "Defeat — the match went the distance, and the enemy held the higher score at the bell.",
+    you: "Victory — the match went the distance, and you held the higher score at the bell.",
+    them: "Defeat — the match went the distance, and the enemy held the higher score at the bell.",
   },
 };
 
@@ -373,7 +380,7 @@ export function showGameOver(winner, seed, onRestart, opts = {}) {
   // human watched two AI entrants play. Neither the fanfare nor the funeral is right, so it gets
   // silence and its own verdict line below — every other caller is byte-identical to before.
   if (opts.spectate) { /* no verdict sound: the watcher neither won nor lost this */ }
-  else if (winner === "player") sound.playVictory(); else sound.playDefeat();
+  else if (winner === game.localOwner) sound.playVictory(); else sound.playDefeat();
 
   gameOverEl.classList.remove("hidden");
   gameOverEl.innerHTML = "";
@@ -388,8 +395,8 @@ export function showGameOver(winner, seed, onRestart, opts = {}) {
     ? (opts.surrendered
         ? "Surrendered — you lay down your flag. The frontier falls quiet."
         : "The Odyssey has ended.")
-    : (WIN_REASON_COPY[opts.winReason]?.[winner]
-        ?? (winner === "player"
+    : (WIN_REASON_COPY[opts.winReason]?.[winner === game.localOwner ? "you" : "them"]
+        ?? (winner === game.localOwner
             ? "Victory — the enemy's last Command Center is destroyed."
             : "Defeat — your last Command Center was destroyed."));
   gameOverEl.appendChild(msg);
@@ -403,8 +410,8 @@ export function showGameOver(winner, seed, onRestart, opts = {}) {
   // view, which has no referent when the human played neither seat. The spectate block below
   // carries both entrants' scores side by side instead, named.
   if (!opts.odyssey && !opts.spectate && opts.state && (opts.winReason === "mutual-wipe-score" || opts.winReason === "timeout-score")) {
-    const bd = scoreBreakdown(opts.state, "player");
-    const enemyScore = playerScore(opts.state, "ai");
+    const bd = scoreBreakdown(opts.state, game.localOwner);
+    const enemyScore = playerScore(opts.state, otherOwner(game.localOwner));
     const breakdown = document.createElement("div");
     breakdown.className = "gameover-seed";
     breakdown.innerHTML = `Bank (×0.25): ${Math.round(bd.bank)} · Army (×1.35): ${Math.round(bd.army)} · Structures: ${Math.round(bd.structures)}`
@@ -454,7 +461,10 @@ export function showGameOver(winner, seed, onRestart, opts = {}) {
       + "you expanded — and fits an AI genome to it.";
     mirrorBtn.addEventListener("click", () => {
       try {
-        const { candidate, fingerprint } = mirrorOfPlayer(opts.state, { name: "Your Mirror" });
+        // T-030: owner passed explicitly — playerFingerprint.js's own default stays "player" on
+        // purpose (that module is deliberately pure/session-free, workable from a Worker with no
+        // game.localOwner to read), so "measure the LOCAL viewer's own play" is this caller's job.
+        const { candidate, fingerprint } = mirrorOfPlayer(opts.state, { owner: game.localOwner, name: "Your Mirror" });
         const note = fingerprint.posture == null ? "no assets to measure"
           : `${Math.round((1 - fingerprint.posture) * 100)}% economy, ${fingerprint.army} army, `
             + `${fingerprint.workers} workers${fingerprint.mix.length ? `, built ${fingerprint.mix.join("/")}` : ""}`;

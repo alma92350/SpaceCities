@@ -8,6 +8,7 @@
 "use strict";
 
 import { isVisibleAt, isNodeDiscovered, FOG_CELL_SIZE } from "./engine/fog.js";
+import { game } from "./session.js";
 
 // The minimap's two heavy layers — the explored-fog wash and the terrain features — were
 // re-scanned cell-by-cell EVERY animation frame (16k+ fillRects on a big map, into a 200x125
@@ -91,12 +92,12 @@ export function drawMinimap(ctx, state, camera, viewportW, viewportH, mmW, mmH, 
   ctx.globalAlpha = 1;
 
   for (const b of state.buildings.values()) {
-    if (b.owner !== "player" && !observerMode && !isVisibleAt(fog, b.x, b.y)) continue;
+    if (b.owner !== game.localOwner && !observerMode && !isVisibleAt(fog, b.x, b.y)) continue;
     ctx.fillStyle = state.players[b.owner].color;
     ctx.fillRect(b.x * sx - 2, b.y * sy - 2, 4, 4);
   }
   for (const u of state.units.values()) {
-    if (u.owner !== "player" && !observerMode && !isVisibleAt(fog, u.x, u.y)) continue;
+    if (u.owner !== game.localOwner && !observerMode && !isVisibleAt(fog, u.x, u.y)) continue;
     ctx.fillStyle = state.players[u.owner].color;
     ctx.fillRect(u.x * sx - 1, u.y * sy - 1, 2, 2);
   }

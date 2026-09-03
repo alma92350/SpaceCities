@@ -10,6 +10,7 @@
 "use strict";
 
 import { COM, RECIPES } from "./data.js";
+import { game } from "./session.js";
 import { BUILDINGS, storeCapOf, storeTotal } from "./engine/entities.js";
 import { JUMP_LOAD_RADIUS } from "./engine/galaxy.js";
 import { POWER_TIERS, powerThrottle, buildingConcern, recipeOf } from "./engine/industry.js";
@@ -81,7 +82,7 @@ export function drawBuildings(ctx, state, view, observerMode = false) {
     // A foe marker under every enemy building, matching the one under enemy units:
     // friend/foe is then a SHAPE cue, not colour alone, so a colourblind player can
     // tell an enemy base from their own without relying on the cyan-vs-red hue.
-    if (b.owner !== "player") drawEnemyPip(ctx, b.x, b.y + b.radius + 8);
+    if (b.owner !== game.localOwner) drawEnemyPip(ctx, b.x, b.y + b.radius + 8);
   }
 }
 
@@ -117,7 +118,7 @@ const CONCERN_STYLE = {
 // starved) that fog-of-war otherwise hides about an opponent's base, matching drawStoreBar's
 // player-only scope. Silent for anything running fine, so a healthy base stays uncluttered.
 function drawConcernBadge(ctx, state, b) {
-  if (b.owner !== "player") return;
+  if (b.owner !== game.localOwner) return;
   const concern = buildingConcern(state, b);
   if (!concern) return;
   const style = CONCERN_STYLE[concern.level];
@@ -144,7 +145,7 @@ function drawConcernBadge(ctx, state, b) {
 // buffer, so it reads as live logistics pressure without cluttering the field.
 function drawStoreBar(ctx, b) {
   const cap = storeCapOf(b.type);
-  if (cap <= 0 || b.owner !== "player") return;
+  if (cap <= 0 || b.owner !== game.localOwner) return;
   const total = storeTotal(b);
   if (total <= 0) return;
   const pct = Math.min(1, total / cap);
@@ -162,7 +163,7 @@ function drawStoreBar(ctx, b) {
 // Spaceport is selected, so it never clutters the map otherwise.
 export function drawJumpStaging(ctx, state, view, selSet) {
   for (const b of state.buildings.values()) {
-    if (b.type !== "spaceport" || b.owner !== "player" || b.constructing || !selSet.has(b.id)) continue;
+    if (b.type !== "spaceport" || b.owner !== game.localOwner || b.constructing || !selSet.has(b.id)) continue;
     if (view && !inView(view, b.x, b.y, JUMP_LOAD_RADIUS + 8)) continue;
 
     ctx.save();
@@ -178,7 +179,7 @@ export function drawJumpStaging(ctx, state, view, selSet) {
 
     // Ring the units that would ride along, so it's clear WHICH entities jump.
     for (const u of state.units.values()) {
-      if (u.owner !== "player") continue;
+      if (u.owner !== game.localOwner) continue;
       if (Math.hypot(u.x - b.x, u.y - b.y) > JUMP_LOAD_RADIUS) continue;
       ctx.beginPath();
       ctx.arc(u.x, u.y, (u.radius || 6) + 3, 0, Math.PI * 2);
@@ -230,7 +231,7 @@ export function drawPowerGrid(ctx, state, view, selSet) {
   const outer = POWER_TIERS[POWER_TIERS.length - 2].max;
   for (const b of state.buildings.values()) {
     const def = BUILDINGS[b.type];
-    if (!(def && def.energyGrants > 0) || b.owner !== "player" || b.constructing || !selSet.has(b.id)) continue;
+    if (!(def && def.energyGrants > 0) || b.owner !== game.localOwner || b.constructing || !selSet.has(b.id)) continue;
     const scale = def.powerRange || 1;
     if (view && !inView(view, b.x, b.y, outer * scale + 8)) continue;
     drawReactorBands(ctx, b.x, b.y, scale);

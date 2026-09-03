@@ -42,6 +42,7 @@
 
 import { minimapToWorld } from "./minimap.js";
 import { LANDING_PICK_GRID } from "./engine/galaxy.js";
+import { game } from "./session.js";
 
 const PICKER_MAX_W = 480;
 
@@ -57,8 +58,8 @@ export function openLandingPicker(dest, worldLabel, { onPick, onCancel }) {
   const mmW = PICKER_MAX_W, mmH = Math.round(map.height * (PICKER_MAX_W / map.width));
   // Whether the player already has a footprint here (see the header comment) — drives both the
   // marked-up chart below and this copy, which otherwise oversells the pick as totally blind.
-  const hasFootprint = [...dest.buildings.values()].some(b => b.owner === "player")
-    || [...dest.units.values()].some(u => u.owner === "player");
+  const hasFootprint = [...dest.buildings.values()].some(b => b.owner === game.localOwner)
+    || [...dest.units.values()].some(u => u.owner === game.localOwner);
 
   const overlay = document.createElement("div");
   overlay.className = "landing-pick-confirm";
@@ -146,9 +147,9 @@ export function openLandingPicker(dest, worldLabel, { onPick, onCancel }) {
     // The player's own footprint on this world, if any — see the header comment. Never
     // fog-gated (it's the player's own owned intel), and drawn every time regardless of
     // `picked` so it's visible before the first click, not just after.
-    ctx.fillStyle = dest.players?.player?.color || "#4fd1ff";
+    ctx.fillStyle = dest.players?.[game.localOwner]?.color || "#4fd1ff";
     for (const b of dest.buildings.values()) {
-      if (b.owner !== "player") continue;
+      if (b.owner !== game.localOwner) continue;
       const bx = b.x * sx, by = b.y * sy;
       if (b.type === "spaceport") {
         ctx.beginPath(); ctx.arc(bx, by, 7, 0, Math.PI * 2); ctx.fill();
@@ -157,7 +158,7 @@ export function openLandingPicker(dest, worldLabel, { onPick, onCancel }) {
       }
     }
     for (const u of dest.units.values()) {
-      if (u.owner !== "player") continue;
+      if (u.owner !== game.localOwner) continue;
       ctx.beginPath(); ctx.arc(u.x * sx, u.y * sy, 2, 0, Math.PI * 2); ctx.fill();
     }
 

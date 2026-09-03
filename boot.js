@@ -387,8 +387,8 @@ function focusActivePlanet() {
   game.transport = createDirectTransport(state);
   if (game.input) game.input.destroy();
   game.input = attachInput(canvas, state, game.transport, () => renderHUD());
-  const cc = [...state.buildings.values()].find(b => b.owner === "player" && b.type === "command");
-  const openAt = cc || state.map.bases.player;
+  const cc = [...state.buildings.values()].find(b => b.owner === game.localOwner && b.type === "command");
+  const openAt = cc || state.map.bases[game.localOwner];
   const cam = game.input.getCamera();
   cam.x = openAt.x;
   cam.y = openAt.y;
@@ -499,7 +499,7 @@ export function bootState(newState, { intro, selfPlay = false, transport = null 
   // Open on the player's own ships — the escort/convoy start station, the raider
   // fleet's ambush point, or the player's base in a skirmish — never the map
   // centre, which on a big map is empty space.
-  const openAt = state.scenario ? (state.scenario.playerStart || state.scenario.route[0]) : state.map.bases.player;
+  const openAt = state.scenario ? (state.scenario.playerStart || state.scenario.route[0]) : state.map.bases[game.localOwner];
   const cam = input.getCamera();
   cam.x = openAt.x;
   cam.y = openAt.y;
@@ -709,8 +709,10 @@ function panFor(worldX) {
 // N-player game), an "ai"-caused event no longer necessarily means the LOCAL seat got hit. Pure and
 // exported so it's testable on its own — triggerUnderAttack itself reaches into the DOM
 // (underAttackEl, setTimeout) in a way this file's own boot.test.js deliberately doesn't drive
-// through private internals (see that file's header).
-export function isUnderAttackEvent(ev) { return ev.owner !== "player"; }
+// through private internals (see that file's header). T-030: `game.localOwner`, not the literal
+// "player" this already generalized away from "ai" — the SAME reasoning one step further, since
+// the local seat is not always "player" either once a live multiplayer seat B connects.
+export function isUnderAttackEvent(ev) { return ev.owner !== game.localOwner; }
 
 // A sim event plays a sound (and spawns a matching visual effect — see
 // effects.js) if it's the player's own, or if it happened somewhere
@@ -720,7 +722,7 @@ export function isUnderAttackEvent(ev) { return ev.owner !== "player"; }
 function processFrameEvents() {
   const { state } = game;
   for (const ev of state.events) {
-    if (ev.owner !== "player" && !isVisibleAt(state.fog, ev.x, ev.y)) continue;
+    if (ev.owner !== game.localOwner && !isVisibleAt(state.fog, ev.x, ev.y)) continue;
     const pan = panFor(ev.x);   // stereo-place the sound by where it happened on screen
     switch (ev.type) {
       case "unitSpawned":
@@ -782,7 +784,7 @@ function processFrameEvents() {
       // Only the player's own supply block beeps and flashes — a visible
       // enemy stalling on supply is their problem, not a HUD alert of ours.
       case "productionBlocked":
-        if (ev.owner === "player") {
+        if (ev.owner === game.localOwner) {
           sound.playProductionBlocked();
           game.supplyBlockedUntil = performance.now() + 800;
         }

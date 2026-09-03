@@ -319,7 +319,7 @@ export function attachInput(canvas, state, transport, onChange) {
     // Single tap: your own entity selects; anything else is a command to the
     // current selection (mirrors left-click select vs right-click order).
     const hit = entityAt(p.x, p.y);
-    if (hit && hit.owner === "player") {
+    if (hit && hit.owner === game.localOwner) {
       state.selection = [hit.id];
       sound.playSelect();
       onChange();
@@ -389,7 +389,7 @@ export function attachInput(canvas, state, transport, onChange) {
   }
   function selectAllArmy() {
     state.selection = [...state.units.values()]
-      .filter(u => u.owner === "player" && UNITS[u.type].role === "combat")
+      .filter(u => u.owner === game.localOwner && UNITS[u.type].role === "combat")
       .map(u => u.id);
   }
   // Cycle to the next worker of yours that's sitting idle (no order, no queued
@@ -397,7 +397,7 @@ export function attachInput(canvas, state, transport, onChange) {
   // gatherer on a big map is one keypress away instead of a manual hunt.
   function focusIdleWorker() {
     const idle = [...state.units.values()].filter(u =>
-      u.owner === "player" && UNITS[u.type]?.role === "worker" && !u.order && (!u.orderQueue || !u.orderQueue.length));
+      u.owner === game.localOwner && UNITS[u.type]?.role === "worker" && !u.order && (!u.orderQueue || !u.orderQueue.length));
     if (!idle.length) return;
     const w = idle[idleCycle % idle.length];
     idleCycle++;
@@ -413,7 +413,7 @@ export function attachInput(canvas, state, transport, onChange) {
   // wired to the idle-workers chip.
   function focusIdleProducer() {
     const idle = [...state.buildings.values()].filter(b =>
-      b.owner === "player" && !b.constructing && BUILDINGS[b.type]?.produces && b.queue.length === 0);
+      b.owner === game.localOwner && !b.constructing && BUILDINGS[b.type]?.produces && b.queue.length === 0);
     if (!idle.length) return;
     const b = idle[idleProducerCycle % idle.length];
     idleProducerCycle++;
@@ -429,14 +429,14 @@ export function attachInput(canvas, state, transport, onChange) {
   // stable order — matching engine/galaxy.js's own id-sorted playerSpaceports precedent.
   function centerOnBase() {
     const ccs = [...state.buildings.values()]
-      .filter(b => b.owner === "player" && b.type === "command" && !b.constructing)
+      .filter(b => b.owner === game.localOwner && b.type === "command" && !b.constructing)
       .sort((a, b) => (a.id < b.id ? -1 : 1));
     const now = performance.now();
     const cycling = ccs.length > 0 && now - lastBaseAt < DOUBLE_GROUP_MS;
     lastBaseAt = now;
     if (!ccs.length) {
       baseCycle = 0;
-      const at = state.map.bases && state.map.bases.player;
+      const at = state.map.bases && state.map.bases[game.localOwner];
       if (at) { centerCamera(at.x, at.y); onChange(); }
       return;
     }
