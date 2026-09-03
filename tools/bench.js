@@ -38,7 +38,7 @@ import { tick } from "../engine/sim.js";
 import { issueAttackMove } from "../engine/commands.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createSelfPlayState, tickSelfPlay, SELFPLAY_DT } from "./selfplay.js";
-import { computeDelta } from "../engine/projectionDelta.js";
+import { computeDelta, quantizeForWire } from "../engine/projectionDelta.js";
 import { createSession } from "../server/session.js";
 import { projectFor } from "../engine/projection.js";
 
@@ -156,20 +156,23 @@ export function benchProjection({ armySize, ticks = 300, warmupTicks = 50, seed 
 
   const perSeatMs = [];      // one sample per projectFor+stringify call, both seats pooled
   const perTickTotalMs = []; // one sample per tick: BOTH seats' cost summed — what actually competes with the tick budget
-  const payloadBytes = [];   // one sample per projectFor+stringify call: a FULL snapshot's own size
+  const payloadBytes = [];   // one sample per projectFor+stringify call: a FULL snapshot's own size,
+                              // quantized (T-028c) — what net/wsServerTransport.js actually sends as
+                              // a connection's first push, not the raw pre-quantization size
   const deltaBytes = [];     // one sample per tick after the first, per seat (T-028b, ADR-0009 M3):
                               // engine/projectionDelta.js's computeDelta against the PREVIOUS tick's
-                              // own projection for that seat — the size a connected client actually
-                              // receives from tick 2 onward, once net/wsServerTransport.js has a
-                              // real baseline to delta against (this loop's own first tick has none,
-                              // exactly mirroring a fresh connection's own one-time full push).
+                              // own (also quantized) projection for that seat — the size a connected
+                              // client actually receives from tick 2 onward, once
+                              // net/wsServerTransport.js has a real baseline to delta against (this
+                              // loop's own first tick has none, exactly mirroring a fresh
+                              // connection's own one-time full push).
   const prevProjBySeat = new Map();
   for (let i = 0; i < ticks; i++) {
     tick(state, 0.1);
     let tickTotal = 0;
     for (const seat of state.owners) {
       const t0 = performance.now();
-      const proj = projectFor(state, seat);
+      const proj = quantizeForWire(projectFor(state, seat));
       const wire = JSON.stringify(proj);
       const dt = performance.now() - t0;
       perSeatMs.push(dt);

@@ -13,6 +13,21 @@
    Operates ONLY on plain JSON-shaped projectFor output — no engine State, no live entity objects,
    no networking — so it needs no map, no fog, nothing beyond the two snapshots being compared.
 
+   quantizeForWire (T-028c) rounds units/buildings/nodes to 2 decimal places before anything else
+   in this file ever sees them. Measured, not assumed: a real match's x/y accumulates full
+   floating-point noise from repeated velocity*dt integration (`831.2830042896674`, where nothing
+   past the decimal point is visually or gameplay meaningful for a pixel-rendered 2D game), and hp
+   drifts the same way under repeated subtraction. In one real stress-scenario delta, 41.7% of the
+   payload's own bytes were spent on that noise alone. 2 decimal places, not a whole integer:
+   coarse enough to erase the noise, fine enough that a genuinely fractional field — buildProgress,
+   a 0..1 ratio — still reads as a smooth progression rather than jumping straight from 0 to 1.
+   Applying this BEFORE computeDelta matters twice over: it shrinks each changed field's own bytes,
+   AND it can make sub-noise position jitter round away to "no change at all", so an entity that
+   only moved by float dust doesn't cost a changed-entry at all. The caller (net/wsServerTransport.js)
+   quantizes every projectFor(...) result before it's ever used for a full send OR stored as a
+   future delta's baseline — quantizing only one side of a comparison would make every tick look
+   "changed" against its own now-differently-rounded predecessor, defeating the whole point.
+
    PER-FIELD patches for `changed`, not whole-object resend — measured, not assumed
    (tools/bench.js's own benchProjection.deltaBytes): a first cut that resent a changed entity's
    FULL data on any change barely beat a full snapshot during active combat, where most units have
@@ -30,6 +45,37 @@
 // inherently minimal; tick/time/over/winner/winReason/owners are a handful of scalars). Each is a
 // small array of objects keyed by a unique `id` — diffed the same way, generically.
 const ENTITY_FIELDS = ["units", "buildings", "nodes"];
+
+const QUANTIZE_DP = 2;
+const QUANTIZE_FACTOR = 10 ** QUANTIZE_DP;
+
+// Recursively rounds every number found (any depth, through arrays and plain objects alike) — a
+// unit's order/cargo/orderQueue, a building's rally point, all covered generically rather than by
+// naming each field, so a future field carrying its own float noise is covered automatically
+// rather than silently missed. Rounding an already-clean integer (id counters, hp on a unit that
+// hasn't taken fractional damage, …) is a no-op: Math.round(5 * 100) / 100 is exactly 5 again.
+function roundNumbers(value) {
+  if (typeof value === "number") return Math.round(value * QUANTIZE_FACTOR) / QUANTIZE_FACTOR;
+  if (Array.isArray(value)) return value.map(roundNumbers);
+  if (value && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = roundNumbers(v);
+    return out;
+  }
+  return value;   // strings, booleans, null, undefined — untouched
+}
+
+/**
+ * @param {Object} proj - a projectFor(...) output
+ * @returns {Object} the same shape, with every number under units/buildings/nodes rounded to
+ *   QUANTIZE_DP decimal places. players/events/tick/etc. are left exactly as they were — tiny
+ *   regardless, and always sent in full, so there is nothing to gain by rounding them.
+ */
+export function quantizeForWire(proj) {
+  const out = { ...proj };
+  for (const field of ENTITY_FIELDS) out[field] = proj[field].map(roundNumbers);
+  return out;
+}
 
 // A per-field patch for one changed entity: always {id}, plus whichever OTHER top-level keys
 // differ from prev — nested objects (order, orderQueue, cargo, …) compared and resent as a whole

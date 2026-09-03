@@ -14,7 +14,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { computeDelta, applyDelta } from "../engine/projectionDelta.js";
+import { computeDelta, applyDelta, quantizeForWire } from "../engine/projectionDelta.js";
 
 function baseProj(overrides = {}) {
   return {
@@ -180,4 +180,63 @@ test("a realistically-sized delta (few changes among many entities) is dramatica
   const deltaBytes = JSON.stringify(delta).length;
   assert.equal(delta.units.changed.length, 5);
   assert.ok(deltaBytes < fullBytes / 4, `delta (${deltaBytes}B) should be well under a quarter of a full snapshot (${fullBytes}B)`);
+});
+
+/* ============================================================
+   T-028c: quantizeForWire — measured (see TASKS.md), not assumed: a real match's own x/y and hp
+   values accumulate full floating-point noise (velocity*dt integration, repeated damage
+   subtraction) — e.g. `831.2830042896674` where nothing past the decimal point is visually or
+   gameplay meaningful for a pixel-rendered 2D game. In one real stress-scenario delta, 41.7% of
+   the payload's own bytes were spent on that noise; rounding to 2 decimal places recovers most of
+   it while still leaving room for a genuinely fractional field like buildProgress (a 0..1 ratio)
+   to read smoothly rather than jumping straight from 0 to 1.
+   ============================================================ */
+
+test("quantizeForWire rounds every number in units/buildings/nodes to 2 decimal places", () => {
+  const proj = baseProj({
+    units: [{ id: "u1", x: 831.2830042896674, y: 4.999999999999998, hp: 10, owner: "player" }],
+    buildings: [{ id: "b1", x: 1, y: 1, hp: 100, owner: "player", buildProgress: 0.3333333333 }],
+    nodes: [{ id: "n1", amount: 12.005 }],
+  });
+  const q = quantizeForWire(proj);
+  assert.equal(q.units[0].x, 831.28);
+  assert.equal(q.units[0].y, 5);
+  assert.equal(q.buildings[0].buildProgress, 0.33);
+  assert.equal(q.nodes[0].amount, 12.01);
+});
+
+test("quantizeForWire rounds nested numeric fields too (order, rally), not just top-level ones", () => {
+  const proj = baseProj({
+    units: [{ id: "u1", x: 1, y: 1, hp: 10, owner: "player", order: { type: "move", x: 5.123456, y: 9 } }],
+    buildings: [{ id: "b1", x: 1, y: 1, hp: 100, owner: "player", rally: { x: 20.987654, y: 30 } }],
+  });
+  const q = quantizeForWire(proj);
+  assert.equal(q.units[0].order.x, 5.12);
+  assert.equal(q.buildings[0].rally.x, 20.99);
+});
+
+test("quantizeForWire leaves non-numeric fields (ids, strings, booleans, null) completely untouched", () => {
+  const proj = baseProj();
+  const q = quantizeForWire(proj);
+  assert.equal(q.units[0].id, proj.units[0].id);
+  assert.equal(q.units[0].owner, proj.units[0].owner);
+});
+
+test("quantizeForWire does not touch players/events/tick/etc — only units/buildings/nodes carry the byte cost this exists to cut", () => {
+  const proj = baseProj({ players: { player: { id: "player", resources: { ore: 100.123456 } } } });
+  const q = quantizeForWire(proj);
+  assert.equal(q.players.player.resources.ore, 100.123456, "players is tiny and always sent in full regardless — nothing to gain by rounding it, so it's left alone");
+});
+
+test("computeDelta after quantizeForWire produces a meaningfully smaller delta than without it, on real noisy floats", () => {
+  const prev = quantizeForWire(baseProj({
+    units: [{ id: "u1", x: 100.00000000001, y: 200, hp: 10, owner: "player" }],
+  }));
+  const curr = quantizeForWire(baseProj({
+    units: [{ id: "u1", x: 100.30000000002, y: 200.00000000003, hp: 10, owner: "player" }],
+  }));
+  const delta = computeDelta(prev, curr);
+  // y's noise (200 vs 200.00000000003) rounds away entirely once quantized — only x, which
+  // genuinely moved, should appear in the patch.
+  assert.deepEqual(delta.units.changed, [{ id: "u1", x: 100.3 }]);
 });

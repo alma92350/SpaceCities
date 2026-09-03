@@ -10,10 +10,10 @@
        {type:"welcome", seat, createGameState:{planetId,seed,sizeMult,resourceMult,swapAsym}}
          sent once, immediately on connect — everything a client needs to regenerate this match's
          map locally (ADR-0009: the map is deterministic from these fields, so it's never sent).
-       {type:"state", full:true, proj: <engine/projection.js's projectFor(state, seat) output>}
-         the FIRST push to a given connection — a full snapshot, so a fresh client (or one that just
-         reconnected) has a real baseline to delta against from here on.
-       {type:"state", full:false, delta: <engine/projectionDelta.js's computeDelta(prev, curr)>}
+       {type:"state", full:true, proj: <engine/projectionDelta.js's quantizeForWire(projectFor(...))>}
+         the FIRST push to a given connection — a full (but quantized, T-028c) snapshot, so a fresh
+         client (or one that just reconnected) has a real baseline to delta against from here on.
+       {type:"state", full:false, delta: <computeDelta(prev, curr), both sides already quantized>}
          every push after the first, on the SAME connection (ADR-0009 M3, T-028b) — computed against
          the last snapshot actually sent to THIS connection, tracked in lastSnapshotBySeat below and
          cleared on disconnect so a reconnect always gets a fresh full push, never a delta against a
@@ -22,6 +22,9 @@
          never drops a frame), so "the last snapshot sent on this still-open connection" already IS
          "the last one the client has" for as long as the socket stays open; a closed/replaced
          connection is exactly the case lastSnapshotBySeat's own clear-on-disconnect handles.
+         Both the full-send path and lastSnapshotBySeat store the SAME quantizeForWire(...) output —
+         quantizing only one side would make every tick look "changed" against its own
+         differently-rounded predecessor, defeating T-028c's own point.
          Either push is sent on broadcastState() — the caller decides the cadence (every stepMatch
          tick, in practice), matching how net/loopback.js's own tick() is caller-driven, never
          self-timed.
@@ -52,7 +55,7 @@
 import { acceptUpgrade } from "./ws.js";
 import { admit } from "../server/matchLoop.js";
 import { projectFor } from "../engine/projection.js";
-import { computeDelta } from "../engine/projectionDelta.js";
+import { computeDelta, quantizeForWire } from "../engine/projectionDelta.js";
 
 // server/matchLoop.js's own log records deliberately store a SIMPLER shape than net/transport.js's
 // documented CommandResult ({ok, code?, result?}): `null` (or a success payload like {buildingId})
@@ -141,7 +144,10 @@ export function attachWsMatch(httpServer, match, opts = {}) {
      *  every one after is a delta against whatever was last actually sent on THIS connection. */
     broadcastState() {
       for (const [seat, conn] of bySeat) {
-        const curr = projectFor(match.state, seat);
+        // Quantized (T-028c) BEFORE it's used for anything — both the full-send path and the
+        // stored baseline for the NEXT delta must agree on the same rounding, or every tick would
+        // look "changed" against its own differently-rounded predecessor.
+        const curr = quantizeForWire(projectFor(match.state, seat));
         const prev = lastSnapshotBySeat.get(seat);
         conn.send(JSON.stringify(
           prev ? { type: "state", full: false, delta: computeDelta(prev, curr) }
