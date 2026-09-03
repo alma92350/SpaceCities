@@ -35,6 +35,46 @@
    already-constructed session synchronously. The resolved Transport's own methods stay
    synchronous-shaped (submitCommand still returns a Promise, per the interface), matching every
    other implementation.
+
+   T-029b: AUTOMATIC RECONNECT, once the first handshake has succeeded. ADR-0012 deliberately makes
+   restart-resume and player-reconnect the SAME mechanism ("the rarely-exercised path is covered by
+   the constantly-exercised one") — this file doesn't try to tell a network blip apart from the
+   server process itself restarting after a crash or deploy; either way the socket just closes, and
+   either way the right response is the same: retry the same URL after a short fixed delay,
+   indefinitely, until it succeeds. (A max-retry cutoff or backoff schedule is deliberately NOT
+   built here — T-060, Phase 4, is the named future task for that kind of sleep/wake UX polish; this
+   file's own job is the MECHANISM, not the retry policy.)
+
+   The reconnect's own welcome message carries the match's matchId (net/wsServerTransport.js,
+   server/matchWorker.js) — compared against whatever this file saw on the PREVIOUS welcome to tell
+   "I rejoined the exact same match" from "this is a different match that happens to share a URL"
+   (the second case is real: a server that restarted with no snapshot to recover, or one hosting a
+   brand-new match at the same address). Two new events reach onEvent() beyond the shared Transport
+   contract (net/transport.js) — WS-transport-specific, safely ignorable by a caller that only knows
+   the universal StateEvent/CommandResultEvent shapes, the same way a loopback caller never sees
+   them at all since net/loopback.js has no real network to drop:
+     {type:"disconnected"}                     the connection just dropped unexpectedly; a retry is
+                                                already scheduled — fired at most once per outage,
+                                                not spammed again on every failed retry attempt
+     {type:"reconnected", matchId, sameMatch}  a NEW welcome just arrived on a reconnect attempt.
+                                                sameMatch is whether matchId matches the one this
+                                                connection saw before. On a same-match reconnect this
+                                                file deliberately KEEPS the existing `fog` object
+                                                (and its `map`, since matchId only ever matches when
+                                                createGameState's own opts — seed included — are
+                                                identical too) rather than recreating it — a client's
+                                                own accumulated exploration memory is exactly the
+                                                kind of state engine/fog.js's own single-player
+                                                semantics already never reset, and a restart/blip
+                                                that lands back in the same match shouldn't either.
+                                                A DIFFERENT matchId gets a fresh fog (and map) — an
+                                                old match's exploration memory means nothing against
+                                                a new one's geometry.
+   `lastProj` (T-028b's own delta baseline) is reset to null on every reconnect regardless — the
+   server's own onclose-driven cleanup (net/wsServerTransport.js's lastSnapshotBySeat) already
+   guarantees the FIRST push on any new connection is a fresh full snapshot, never a delta against a
+   dead connection's stale one, so this is belt-and-suspenders clarity more than a load-bearing
+   reset.
    ============================================================ */
 
 "use strict";
@@ -49,22 +89,32 @@ import { encode } from "./commandEnvelope.js";
 /**
  * @param {string} url - a ws:// or wss:// URL, already carrying whatever seat-selection query
  *   the server side expects (net/wsServerTransport.js's own `?seat=<owner>`)
+ * @param {{reconnectDelayMs?: number}} [opts] - reconnectDelayMs (default 1500): how long to wait
+ *   after an unexpected close before retrying the same URL. Only ever used AFTER the first
+ *   handshake succeeds — a failure before that still rejects immediately, unchanged from before
+ *   T-029b (a caller that never got a working transport at all is a different problem than one
+ *   that had a working transport and lost it).
  * @returns {Promise<Transport>} resolves once the welcome handshake completes and the match's map
  *   has been regenerated locally; rejects if the socket never reaches that point (connection
  *   refused, closed before welcome, malformed welcome payload)
  */
-export function createWsClientTransport(url) {
+export function createWsClientTransport(url, opts = {}) {
+  const { reconnectDelayMs = 1500 } = opts;
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
+    let ws = null;
     let seq = 0;
-    let closed = false;
-    let settled = false;   // has the outer promise resolved/rejected yet?
+    let closed = false;      // true only once the CALLER explicitly calls transport.close()
+    let settled = false;     // has the OUTER promise resolved/rejected yet (the very first handshake)?
+    let announcedDisconnected = false;   // avoid re-emitting "disconnected" on every failed retry
+    let reconnectTimer = null;
     const pendingBySeq = new Map();   // seq -> resolve(CommandResult)
     const handlers = new Set();
     let map = null;
-    let fog = null;   // this seat's OWN persistent fog (ADR-0009 M2) — created once at welcome,
-                       // mutated in place by every reassembleProjection call from then on
+    let fog = null;   // this seat's OWN persistent fog (ADR-0009 M2) — created at welcome time,
+                       // mutated in place by every reassembleProjection call; PRESERVED across a
+                       // same-match reconnect (T-029b), only recreated for a genuinely new match
     let seat = null;
+    let matchId = null;   // T-029b — this connection's last-seen match identity
     let lastProj = null;   // the last reconstructed projectFor(...)-shaped snapshot (ADR-0009 M3,
                             // T-028b) — a full push replaces it outright; a delta is applied against it
 
@@ -77,54 +127,97 @@ export function createWsClientTransport(url) {
       if (!settled) { settled = true; reject(err); }
     }
 
-    ws.addEventListener("error", () => fail(new Error("WebSocket connection failed")));
-    ws.addEventListener("close", () => {
-      closed = true;
-      fail(new Error("WebSocket closed before the welcome handshake completed"));
-      // Any submitCommand() still awaiting a reply at this point never gets one — resolve them all
-      // with a clear rejection rather than leaving the caller hanging on a promise that can now
-      // never settle any other way, the same "never assume it resolves synchronously, but it MUST
-      // eventually resolve" guarantee every Transport implementation owes its callers.
-      for (const resolveOne of pendingBySeq.values()) resolveOne({ ok: false, code: "closed" });
-      pendingBySeq.clear();
-    });
+    function scheduleReconnect() {
+      if (closed) return;
+      reconnectTimer = setTimeout(connect, reconnectDelayMs);
+    }
 
-    ws.addEventListener("message", ev => {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      if (!msg || typeof msg !== "object") return;
+    function connect() {
+      reconnectTimer = null;
+      const myWs = new WebSocket(url);
+      ws = myWs;
+      let welcomedThisConnection = false;   // guards a stray/duplicate welcome on THIS ONE connection
 
-      if (msg.type === "welcome") {
-        if (settled) return;   // a stray/duplicate welcome after the handshake already completed
-        const { planetId, seed, sizeMult, resourceMult, swapAsym } = msg.createGameState;
-        map = generateMap(planetId, mulberry32(seed), { sizeMult, resourceMult, swapAsym });
-        fog = createFog(map);
-        seat = msg.seat;
-        settled = true;
-        resolve(makeTransport());
-        return;
-      }
-      if (msg.type === "state") {
-        // T-028b: the first push on this connection is always full (net/wsServerTransport.js's own
-        // rule); every one after is a delta against whatever this client last reconstructed. There
-        // is no separate ack to send — the WebSocket itself is the ack (see that file's own header
-        // for why TCP's in-order delivery already gives the server everything "acknowledged" needs).
-        lastProj = msg.full ? msg.proj : applyDelta(lastProj, msg.delta);
-        emit({ type: "state", state: reassembleProjection(lastProj, map, fog, seat) });
-        return;
-      }
-      if (msg.type === "commandResult") {
-        const resolveOne = pendingBySeq.get(msg.seq);
-        if (resolveOne) { pendingBySeq.delete(msg.seq); resolveOne(msg.result); }
-        emit({ type: "commandResult", seq: msg.seq, result: msg.result });
-        return;
-      }
-    });
+      myWs.addEventListener("error", () => {
+        // Only the very first connection attempt ever gets an outer-promise rejection out of this —
+        // once the transport is live (settled), a reconnect attempt's own error is just a precursor
+        // to its "close" event below, which is where the actual retry decision happens.
+        if (!settled) fail(new Error("WebSocket connection failed"));
+      });
+
+      myWs.addEventListener("close", () => {
+        // Any submitCommand() still awaiting a reply at this point never gets one on THIS
+        // connection — resolve them all with a clear rejection rather than leaving the caller
+        // hanging on a promise that can now never settle any other way, the same "never assume it
+        // resolves synchronously, but it MUST eventually resolve" guarantee every Transport
+        // implementation owes its callers. A reconnect starts every seq/ack bookkeeping fresh
+        // (net/wsServerTransport.js has no memory of a dead connection's in-flight commands either).
+        for (const resolveOne of pendingBySeq.values()) resolveOne({ ok: false, code: "closed" });
+        pendingBySeq.clear();
+
+        if (closed) return;   // the CALLER closed this on purpose — never reconnect
+        if (!settled) { fail(new Error("WebSocket closed before the welcome handshake completed")); return; }
+
+        // T-029b: an unexpected close after the transport was already live — retry, whatever the
+        // cause (see this file's own header for why that distinction doesn't matter here).
+        if (!announcedDisconnected) { announcedDisconnected = true; emit({ type: "disconnected" }); }
+        scheduleReconnect();
+      });
+
+      myWs.addEventListener("message", ev => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (!msg || typeof msg !== "object") return;
+
+        if (msg.type === "welcome") {
+          if (welcomedThisConnection) return;   // a stray duplicate welcome on this SAME connection
+          welcomedThisConnection = true;
+
+          const { planetId, seed, sizeMult, resourceMult, swapAsym } = msg.createGameState;
+          map = generateMap(planetId, mulberry32(seed), { sizeMult, resourceMult, swapAsym });
+          const isReconnect = settled;   // the outer promise already resolved once before -> this welcome is from a RETRY, not the original connect
+          const sameMatch = isReconnect && matchId === msg.matchId;
+          if (!sameMatch) fog = createFog(map);   // no exploration memory worth preserving for a genuinely different match (or the very first connect)
+          matchId = msg.matchId;
+          seat = msg.seat;
+          lastProj = null;
+
+          if (!isReconnect) {
+            settled = true;
+            resolve(makeTransport());
+          } else {
+            announcedDisconnected = false;
+            emit({ type: "reconnected", matchId, sameMatch });
+          }
+          return;
+        }
+        if (msg.type === "state") {
+          // T-028b: the first push on this connection is always full (net/wsServerTransport.js's own
+          // rule); every one after is a delta against whatever this client last reconstructed. There
+          // is no separate ack to send — the WebSocket itself is the ack (see that file's own header
+          // for why TCP's in-order delivery already gives the server everything "acknowledged" needs).
+          lastProj = msg.full ? msg.proj : applyDelta(lastProj, msg.delta);
+          emit({ type: "state", state: reassembleProjection(lastProj, map, fog, seat) });
+          return;
+        }
+        if (msg.type === "commandResult") {
+          const resolveOne = pendingBySeq.get(msg.seq);
+          if (resolveOne) { pendingBySeq.delete(msg.seq); resolveOne(msg.result); }
+          emit({ type: "commandResult", seq: msg.seq, result: msg.result });
+          return;
+        }
+      });
+    }
 
     function makeTransport() {
       return {
         submitCommand(cmd) {
           if (closed) return Promise.resolve({ ok: false, code: "closed" });
+          // Mid-reconnect (old socket dead, new one not open yet): ws.send() on a non-OPEN native
+          // WebSocket THROWS synchronously, which would break every caller's "always get a Promise
+          // back" assumption (net/transport.js's own JSDoc) — answer immediately instead, the same
+          // shape a "closed" rejection already takes, just a distinct code since this one recovers.
+          if (ws.readyState !== WebSocket.OPEN) return Promise.resolve({ ok: false, code: "disconnected" });
           const mySeq = ++seq;
           ws.send(JSON.stringify(encode(cmd, mySeq)));
           return new Promise(res => { pendingBySeq.set(mySeq, res); });
@@ -135,9 +228,12 @@ export function createWsClientTransport(url) {
         close() {
           closed = true;
           handlers.clear();
+          if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
           ws.close();
         },
       };
     }
+
+    connect();
   });
 }

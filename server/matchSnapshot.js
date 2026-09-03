@@ -1,6 +1,6 @@
 /* ============================================================
    server/matchSnapshot.js — the FILE-I/O layer over engine/persist.js's already-proven
-   serializeGameString/deserializeGame (T-029a, ADR-0012, FR-22). This file knows nothing about the
+   serializeGame/deserializeGame (T-029a, ADR-0012, FR-22). This file knows nothing about the
    engine's own state shape or determinism guarantees — only where a match's snapshot lives on disk
    and how to write/read it without ever crashing a boot over it. The round-trip's own correctness
    (a match snapshotted mid-play, restored, and continued reproduces the same outcome as one that
@@ -23,9 +23,19 @@
    zero-command-loss durability knows exactly what it would need to add (serializing match.pending
    too, at minimum).
 
-   ONE demo match, ONE fixed filename — no lobby (T-033), no match-id concept yet (T-029b) to key
-   multiple snapshots by. The same "simplest thing that proves the mechanism" scope T-026's
-   `?seat=` binding and T-027's single demo match already established.
+   ONE demo match, ONE fixed filename — no lobby (T-033) to key multiple snapshots by. The same
+   "simplest thing that proves the mechanism" scope T-026's `?seat=` binding and T-027's single
+   demo match already established.
+
+   matchId (T-029b, ADR-0012's "restart-resume and player-reconnect are deliberately the same
+   mechanism"): a snapshot on disk is `{matchId, save}`, not just a bare save — ADR-0012's own
+   design needs a stable identity a RECONNECTING CLIENT can compare across a restart ("did I land
+   back in the same match, or a new one?"), which is a networking-adjacent concern engine/persist.js
+   was deliberately never taught (that file's own header: single-player save/load, generic and
+   network-agnostic). So matchId travels in THIS file's own envelope around the opaque save payload
+   rather than inside it — server/matchWorker.js mints one fresh (node:crypto's randomUUID) on a
+   genuine first boot, or recovers the snapshotted one on restore, and echoes it to every client via
+   the wire's own "welcome" message (net/wsWorkerTransport.js, net/wsServerTransport.js).
    ============================================================ */
 
 "use strict";
@@ -33,7 +43,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { serializeGameString, deserializeGame } from "../engine/persist.js";
+import { serializeGame, deserializeGame } from "../engine/persist.js";
 
 /** @param {string} dataDir @returns {string} */
 export function snapshotPath(dataDir) {
@@ -41,30 +51,36 @@ export function snapshotPath(dataDir) {
 }
 
 /**
- * Writes `state`'s current snapshot to disk, overwriting any previous one. ASYNC and fire-and-
- * forget-safe on purpose: called from inside a match's own tick loop (server/matchWorker.js), a
- * SYNCHRONOUS write would block that thread's event loop for the write's own duration — stalling
- * the sim's fixed-timestep cadence exactly when a player would feel it as lag. A write that loses
- * a race with a slightly-later one just leaves the more recent state on disk, never corrupts it.
- * @param {string} dataDir @param {State} state @returns {Promise<void>}
+ * Writes `state`'s current snapshot (alongside the stable `matchId` naming it) to disk,
+ * overwriting any previous one. ASYNC and fire-and-forget-safe on purpose: called from inside a
+ * match's own tick loop (server/matchWorker.js), a SYNCHRONOUS write would block that thread's
+ * event loop for the write's own duration — stalling the sim's fixed-timestep cadence exactly when
+ * a player would feel it as lag. A write that loses a race with a slightly-later one just leaves
+ * the more recent state on disk, never corrupts it.
+ * @param {string} dataDir @param {string} matchId @param {State} state @returns {Promise<void>}
  */
-export function writeSnapshot(dataDir, state) {
-  return writeFile(snapshotPath(dataDir), serializeGameString(state)).catch(err => {
+export function writeSnapshot(dataDir, matchId, state) {
+  const payload = JSON.stringify({ matchId, save: serializeGame(state) });
+  return writeFile(snapshotPath(dataDir), payload).catch(err => {
     console.error(`match snapshot write failed (${snapshotPath(dataDir)}):`, err.message);
   });
 }
 
 /**
  * Reads back the last snapshot written for this dataDir, or null if there isn't one yet (first
- * boot) or it can't be used (corrupted, or an unsupported save version after an engine upgrade) —
- * NEVER throws. Synchronous: called once, at worker boot, before anything else needs the CPU.
- * @param {string} dataDir @returns {State|null}
+ * boot), it can't be used (corrupted, an unsupported save version after an engine upgrade), or its
+ * matchId isn't a real, non-empty string (an unidentifiable match can't prove reconnect continuity
+ * to a client, so it's no more usable than a corrupted save) — NEVER throws. Synchronous: called
+ * once, at worker boot, before anything else needs the CPU.
+ * @param {string} dataDir @returns {{matchId: string, state: State}|null}
  */
 export function readSnapshot(dataDir) {
   const path = snapshotPath(dataDir);
   if (!existsSync(path)) return null;
   try {
-    return deserializeGame(JSON.parse(readFileSync(path, "utf8")));
+    const parsed = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof parsed.matchId !== "string" || !parsed.matchId) throw new Error("snapshot has no valid matchId");
+    return { matchId: parsed.matchId, state: deserializeGame(parsed.save) };
   } catch (err) {
     console.error(`match snapshot at ${path} could not be read, starting fresh instead:`, err.message);
     return null;

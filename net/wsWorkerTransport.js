@@ -31,22 +31,25 @@ import { buildStateMessage } from "./wsServerTransport.js";
  * @param {import("http").Server} httpServer
  * @param {import("worker_threads").Worker} worker - already spawned (new Worker("server/matchWorker.js", {workerData}))
  * @param {{allowedOrigins?: string[], path?: string}} [opts]
- * @returns {Promise<{owners: string[], createGameStateOpts: Object, close: () => void}>} resolves
- *   once the worker's own "ready" message arrives; owners/createGameStateOpts are that same
- *   message's own data, exposed here so a caller doesn't need its own separate copy or a second
- *   round-trip to the worker to learn what it already told this function
+ * @returns {Promise<{owners: string[], createGameStateOpts: Object, matchId: string, close: () => void}>}
+ *   resolves once the worker's own "ready" message arrives; owners/createGameStateOpts/matchId are
+ *   that same message's own data, exposed here so a caller doesn't need its own separate copy or a
+ *   second round-trip to the worker to learn what it already told this function. `matchId` (T-029b)
+ *   is the worker's own — recovered from a restored snapshot, or freshly minted (server/matchWorker.js's
+ *   own job either way); this file only relays it into the wire's welcome message, same as owners/
+ *   createGameStateOpts.
  */
 export function attachWsMatchWorker(httpServer, worker, opts = {}) {
   const { allowedOrigins, path } = opts;
 
   return new Promise(resolve => {
     worker.once("message", readyMsg => {
-      const { owners, createGameStateOpts } = readyMsg;
+      const { owners, createGameStateOpts, matchId } = readyMsg;
       const bySeat = new Map();               // owner -> live connection, at most one per seat
       const lastSnapshotBySeat = new Map();    // owner -> last quantized snapshot sent (T-028b)
 
       function welcomePayload(seat) {
-        return JSON.stringify({ type: "welcome", seat, createGameState: createGameStateOpts });
+        return JSON.stringify({ type: "welcome", seat, matchId, createGameState: createGameStateOpts });
       }
 
       function onUpgrade(req, socket, head) {
@@ -97,6 +100,7 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
       resolve({
         owners,
         createGameStateOpts,
+        matchId,
         /** Stop accepting new upgrades on this httpServer for this match and close every live
          *  connection. Idempotent. Does NOT terminate the worker — that's owned by whoever spawned
          *  it, the same way attachWsMatch's own close() never owns the httpServer it was given. */

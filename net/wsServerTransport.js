@@ -7,9 +7,15 @@
 
    WIRE PROTOCOL, both directions JSON text frames over net/ws.js:
      server -> client
-       {type:"welcome", seat, createGameState:{planetId,seed,sizeMult,resourceMult,swapAsym}}
+       {type:"welcome", seat, matchId, createGameState:{planetId,seed,sizeMult,resourceMult,swapAsym}}
          sent once, immediately on connect — everything a client needs to regenerate this match's
          map locally (ADR-0009: the map is deterministic from these fields, so it's never sent).
+         `matchId` (T-029b) is this match's stable identity, minted once per attachWsMatch() call —
+         a reconnecting client compares it against whatever it saw on its PREVIOUS welcome to tell
+         "I rejoined the same match" from "this is a different one" (ADR-0012's "restart-resume and
+         player-reconnect are deliberately the same mechanism"). This in-process path never restores
+         from a snapshot (that's server/matchWorker.js's own job, T-029a), so every attachWsMatch()
+         call mints a fresh id — there is never an existing identity to recover here.
        {type:"state", full:true, proj: <engine/projectionDelta.js's quantizeForWire(projectFor(...))>}
          the FIRST push to a given connection — a full (but quantized, T-028c) snapshot, so a fresh
          client (or one that just reconnected) has a real baseline to delta against from here on.
@@ -52,6 +58,7 @@
 
 "use strict";
 
+import { randomUUID } from "node:crypto";
 import { acceptUpgrade } from "./ws.js";
 import { admit, toCommandResult } from "../server/matchLoop.js";
 import { projectFor } from "../engine/projection.js";
@@ -84,16 +91,17 @@ export function buildStateMessage(rawProj, lastSnapshotBySeat, seat) {
  * @param {import("http").Server} httpServer
  * @param {ReturnType<import("../server/matchLoop.js").createMatch>} match
  * @param {{allowedOrigins?: string[]}} [opts]
- * @returns {{broadcastState: () => void, close: () => void}}
+ * @returns {{matchId: string, broadcastState: () => void, close: () => void}}
  */
 export function attachWsMatch(httpServer, match, opts = {}) {
   const { allowedOrigins, path } = opts;
+  const matchId = randomUUID();   // T-029b — see this file's own header for why always-fresh here
   const bySeat = new Map();   // owner -> live connection, at most one per seat at a time
   const lastSnapshotBySeat = new Map();   // owner -> the last projectFor(...) output actually SENT on the current connection (T-028b)
 
   function welcomePayload(seat) {
     const { planetId, seed, sizeMult, resourceMult, swapAsym } = match.state;
-    return JSON.stringify({ type: "welcome", seat, createGameState: { planetId, seed, sizeMult, resourceMult, swapAsym } });
+    return JSON.stringify({ type: "welcome", seat, matchId, createGameState: { planetId, seed, sizeMult, resourceMult, swapAsym } });
   }
 
   function onUpgrade(req, socket, head) {
@@ -147,6 +155,7 @@ export function attachWsMatch(httpServer, match, opts = {}) {
   };
 
   return {
+    matchId,
     /** Push a fresh per-seat projection to every currently-connected seat. Caller-driven, once per
      *  stepMatch tick in practice — this function has no timer or loop of its own. The first push
      *  on a connection is always full (T-028b: lastSnapshotBySeat has no entry for this seat yet);

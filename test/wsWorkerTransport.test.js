@@ -54,6 +54,19 @@ test("welcome handshake: the client regenerates the same map the worker's own ma
   } finally { cleanup(); }
 });
 
+test("T-029b: attachWsMatchWorker() resolves with a real matchId matching the worker's own ready message", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  try {
+    const readyPromise = new Promise(resolve => worker.once("message", resolve));
+    const wsMatch = await attachWsMatchWorker(server, worker);
+    const ready = await readyPromise;
+    assert.equal(typeof wsMatch.matchId, "string");
+    assert.ok(wsMatch.matchId.length > 0);
+    assert.equal(wsMatch.matchId, ready.matchId, "attachWsMatchWorker must expose the SAME matchId the worker itself minted/restored, not a copy or a placeholder");
+  } finally { server.close(); worker.terminate(); }
+});
+
 test("state pushes are worker-driven, unprompted — no broadcastState() to call, unlike the in-process attachWsMatch", async () => {
   const worker = spawnMatchWorker();
   const server = createServer();

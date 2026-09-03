@@ -89,6 +89,26 @@ test("a worker given a dataDir with no snapshot yet starts fresh — ready.resto
   } finally { await worker.terminate(); }
 });
 
+/* ---------- T-029b: every match has a stable matchId, restore recovers the SAME one ---------- */
+
+test("a fresh worker (no dataDir, or nothing snapshotted yet) mints a real matchId — a non-empty string, not a placeholder", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    assert.equal(typeof ready.matchId, "string");
+    assert.ok(ready.matchId.length > 0);
+  } finally { await worker.terminate(); }
+});
+
+test("two independently-fresh-booted workers get DIFFERENT matchIds — not a hardcoded constant", async () => {
+  const a = spawnMatchWorker(1);
+  const b = spawnMatchWorker(2);
+  try {
+    const [readyA, readyB] = await Promise.all([waitFor(a, m => m.type === "ready"), waitFor(b, m => m.type === "ready")]);
+    assert.notEqual(readyA.matchId, readyB.matchId);
+  } finally { await Promise.all([a.terminate(), b.terminate()]); }
+});
+
 test("a worker given a dataDir containing a real snapshot restores from it instead of starting fresh — the restored unit's actual position wins over a fresh spawn from the seed the worker was otherwise given", async () => {
   const dir = mkdtempSync(join(tmpdir(), "spacecities-matchworker-restore-test-"));
   try {
@@ -115,7 +135,7 @@ test("a worker given a dataDir containing a real snapshot restores from it inste
     assert.equal(w.order, null, "fixture sanity: the unit must have reached its destination and gone idle before snapshotting");
     assert.ok(w.x !== origX || w.y !== origY, "fixture sanity: the unit must have actually moved before it's snapshotted");
     const expectedX = w.x, expectedY = w.y;
-    await writeSnapshot(dir, match.state);
+    await writeSnapshot(dir, "match-from-before-the-restart", match.state);
 
     // A DIFFERENT seed in workerData's own createGameStateOpts than the snapshot's — proving the
     // restored snapshot wins over a fresh createGameState call, not merely that the worker
@@ -126,6 +146,10 @@ test("a worker given a dataDir containing a real snapshot restores from it inste
     try {
       const ready = await waitFor(worker, m => m.type === "ready");
       assert.equal(ready.restored, true);
+      // T-029b's own core proof: restoring recovers the SNAPSHOT's matchId, not a freshly-minted
+      // one — this is what lets a reconnecting client tell "I rejoined the same match" from "this
+      // is a different match that happens to share a URL".
+      assert.equal(ready.matchId, "match-from-before-the-restart");
 
       const first = await waitFor(worker, m => m.type === "state" && m.seat === "player");
       const restoredUnit = first.proj.units.find(u => u.id === w.id);

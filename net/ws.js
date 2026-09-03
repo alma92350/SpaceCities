@@ -41,6 +41,11 @@ const KNOWN_OPCODES = new Set([OPCODE.CONTINUATION, OPCODE.TEXT, OPCODE.BINARY, 
 
 export const CLOSE_CODE = Object.freeze({
   NORMAL: 1000, GOING_AWAY: 1001, PROTOCOL_ERROR: 1002, UNSUPPORTED_DATA: 1003,
+  // 1006 (ABNORMAL) is RFC 6455 §7.4.1's own reserved code for exactly this situation: it must
+  // NEVER be sent ON THE WIRE in a real close frame, but IS the correct value to report to an API
+  // consumer when the connection ended with no close frame at all (T-029b — see the raw-socket
+  // "close" handler below, the one path that can report it).
+  ABNORMAL: 1006,
   INVALID_PAYLOAD: 1007, POLICY_VIOLATION: 1008, MESSAGE_TOO_BIG: 1009, INTERNAL_ERROR: 1011,
 });
 
@@ -328,7 +333,18 @@ function createConnection(socket, { pingIntervalMs, maxPayload }) {
 
   socket.on("data", onData);
   socket.on("error", e => { stopPing(); conn.onerror?.(e); });
-  socket.on("close", () => { stopPing(); });
+  // T-029b: the raw TCP socket ending is the ONLY event that fires unconditionally, whatever
+  // caused it — a clean close handshake (OPCODE.CLOSE above) or abort() both already call
+  // socket.end(), which lands here too once the OS finishes the shutdown, but ALSO an abrupt
+  // death with no close frame at all (a killed/crashed process, a dropped network path) — the
+  // realistic shape a server restart or a real network failure actually takes, not a graceful
+  // handshake. `closed` is already set true by whichever of those paths got there first, so this
+  // only ever reports onclose itself for the abrupt case that no other path already handled —
+  // never a double-fire on top of a clean close or an abort().
+  socket.on("close", () => {
+    stopPing();
+    if (!closed) { closed = true; conn.onclose?.(CLOSE_CODE.ABNORMAL, ""); }
+  });
 
   // ~20-25s, per dossier 04 §1.3's own measurement: a real 10+ minute idle survival needs a ping
   // in that window, and this is a real RFC 6455 ping frame (opcode 0x9), not an app-level nudge —

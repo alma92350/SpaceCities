@@ -287,6 +287,27 @@ test("acceptUpgrade + a real Node WebSocket client: the close handshake complete
   }));
 });
 
+test("acceptUpgrade + a real Node WebSocket client: an ABRUPT disconnect (raw socket destroyed, no close frame ever crosses the wire — a crash, not a shutdown) still fires the server's own onclose, with RFC 6455's own 1006 (T-029b: a match-server restart or a dropped connection looks EXACTLY like this, never a clean close handshake, so a caller relying on onclose to clean up per-connection state must be told either way)", async () => {
+  await withServer((server, port) => new Promise((resolve, reject) => {
+    let rawSocket = null;
+    // A second, independent listener on the SAME upgrade event withServer's own already installs
+    // (Node's EventEmitter calls both, in registration order) — purely to grab the raw TCP socket
+    // for this test's own use; acceptUpgrade itself is still the only thing that actually drives it.
+    server.on("upgrade", (req, socket) => { rawSocket = socket; });
+    const timer = setTimeout(() => reject(new Error("onclose never fired after an abrupt raw-socket close")), 2000);
+    server.once("__connection", conn => {
+      conn.onclose = (code) => {
+        clearTimeout(timer);
+        try { assert.equal(code, CLOSE_CODE.ABNORMAL); resolve(); }
+        catch (e) { reject(e); }
+      };
+    });
+    const ws = new WebSocket(`ws://localhost:${port}/`);
+    ws.addEventListener("open", () => rawSocket.destroy());
+    ws.addEventListener("error", () => {});   // an abrupt destroy also surfaces here on the client side — expected, not a failure
+  }));
+});
+
 test("acceptUpgrade rejects a handshake with the wrong Sec-WebSocket-Version", async () => {
   await withServer((server, port) => new Promise((resolve, reject) => {
     const req = httpRequest({

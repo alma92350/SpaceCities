@@ -63,6 +63,28 @@ async function setupOneSeat() {
 
 testTransportContract("wsClientTransport", setupOneSeat);
 
+test("T-029b: attachWsMatch() mints a real matchId, and the wire welcome message actually carries that exact id", async () => {
+  const match = makeMatch();
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  const port = await listen(server);
+  assert.equal(typeof wsMatch.matchId, "string");
+  assert.ok(wsMatch.matchId.length > 0);
+  try {
+    // A RAW native WebSocket, not net/wsClientTransport.js — this test's own job is to prove the
+    // wire bytes themselves carry wsMatch.matchId, which a higher-level Transport deliberately
+    // never re-exposes (it's internal reconnect bookkeeping, T-029b's own wsReconnect.test.js
+    // suite covers that side of the contract) — reading the raw welcome JSON is the direct way.
+    const welcome = await new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://localhost:${port}/?seat=player`);
+      ws.addEventListener("message", ev => { ws.close(); resolve(JSON.parse(ev.data)); });
+      ws.addEventListener("error", reject);
+    });
+    assert.equal(welcome.type, "welcome");
+    assert.equal(welcome.matchId, wsMatch.matchId);
+  } finally { server.close(); }
+});
+
 test("welcome handshake: the client regenerates the same map the server's own match is using", async () => {
   const { transport, cleanup } = await setupOneSeat();
   try {
