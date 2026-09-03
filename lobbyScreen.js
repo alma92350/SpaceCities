@@ -41,6 +41,7 @@ import { enterObserverMode } from "./observer.js";
 import { game } from "./session.js";
 import * as sound from "./sound.js";
 import { saveLiveMatch, clearLiveMatch } from "./liveMatchStorage.js";
+import { initChatPanel } from "./chat.js";
 
 async function apiPost(path, body) {
   const res = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
@@ -107,6 +108,7 @@ async function joinLive(matchId, owner, token, statusEl) {
   const closeTransport = transport.close.bind(transport);
   transport.close = () => { clearLiveMatch(); closeTransport(); };
   bootState(firstState, { intro: true, transport });
+  initChatPanel();   // T-038 — after bootState, same as everywhere else here: game.transport must already be this one
   transport.onEvent(e => {
     if (e.type !== "state") return;
     applyLiveState(game.state, e.state);
@@ -139,6 +141,7 @@ async function spectateLive(matchId, statusEl) {
   bootState(firstState, { intro: false, transport });   // no objectives strip — a spectator has no checklist of their own
   game.networkSpectate = true;
   enterObserverMode();
+  initChatPanel();   // T-038 — after networkSpectate is set: initChatPanel's own gate reads it (no sendChat here to key off instead)
   transport.onEvent(e => { if (e.type === "state") applyLiveState(game.state, e.state); });
 }
 

@@ -37,6 +37,25 @@
    to work on it. `spectatorsEnabled` (default true — FR-7's own "unless the host has disabled
    spectators") is a plain opt, not a callback like authorizeSeat: there is no per-connection identity
    to authorize, only a single host-wide on/off switch.
+
+   T-038 (FR-12): IN-MATCH CHAT, relayed entirely HERE in the parent — never posted to the worker at
+   all. Chat isn't part of the deterministic simulation (no admit()/stepMatch, no seq/ack, no
+   ordering to preserve), and this file already holds direct references to every live connection
+   (bySeat AND spectators) that a fan-out needs, so routing it through the worker would only add a
+   thread hop for no benefit. Wire shape {type:"chat", text} (client -> server) never collides with
+   an ordinary command envelope — net/commandEnvelope.js's own encode() output is {v,seq,tick,cmd},
+   which has no `type` key at all — so conn.onmessage branches on envelope.type === "chat" before
+   falling through to the existing command-relay path unchanged. net/chatLimiter.js owns the two
+   pure decisions (length-capped, rate-limited); this file only calls them and does the fan-out.
+   Delivered to EVERY connected seat, including the sender itself (a single server-ordered stream,
+   so every client's own chat log agrees on order — no client-side optimistic echo to keep in
+   sync), AND to every connected spectator (read-only recipients, same as the state they already get
+   full vision of) — but a spectator's own conn.onmessage is still never wired at all (this file's
+   own T-037 section above), so a spectator can WATCH chat, never send it; "a spectator cannot issue
+   any command" stays true by construction, chat included.
+   chatTimestampsBySeat is keyed by SEAT, not by connection — surviving a reconnect (T-036), the
+   same durable-identity reasoning bySeat's own token-based reclaim already relies on, so a quick
+   disconnect/reconnect cycle can't reset a seat's own rate-limit budget for free.
    ============================================================ */
 
 "use strict";
@@ -44,6 +63,7 @@
 import { acceptUpgrade } from "./ws.js";
 import { buildStateMessage } from "./wsServerTransport.js";
 import { SPECTATOR_SEAT } from "../engine/projection.js";
+import { validChatLength, tryConsume } from "./chatLimiter.js";
 
 /**
  * @param {import("http").Server} httpServer
@@ -70,6 +90,7 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
       const lastSnapshotBySeat = new Map();    // owner -> last quantized snapshot sent (T-028b)
       const spectators = new Set();                  // every live spectator connection, unbounded (T-037)
       const lastSnapshotBySpectator = new Map();      // connection -> its own last quantized snapshot (T-028b, per spectator)
+      const chatTimestampsBySeat = new Map();         // seat -> number[] of recent chat sends (T-038), keyed by seat so a reconnect can't reset the budget
 
       function welcomePayload(seat) {
         return JSON.stringify({ type: "welcome", seat, matchId, createGameState: createGameStateOpts });
@@ -120,6 +141,22 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
             if (isBinary) return;   // a client only ever sends a JSON command envelope, never binary
             let envelope;
             try { envelope = JSON.parse(data); } catch { return; }   // malformed JSON: nothing to relay
+
+            if (envelope.type === "chat") {
+              // T-038: handled entirely here — see this file's own header. Never forwarded to the
+              // worker (no seq/ack, not part of the sim), and a rejection (too long / rate-limited)
+              // is always silent: no error frame, just nothing sent, same "malformed JSON" posture
+              // immediately above.
+              if (!validChatLength(envelope.text)) return;
+              let timestamps = chatTimestampsBySeat.get(seat);
+              if (!timestamps) { timestamps = []; chatTimestampsBySeat.set(seat, timestamps); }
+              if (!tryConsume(timestamps, Date.now())) return;
+              const wire = JSON.stringify({ type: "chat", from: seat, text: envelope.text });
+              for (const c of bySeat.values()) c.send(wire);   // every seat, including the sender itself
+              for (const c of spectators) c.send(wire);        // read-only recipients (T-037)
+              return;
+            }
+
             // Shape validation and application both happen INSIDE the worker (admit()/stepMatch),
             // never here — this handler is a pure relay, exactly ADR-0011's own "parent relays
             // commands and state" wording. The worker answers a shape-rejection immediately and an
@@ -173,6 +210,7 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
           for (const conn of spectators) conn.close();
           spectators.clear();
           lastSnapshotBySpectator.clear();
+          chatTimestampsBySeat.clear();
         },
       });
     });

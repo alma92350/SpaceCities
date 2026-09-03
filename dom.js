@@ -50,6 +50,7 @@ export const observerBtn = byId("observerBtn");
 export const observerBannerEl = byId("observerBanner");
 export const spectateBarEl = byId("spectateBar");
 export const observerPanelEl = byId("observerPanel");
+export const chatPanelEl = byId("chatPanel");
 export const techChartBtn = byId("techChartBtn");
 export const techChartEl = byId("techChart");
 export const volumeEl = byId("volume");

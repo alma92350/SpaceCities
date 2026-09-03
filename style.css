@@ -585,6 +585,71 @@ body.scenario .under-attack { top: 64px; z-index: 6; }
 .observer-row { display: flex; flex-direction: column; }
 .observer-label { color: var(--accent); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
 
+/* T-038 (FR-12): the in-match chat panel — bottom-LEFT, stacked directly above the minimap (which
+   also anchors bottom-left), so it never collides with .observer-panel's own bottom-right corner —
+   load-bearing for a T-037 spectator, who gets both at once (the full stats readout AND a
+   read-only view of chat). Repositioned at the SAME two breakpoints the minimap itself
+   repositions at, below, so the stack keeps its footing as the minimap shrinks and slides in. */
+.chat-panel {
+  position: absolute;
+  left: 24px;
+  bottom: 161px;
+  width: 260px;
+  max-height: 220px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  z-index: 6;
+  overflow: hidden;
+}
+.chat-panel.hidden { display: none; }
+.chat-head {
+  padding: 6px 10px;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 11.5px;
+  border-bottom: 1px solid var(--border);
+}
+.chat-log {
+  flex: 1;
+  min-height: 60px;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: 6px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.chat-line { line-height: 1.35; word-break: break-word; }
+.chat-from { color: var(--accent); font-weight: 700; }
+.chat-text { color: var(--text); }
+.chat-form { display: flex; gap: 6px; padding: 6px 8px; border-top: 1px solid var(--border); }
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+}
+.chat-input:focus { border-color: var(--accent); outline: none; }
+.chat-send {
+  padding: 4px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.chat-send:hover { border-color: var(--accent); color: var(--accent); }
+
 .gate-chip.stalled {
   border-color: var(--bad);
   color: var(--bad);
@@ -1602,11 +1667,14 @@ html, body { overscroll-behavior: none; }
   #selectionPanel { width: 200px; padding: 8px; }
   .minimap { width: 150px; height: 94px; left: 12px; bottom: 12px; }
   .help-key { flex-basis: 130px; }
+  .chat-panel { left: 12px; bottom: 118px; width: 220px; }
 }
 @media (max-width: 600px) {
   #topbar .title { display: none; }   /* reclaim the width for the resource readout */
   #selectionPanel { width: 168px; }
   .minimap { width: 118px; height: 74px; }
+  .chat-panel { width: 170px; max-height: 180px; }
+  .chat-log { max-height: 100px; }
 }
 
 /* A floating handle that collapses the bottom sheet in portrait (wired in

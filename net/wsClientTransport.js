@@ -253,6 +253,14 @@ export function createWsClientTransport(url, opts = {}) {
           emit({ type: "commandResult", seq: msg.seq, result: msg.result });
           return;
         }
+        if (msg.type === "chat") {
+          // T-038: no seq/ack (net/wsWorkerTransport.js's own header on why chat isn't a command at
+          // all) — just forwarded on as its own event kind, same as "disconnected"/"reconnected"
+          // above: safely ignorable by a caller that only knows the universal StateEvent/
+          // CommandResultEvent shapes.
+          emit({ type: "chat", from: msg.from, text: msg.text });
+          return;
+        }
       });
     }
 
@@ -268,6 +276,14 @@ export function createWsClientTransport(url, opts = {}) {
           const mySeq = ++seq;
           ws.send(JSON.stringify(encode(cmd, mySeq)));
           return new Promise(res => { pendingBySeq.set(mySeq, res); });
+        },
+        // T-038: no seq/ack, no queued Promise (unlike submitCommand) — chat isn't part of the
+        // deterministic sim, so there's no "result" to correlate. A message sent while disconnected
+        // (mid-reconnect, or after close()) is silently dropped, never queued for later — the wire
+        // shape net/wsWorkerTransport.js's own onmessage expects, {type:"chat", text}.
+        sendChat(text) {
+          if (closed || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: "chat", text }));
         },
         onEvent(handler) {
           handlers.add(handler);

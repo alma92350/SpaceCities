@@ -99,6 +99,13 @@ export function createWsSpectatorTransport(url) {
         emit({ type: "state", state: { ...reassembleSpectatorProjection(lastProj, map), seed, planetId } });
         return;
       }
+      if (msg.type === "chat") {
+        // T-038: read-only, same as everything else this transport hands a caller — there is no
+        // sendChat here to pair with it (this file's own header: "a spectator cannot issue any
+        // command" stays true by construction, chat included), just the passive receive.
+        emit({ type: "chat", from: msg.from, text: msg.text });
+        return;
+      }
     });
   });
 }

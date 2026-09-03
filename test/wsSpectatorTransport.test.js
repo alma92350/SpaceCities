@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
 import { createWsSpectatorTransport } from "../net/wsSpectatorTransport.js";
+import { createWsClientTransport } from "../net/wsClientTransport.js";
 
 const WORKER_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "server", "matchWorker.js");
 let nextSeed = 700000;
@@ -106,6 +107,20 @@ test("createWsSpectatorTransport rejects when spectatorsEnabled:false refuses th
   const { port, cleanup } = await setupSpectator({ spectatorsEnabled: false });
   try {
     await assert.rejects(createWsSpectatorTransport(`ws://localhost:${port}/?spectate=1`));
+  } finally { cleanup(); }
+});
+
+test("T-038: a spectator transport also receives a seat's chat as a real {type:'chat'} event — read-only, same as everyone else's own view of it", async () => {
+  const { port, cleanup } = await setupSpectator();
+  try {
+    const seat = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+    const transport = await createWsSpectatorTransport(`ws://localhost:${port}/?spectate=1`);
+    const watcherSees = new Promise(resolve => transport.onEvent(e => { if (e.type === "chat") resolve(e); }));
+    seat.sendChat("watching too?");
+    const msg = await watcherSees;
+    assert.equal(msg.text, "watching too?");
+    assert.equal(msg.from, "player");
+    seat.close(); transport.close();
   } finally { cleanup(); }
 });
 

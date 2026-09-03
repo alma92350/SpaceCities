@@ -461,3 +461,140 @@ test("attachWsMatchWorker(...).close() also closes every live spectator connecti
     await closed;
   } finally { server.close(); worker.terminate(); }
 });
+
+/* ---------- T-038 (FR-12): in-match text chat — relayed here in the parent, never reaching the worker ---------- */
+
+async function connectRaw(port, query) {
+  const ws = new WebSocket(`ws://localhost:${port}/?${query}`);
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("error", reject);
+    ws.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "welcome") resolve(); });
+  });
+  return ws;
+}
+
+function nextChatFrom(ws) {
+  return new Promise(resolve => {
+    ws.addEventListener("message", function handler(ev) {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "chat") { ws.removeEventListener("message", handler); resolve(msg); }
+    });
+  });
+}
+
+test("T-038: a seat's chat message is relayed to EVERY connected seat, including the sender itself", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    const playerSees = nextChatFrom(player);
+    const aiSees = nextChatFrom(ai);
+    player.send(JSON.stringify({ type: "chat", text: "gl hf" }));
+    const [fromPlayer, fromAi] = await Promise.all([playerSees, aiSees]);
+    assert.equal(fromPlayer.text, "gl hf");
+    assert.equal(fromPlayer.from, "player");
+    assert.equal(fromAi.text, "gl hf");
+    assert.equal(fromAi.from, "player", "the recipient must know WHO sent it, not just what was said");
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-038: a chat message is ALSO relayed to every connected spectator — read-only recipients, same as everyone else", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const watcher = await connectRaw(port, "spectate=1");
+    const watcherSees = nextChatFrom(watcher);
+    player.send(JSON.stringify({ type: "chat", text: "watching too?" }));
+    const msg = await watcherSees;
+    assert.equal(msg.text, "watching too?");
+    assert.equal(msg.from, "player");
+    player.close(); watcher.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-038: a chat message never reaches the worker — no commandResult is ever produced for it", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    let sawCommandResult = false;
+    player.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "commandResult") sawCommandResult = true; });
+    const echo = nextChatFrom(player);
+    player.send(JSON.stringify({ type: "chat", text: "just chatting" }));
+    await echo;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(sawCommandResult, false, "chat has no seq/ack — it must never be admitted as a command");
+    player.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-038: a message longer than the length cap is silently dropped, never relayed to anyone", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    let aiSawChat = false;
+    ai.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "chat") aiSawChat = true; });
+    player.send(JSON.stringify({ type: "chat", text: "x".repeat(1000) }));
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(aiSawChat, false, "an over-length message must never reach another seat");
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-038: more messages than the rate limit allows within its window are dropped past the limit", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    const received = [];
+    ai.addEventListener("message", ev => { const m = JSON.parse(ev.data); if (m.type === "chat") received.push(m.text); });
+    for (let i = 0; i < 10; i++) player.send(JSON.stringify({ type: "chat", text: `msg${i}` }));
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.ok(received.length > 0 && received.length < 10,
+      `a flood of 10 rapid messages must be partially throttled, not all delivered — got ${received.length}`);
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+/* ---------- T-038: the CLIENT wrapper (net/wsClientTransport.js) — sendChat() and the "chat" event,
+   proven through createWsClientTransport itself rather than a raw WebSocket, since the tests above
+   already cover the SERVER's own relay/cap/rate-limit behavior on the wire; these instead prove the
+   client-side convenience wrapper around that same wire shape is wired correctly. ---------- */
+
+test("T-038: transport.sendChat() is delivered as a real {type:'chat'} event via onEvent, to every connected seat including the sender", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+    const ai = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);
+    const nextChat = t => new Promise(resolve => t.onEvent(e => { if (e.type === "chat") resolve(e); }));
+    const playerSees = nextChat(player);
+    const aiSees = nextChat(ai);
+    assert.equal(typeof player.sendChat, "function", "the client transport must expose a real sendChat method");
+    player.sendChat("gl hf");
+    const [fromPlayer, fromAi] = await Promise.all([playerSees, aiSees]);
+    assert.equal(fromPlayer.text, "gl hf");
+    assert.equal(fromPlayer.from, "player");
+    assert.equal(fromAi.text, "gl hf");
+    assert.equal(fromAi.from, "player");
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});

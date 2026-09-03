@@ -41,6 +41,7 @@ import { UNITS, BUILDINGS } from "./engine/entities.js";
 import { renderHUD, resetPanelSignature } from "./hud.js";
 import { observedState, exitObserverMode, enterObserverMode } from "./observer.js";
 import { renderObserverPanel } from "./observerPanel.js";
+import { hideChatPanel } from "./chat.js";
 import { showObjectives, hideObjectives, showSeedChip, showFactionChip, showGameOver, showScenarioEnd, showGalaxyToast } from "./overlays.js";
 import { renderMapSelect, setup, DIFFICULTY_OPTIONS } from "./setup.js";
 import { captureCompetitionResult, spectatedGameOverBlock } from "./competition.js";
@@ -459,6 +460,7 @@ export function restartToMapSelect() {
   // HUD tick happens to hide them. The same "don't leave the session half torn down" reasoning as
   // the exitObserverMode call above.
   renderObserverPanel();
+  hideChatPanel();   // T-038 — same dangling-session hazard: left showing, the NEXT game's screen would carry the PREVIOUS match's chat log
   clearPause();   // leaving a game clears any pause + the PAUSED banner
   pauseBtn.classList.add("hidden");   // …and the topbar pause control (no game to pause)
   renderMapSelect();
