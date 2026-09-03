@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { createGameState } from "../engine/state.js";
 import { mulberry32 } from "../engine/rng.js";
 import { entitySnapshot } from "./_helpers.js";
-import { createMatch, admit, stepMatch, INPUT_DELAY_TICKS } from "../server/matchLoop.js";
+import { createMatch, admit, stepMatch, INPUT_DELAY_TICKS, toCommandResult } from "../server/matchLoop.js";
 import { encode, PROTOCOL_VERSION } from "../net/commandEnvelope.js";
 
 function makeMatch(seed = 12345) {
@@ -175,4 +175,18 @@ test("exit criterion: shuffled arrival (admission) order yields an identical fin
 
   assert.equal(reversed, forward, "reversed admission order must not change the outcome");
   assert.equal(shuffled, forward, "arbitrarily shuffled admission order must not change the outcome");
+});
+
+/* ---------- toCommandResult (T-029): a shared log-record -> wire-CommandResult translator ---------- */
+
+test("toCommandResult() turns a rejected record's {rejected:code} shape into {ok:false, code}", () => {
+  assert.deepEqual(toCommandResult({ rejected: "not-owner" }), { ok: false, code: "not-owner" });
+});
+
+test("toCommandResult() turns an applied record's success payload into {ok:true, result}", () => {
+  assert.deepEqual(toCommandResult({ buildingId: "b42" }), { ok: true, result: { buildingId: "b42" } });
+});
+
+test("toCommandResult() turns a bare null (applied, no payload) into {ok:true, result:null}", () => {
+  assert.deepEqual(toCommandResult(null), { ok: true, result: null });
 });

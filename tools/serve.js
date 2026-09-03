@@ -14,15 +14,20 @@
 
    T-027 — "the real multiplayer server" this file's header used to say it was ahead of — lands
    here: ADR-0010's own deployment decision #7 is "serve everything on one port: static assets, the
-   game WebSocket, and /mcp." createAppServer() is that server. It still has no lobby (T-033,
-   Phase 4) or multi-match worker hosting (T-029) to hand a connection a REAL choice of match, so it
-   boots exactly one fixed-at-startup demo match (a fresh random seed each boot, ADR-0011's "one
-   match per process" posture) and binds the WebSocket game transport (net/wsServerTransport.js,
-   T-026) to it at the root path with a real 20 Hz tick loop — the same `?seat=<owner>` binding
-   T-026's own tests already exercise, now actually reachable over the network for the first time.
-   /mcp is RESERVED (a 501, not a 404 or a hijacked WebSocket upgrade) since T-049 (Phase 6) is its
-   real implementation — this file's only job is to make sure nothing else quietly claims that path
-   first, static serving and the game socket both included.
+   game WebSocket, and /mcp." createAppServer() is that server. /mcp is RESERVED (a 501, not a 404
+   or a hijacked WebSocket upgrade) since T-049 (Phase 6) is its real implementation — this file's
+   only job is to make sure nothing else quietly claims that path first, static serving and the
+   game socket both included.
+
+   T-029: the demo match now runs inside its own worker_threads Worker (server/matchWorker.js),
+   relayed to real WebSocket connections by net/wsWorkerTransport.js — ADR-0011's own architecture,
+   not a shortcut this file invented. There is still no lobby (T-033, Phase 4) to hand a connection
+   a REAL choice of match, so this boots exactly one fixed-at-startup demo match (a fresh random
+   seed each boot) at the WebSocket root — the same `?seat=<owner>` binding T-026's own tests
+   already exercise — but it's now genuinely isolated in its own thread: a bug that crashes this
+   match's simulation can't take the whole server down with it, and a second concurrent match (once
+   T-033's lobby can create one) would run on its own CPU core rather than competing with this one
+   for Node's single event loop.
    ============================================================ */
 
 "use strict";
@@ -32,12 +37,10 @@ import { readFile } from "node:fs/promises";
 import { join, normalize, extname, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { Worker } from "node:worker_threads";
 import { runProbe } from "./dataProbe.js";
 import { runBenchSuite } from "./bench.js";
-import { createGameState } from "../engine/state.js";
-import { mulberry32 } from "../engine/rng.js";
-import { createMatch, stepMatch } from "../server/matchLoop.js";
-import { attachWsMatch } from "../net/wsServerTransport.js";
+import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -88,9 +91,7 @@ export function resolveSafePath(root, pathname) {
   return withinRoot ? filePath : null;
 }
 
-const TICK_HZ = 20;   // engine/loop.js's own default rate; docs/analysis/04-hf-deployment.md's F1 measured 20Hz comfortable over the real HF edge
-const TICK_DT = 1 / TICK_HZ;
-const TICK_MS = 1000 / TICK_HZ;
+const MATCH_WORKER_FILE = join(ROOT, "server", "matchWorker.js");
 
 const requestHandler = async (req, res) => {
   try {
@@ -155,40 +156,45 @@ const requestHandler = async (req, res) => {
 // Builds one fresh HTTP server: static assets, the /mcp reservation, and one demo match's
 // WebSocket game transport, all on whatever port the caller eventually `.listen()`s. A factory
 // rather than a module-level singleton so tests can build an independent instance per test (its
-// own demo match, its own tick timer) and tear it down cleanly afterward — the same reason
-// net/wsServerTransport.js's attachWsMatch is a function and not a side effect of importing it.
+// own demo match, its own worker) and tear it down cleanly afterward — the same reason
+// net/wsWorkerTransport.js's attachWsMatchWorker is a function and not a side effect of importing
+// it. ASYNC (unlike T-027's original version): attachWsMatchWorker itself must wait for the
+// worker's own "ready" message before WebSocket handling can be wired up at all.
 //
 // The demo match: no lobby exists yet (T-033, Phase 4) to hand a connection a real choice, so this
-// boots exactly one fixed-at-startup skirmish (ADR-0011's "one match per process" posture) and
-// binds net/wsServerTransport.js to it at the WebSocket root ("/", the same pathname T-026's own
-// tests already use) with a real 20Hz tick loop — wall-clock real, not the compressed cadence
-// test fixtures use to avoid sitting around waiting. `path: "/"` keeps an upgrade aimed at the
-// reserved /mcp namespace above from also being accepted as this match's game socket.
-export function createAppServer() {
+// boots exactly one fixed-at-startup skirmish (a fresh random seed each boot) inside its own
+// worker_threads Worker (T-029, ADR-0011 — see server/matchWorker.js's own header for why a worker,
+// not just another match object in this process) and binds net/wsWorkerTransport.js to it at the
+// WebSocket root ("/", the same pathname T-026's own tests already use). `path: "/"` keeps an
+// upgrade aimed at the reserved /mcp namespace above from also being accepted as this match's game
+// socket.
+export async function createAppServer() {
   const server = createServer(requestHandler);
 
   const seed = (Math.floor(Math.random() * 0x100000000)) >>> 0;
-  const match = createMatch(createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) }));
-  const wsMatch = attachWsMatch(server, match, { path: "/" });
-  const tickTimer = setInterval(() => { stepMatch(match, TICK_DT); wsMatch.broadcastState(); }, TICK_MS);
+  const worker = new Worker(MATCH_WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed } } });
+  const wsMatch = await attachWsMatchWorker(server, worker, { path: "/" });
 
   return {
     server,
-    match,
-    // Stops this app's own timer and WebSocket attachment. The http.Server itself stays the
-    // caller's to close, same convention attachWsMatch's own close() already keeps.
-    close() { clearInterval(tickTimer); wsMatch.close(); },
+    owners: wsMatch.owners,
+    seed,
+    // Stops this app's own WebSocket attachment and terminates the match's own worker — unlike
+    // attachWsMatchWorker's own close() (which deliberately leaves worker lifecycle to its
+    // caller), THIS close() is that caller, so it owns ending it. The http.Server itself stays the
+    // caller's to close, same convention attachWsMatch/attachWsMatchWorker's own close() already keep.
+    close() { wsMatch.close(); worker.terminate(); },
   };
 }
 
 // Only bind a port when this file is run directly (`node tools/serve.js` / `npm start`), not when
 // it's imported — e.g. by a test — for `resolveSafePath` or `createAppServer`.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  const { server, match } = createAppServer();
+  const { server, owners, seed } = await createAppServer();
   server.listen(PORT, () => {
     console.log(`SpaceCities — serving ${ROOT}`);
     console.log(`  open  http://localhost:${PORT}/`);
-    console.log(`  demo match live: seed ${match.state.seed}, seats [${match.state.owners.join(", ")}] — connect ws://localhost:${PORT}/?seat=<owner>`);
+    console.log(`  demo match live: seed ${seed}, seats [${owners.join(", ")}] — connect ws://localhost:${PORT}/?seat=<owner>`);
     console.log("  stop  Ctrl+C");
   });
 }

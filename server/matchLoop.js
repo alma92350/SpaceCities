@@ -61,7 +61,31 @@ import { decode, stampRecord } from "../net/commandEnvelope.js";
 // default is a latency/batching-window choice, not a correctness requirement.
 export const INPUT_DELAY_TICKS = 3;
 
+// engine/loop.js's own default rate, and what docs/analysis/04-hf-deployment.md's F1 measured
+// comfortable over the real HF edge — the one cadence every REAL (wall-clock-driven) stepMatch
+// loop in this codebase drives at: tools/serve.js's single-process demo match (T-027) and
+// server/matchWorker.js's own worker-hosted one (T-029) alike. Test fixtures deliberately use a
+// much faster interval to avoid sitting around waiting — see e.g. test/wsTransport.test.js's own
+// startTicking comment — so this is NOT exported for them to reuse.
+export const TICK_HZ = 20;
+export const TICK_DT = 1 / TICK_HZ;
+export const TICK_MS = 1000 / TICK_HZ;
+
 const ownerIndex = (state, owner) => state.owners.indexOf(owner);
+
+// A log record's own `result` field is deliberately the SIMPLEST shape stepMatch itself needs —
+// `null`/a success payload for an applied command, `{rejected: code}` for one the codec declined
+// (see stepMatch's own comment). net/transport.js documents a different, client-facing
+// CommandResult shape (`{ok, code?, result?}`) — this is the one place a match's internal log
+// record ever has to speak that wire contract, shared by every caller that needs to (T-026's
+// in-process transport and T-029's worker relay alike), rather than each reimplementing it.
+/** @param {Object|null} recResult - a log record's own `.result` field @returns {{ok:boolean, code?:string, result?:*}} */
+export function toCommandResult(recResult) {
+  if (recResult && typeof recResult === "object" && "rejected" in recResult) {
+    return { ok: false, code: recResult.rejected };
+  }
+  return { ok: true, result: recResult ?? null };
+}
 
 /**
  * @param {State} state

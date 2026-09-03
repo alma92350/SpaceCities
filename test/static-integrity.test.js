@@ -189,27 +189,33 @@ test("every shipped browser module is reachable from index.html's entry point", 
   // but nothing records or replays a match on any live boot path yet — that's the same
   // real-server milestone (T-026/T-029) that finally calls matchLoop.js for real.
   //
-  // net/ws.js (T-025) and net/wsServerTransport.js (T-026) both now have a REAL caller —
-  // tools/serve.js's createAppServer (T-027) actually attaches a live match's WebSocket handling
-  // to a real http.Server, verified against the real Docker image, not just test/wsTransport.test.js's
-  // own coverage. That caller just isn't a BROWSER one: tools/ is this walk's own standing
-  // exclusion (browserJs()'s comment — it holds genuine Node CLI/server entry points, launched from
-  // a shell, never from index.html), so the edge is real but invisible to this specific check by
-  // design, the same way competitionWorker.js's Worker-construction edge is invisible to it for a
-  // different syntactic reason. net/wsClientTransport.js IS meant for the browser (it implements
-  // net/transport.js's Transport interface exactly, same as net/loopback.js), but boot.js has no
-  // path that constructs one yet — every boot path still picks loopback/direct — because there is
-  // no lobby/join flow to hand it a real match URL to connect to (T-029's hosting plus Phase 4's
-  // lobby). engine/projectionDelta.js (T-028b) joins the same wait one layer deeper: it's a real,
-  // tested dependency of BOTH net/wsServerTransport.js and net/wsClientTransport.js (computeDelta/
-  // applyDelta), so it inherits exactly their reachability status, not a new reason of its own.
-  // All these lines come out together once boot.js actually wires createWsClientTransport in.
+  // net/ws.js (T-025), net/wsServerTransport.js (T-026) and now net/wsWorkerTransport.js plus
+  // server/matchWorker.js (T-029) all have a REAL caller — tools/serve.js's createAppServer
+  // (T-027, updated in T-029 to spawn a worker and relay through wsWorkerTransport.js instead of
+  // attaching directly) actually attaches a live match's WebSocket handling to a real http.Server,
+  // verified against the real Docker image, not just this repo's own test coverage. That caller
+  // just isn't a BROWSER one: tools/ is this walk's own standing exclusion (browserJs()'s comment —
+  // it holds genuine Node CLI/server entry points, launched from a shell, never from index.html),
+  // so the edge is real but invisible to this specific check by design, the same way
+  // competitionWorker.js's Worker-construction edge is invisible to it for a different syntactic
+  // reason (and server/matchWorker.js's OWN construction — `new Worker("server/matchWorker.js",
+  // ...)` inside tools/serve.js — is that identical kind of invisible edge, one layer further out).
+  // net/wsClientTransport.js IS meant for the browser (it implements net/transport.js's Transport
+  // interface exactly, same as net/loopback.js), but boot.js has no path that constructs one yet —
+  // every boot path still picks loopback/direct — because there is still no lobby/join flow
+  // (Phase 4) to hand it a real match URL to connect to; T-029's own hosting work is done, but that
+  // was never what stood between boot.js and this file. engine/projectionDelta.js (T-028b) joins
+  // the same wait one layer deeper: it's a real, tested dependency of BOTH net/wsServerTransport.js
+  // and net/wsClientTransport.js (computeDelta/applyDelta), so it inherits exactly their
+  // reachability status, not a new reason of its own. All these lines come out together once
+  // boot.js actually wires createWsClientTransport in.
   const EXEMPT = new Set([
     "engine/types.js", "competitionWorker.js",
     "net/commandShapes.js", "net/transport.js",
     "net/loopbackFaults.js", "engine/projection.js", "net/commandEnvelope.js",
     "server/matchLoop.js", "server/replay.js", "net/ws.js", "engine/projectionDelta.js",
     "net/wsServerTransport.js", "net/wsClientTransport.js",
+    "net/wsWorkerTransport.js", "server/matchWorker.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
@@ -345,6 +351,13 @@ test("every shipped UI module imports cleanly under Node with no DOM (C10)", () 
   for (const file of browserJs()) {
     const rel = relative(root, file);
     if (rel.startsWith("engine" + sep)) continue;          // the engine is DOM-free by its own guard
+    // server/matchWorker.js (T-029) is a worker_threads ENTRY POINT, not a UI module this check's
+    // own remedy ("guard the top-level access") can fix: it reads workerData/parentPort at module
+    // top level by necessity — that IS its whole job, the moment it's loaded as a real Worker — so
+    // there is no DOM-less-but-still-plain-Node import path for it to guard toward. Importing it
+    // directly (as this check does, on every OTHER file) is simply the wrong way to run it, not a
+    // bug in it; test/matchWorker.test.js exercises it for real, inside an actual Worker.
+    if (rel === join("server", "matchWorker.js")) continue;
     try {
       execFileSync(process.execPath, ["--input-type=module", "-e", `import(${JSON.stringify(pathToFileURL(file).href)})`],
         { stdio: "pipe", timeout: 20000 });

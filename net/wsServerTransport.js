@@ -53,22 +53,31 @@
 "use strict";
 
 import { acceptUpgrade } from "./ws.js";
-import { admit } from "../server/matchLoop.js";
+import { admit, toCommandResult } from "../server/matchLoop.js";
 import { projectFor } from "../engine/projection.js";
 import { computeDelta, quantizeForWire } from "../engine/projectionDelta.js";
 
-// server/matchLoop.js's own log records deliberately store a SIMPLER shape than net/transport.js's
-// documented CommandResult ({ok, code?, result?}): `null` (or a success payload like {buildingId})
-// for an applied command, `{rejected: code}` for one the codec declined — matchLoop.js's own
-// header explains why (it's the direct, minimal thing stepMatch needs to log, nothing more). This
-// reconstructs the CommandResult shape every Transport implementation owes its own caller,
-// specifically at THIS boundary — the one place a match's internal log record ever has to speak
-// the client-facing wire contract.
-function toCommandResult(recResult) {
-  if (recResult && typeof recResult === "object" && "rejected" in recResult) {
-    return { ok: false, code: recResult.rejected };
-  }
-  return { ok: true, result: recResult ?? null };
+/**
+ * Turns a RAW projectFor(...) output into this seat's next wire "state" message body (everything
+ * but the `type` key), tracking the per-connection baseline `lastSnapshotBySeat` needs for next
+ * time. Shared between this file's own broadcastState() (an in-process match) and
+ * net/wsWorkerTransport.js's relay (a worker-hosted one, T-029) — both need the IDENTICAL
+ * quantize-then-full-or-delta decision per connection; only WHERE the raw projection comes from
+ * differs between them.
+ * @param {Object} rawProj - projectFor(state, seat)'s own output, not yet quantized
+ * @param {Map<string, Object>} lastSnapshotBySeat - mutated: this seat's entry is set to the
+ *   quantized snapshot this call just computed, for the NEXT call to delta against
+ * @param {string} seat
+ * @returns {{full:true, proj:Object}|{full:false, delta:Object}}
+ */
+export function buildStateMessage(rawProj, lastSnapshotBySeat, seat) {
+  // Quantized (T-028c) BEFORE it's used for anything — both the full-send path and the stored
+  // baseline for the NEXT delta must agree on the same rounding, or every tick would look
+  // "changed" against its own differently-rounded predecessor.
+  const curr = quantizeForWire(rawProj);
+  const prev = lastSnapshotBySeat.get(seat);
+  lastSnapshotBySeat.set(seat, curr);
+  return prev ? { full: false, delta: computeDelta(prev, curr) } : { full: true, proj: curr };
 }
 
 /**
@@ -144,16 +153,7 @@ export function attachWsMatch(httpServer, match, opts = {}) {
      *  every one after is a delta against whatever was last actually sent on THIS connection. */
     broadcastState() {
       for (const [seat, conn] of bySeat) {
-        // Quantized (T-028c) BEFORE it's used for anything — both the full-send path and the
-        // stored baseline for the NEXT delta must agree on the same rounding, or every tick would
-        // look "changed" against its own differently-rounded predecessor.
-        const curr = quantizeForWire(projectFor(match.state, seat));
-        const prev = lastSnapshotBySeat.get(seat);
-        conn.send(JSON.stringify(
-          prev ? { type: "state", full: false, delta: computeDelta(prev, curr) }
-               : { type: "state", full: true, proj: curr }
-        ));
-        lastSnapshotBySeat.set(seat, curr);
+        conn.send(JSON.stringify({ type: "state", ...buildStateMessage(projectFor(match.state, seat), lastSnapshotBySeat, seat) }));
       }
     },
     /** Stop accepting new upgrades on this httpServer for this match and close every live

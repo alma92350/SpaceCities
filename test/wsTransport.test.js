@@ -20,7 +20,7 @@ import { createGameState } from "../engine/state.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createMatch, stepMatch, admit, INPUT_DELAY_TICKS } from "../server/matchLoop.js";
 import { encode } from "../net/commandEnvelope.js";
-import { attachWsMatch } from "../net/wsServerTransport.js";
+import { attachWsMatch, buildStateMessage } from "../net/wsServerTransport.js";
 import { createWsClientTransport } from "../net/wsClientTransport.js";
 import { testTransportContract } from "./transportContract.js";
 
@@ -251,6 +251,29 @@ test("end-to-end: the client transport correctly reconstructs state across a rea
     assert.ok(seen.x !== startX || seen.y !== startY,
       "the unit's reconstructed position must have actually changed across these pushes — proving delta application really moved it, not left it frozen at the first full snapshot");
   } finally { transport.close(); stopTicking(); server.close(); }
+});
+
+/* ---------- buildStateMessage (T-029): extracted so net/wsWorkerTransport.js's relay can share
+   the exact same quantize+delta-per-connection logic broadcastState() uses, rather than a second,
+   drifting copy. ---------- */
+
+test("buildStateMessage: the first call for a seat returns a full, quantized message; the caller's lastSnapshotBySeat gains an entry", () => {
+  const lastSnapshotBySeat = new Map();
+  const raw = { tick: 1, units: [{ id: "u1", x: 1.23456, hp: 10, owner: "player" }], buildings: [], nodes: [], players: {}, events: [] };
+  const msg = buildStateMessage(raw, lastSnapshotBySeat, "player");
+  assert.equal(msg.full, true);
+  assert.equal(msg.proj.units[0].x, 1.23);
+  assert.ok(lastSnapshotBySeat.has("player"));
+});
+
+test("buildStateMessage: a later call for the SAME seat returns a delta against the tracked baseline", () => {
+  const lastSnapshotBySeat = new Map();
+  const raw1 = { tick: 1, units: [{ id: "u1", x: 1, hp: 10, owner: "player" }], buildings: [], nodes: [], players: {}, events: [] };
+  const raw2 = { tick: 2, units: [{ id: "u1", x: 2, hp: 10, owner: "player" }], buildings: [], nodes: [], players: {}, events: [] };
+  buildStateMessage(raw1, lastSnapshotBySeat, "player");
+  const msg2 = buildStateMessage(raw2, lastSnapshotBySeat, "player");
+  assert.equal(msg2.full, false);
+  assert.deepEqual(msg2.delta.units.changed, [{ id: "u1", x: 2 }]);
 });
 
 /* ---------- Origin / seat-binding robustness ---------- */

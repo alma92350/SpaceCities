@@ -8,6 +8,14 @@
    stand-in: Node's own http client for the static/mcp checks, net/wsClientTransport.js's real
    WebSocket transport for the game socket — the same standard test/ws.test.js and
    test/wsTransport.test.js already hold themselves to.
+
+   T-029: createAppServer() is now async and its demo match runs inside a real worker_threads
+   Worker (server/matchWorker.js, relayed by net/wsWorkerTransport.js) rather than directly in this
+   process — invisible to every test below except the two mechanical facts that changed:
+   createAppServer() needs an `await`, and there's no live `match` object to reach into any more
+   (app.owners exposes what these tests actually need instead). Everything else — static serving,
+   /mcp, the WebSocket protocol itself — behaves identically, which is the point: T-029 changed
+   WHERE the match runs, not what a connecting client experiences.
    ============================================================ */
 
 import { test } from "node:test";
@@ -34,7 +42,7 @@ function get(port, path) {
 }
 
 async function withApp(fn) {
-  const app = createAppServer();
+  const app = await createAppServer();
   const port = await listen(app.server);
   try {
     await fn(app, port);
@@ -81,7 +89,7 @@ test("the WebSocket game transport is live on the SAME server/port as the static
   await withApp(async (app, port) => {
     const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
     try {
-      assert.equal(app.match.state.owners.includes("player"), true, "fixture sanity: the demo match really does have a player seat");
+      assert.equal(app.owners.includes("player"), true, "fixture sanity: the demo match really does have a player seat");
     } finally {
       transport.close();
     }
@@ -108,8 +116,8 @@ test("a WebSocket upgrade aimed at /mcp is refused — the reserved namespace is
   });
 });
 
-test("createAppServer().close() stops the demo match's tick timer and the ws attachment, without touching the http.Server itself", async () => {
-  const app = createAppServer();
+test("createAppServer().close() stops the demo match's worker and the ws attachment, without touching the http.Server itself", async () => {
+  const app = await createAppServer();
   const port = await listen(app.server);
   try {
     assert.doesNotThrow(() => app.close());

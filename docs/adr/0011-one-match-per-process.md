@@ -85,9 +85,26 @@ measured (a follow-on measurement in dossier 00). Worker startup adds latency to
 Everything crossing the parent/worker boundary must be structured-cloneable, which constrains the
 state-replication design (ADR-0009).
 
-**Follow-on work.** Measure memory per worker. Fix the id counter and offer it upstream. Guard the
-constraint with a test asserting two interleaved matches replay identically — so that if anyone
-later hosts two matches in one process, the suite says so.
+**Follow-on work.** ~~Measure memory per worker.~~ Done — see the 2026-09-03 update below.
+~~Fix the id counter~~ Done (T-016, `engine/state.js`'s `nextEntityId` moved onto per-state) —
+**offer it upstream** remains genuinely undone; that's a PR against the original repo, outside
+this port's own session scope. ~~Guard the constraint with a test asserting two interleaved matches
+replay identically~~ Done — landed as part of T-016 itself (`test/determinism.test.js`'s own
+interleaving exit-criterion test), not held separately.
 
 **Revisit if.** Memory per worker turns out to bound concurrency well below the CPU limit — then
 option A moves onto the critical path and matches share a process.
+
+**Update 2026-09-03 (T-029).** This condition was actually checked before T-029 was built, not
+left as a standing assumption — worth doing precisely because T-016 had, by then, already fixed the
+id counter (option A's own "good upstream contribution" this ADR always intended as follow-on
+work), removing the correctness defect that originally forced this decision at all. A throwaway
+measurement (10, then 30, real `worker_threads.Worker` instances, each hosting a match) found
+memory growth of roughly 0.5–1.5MB RSS per worker in the session-container environment — nowhere
+near enough to bind concurrency below the CPU limit on a box with several GB free. **This condition
+is not triggered.** Memory per worker is cheap; CPU remains the real ceiling, exactly as this ADR
+anticipated. Option B (workers) proceeds as originally decided, now on measured rather than assumed
+grounds — and for the two reasons this ADR named as independent of the counter defect in the first
+place: crash isolation, and genuine multi-core use that no same-process design can match regardless
+of the counter's own state. See TASKS.md T-029 for the full measurement and `server/matchWorker.js`
+for the implementation.
