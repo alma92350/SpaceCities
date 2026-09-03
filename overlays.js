@@ -12,7 +12,7 @@
 import { seedChipEl, factionChipEl, objectivesEl, helpOverlayEl, helpBtn, gameOverEl, galaxyToastEl, uiHintEl } from "./dom.js";
 import { FACTIONS } from "./engine/factions.js";
 import { UNITS, committedDoctrine, hasCompletedBuilding } from "./engine/entities.js";
-import { game } from "./session.js";
+import { game, seatDisplayName } from "./session.js";
 import { scoreBreakdown, playerScore } from "./engine/victory.js";
 import { otherOwner } from "./engine/aiCommon.js";
 // PLAY AGAINST YOURSELF (playerFingerprint.js, docs/ai-evolution-design.md): the finished match
@@ -34,8 +34,11 @@ export function showSeedChip(seed) {
 export function showFactionChip(st) {
   const you = FACTIONS[st.players[game.localOwner].faction], foe = FACTIONS[st.players[otherOwner(game.localOwner)].faction];
   if (!you || you.id === "neutral") { factionChipEl.classList.add("hidden"); return; }
-  factionChipEl.textContent = `You: ${you.short} ⚔ ${foe && foe.id !== "neutral" ? foe.short : "Foe"}`;
-  factionChipEl.title = `You — ${you.name}: ${you.blurb}` + (foe && foe.id !== "neutral" ? `\nFoe — ${foe.name}: ${foe.blurb}` : "");
+  // T-031: seatDisplayName(), not a hardcoded "You"/"Foe" pair — see hud.js's own identical fix
+  // for the reasoning (same "You" today, a real chosen name for the other seat once one exists).
+  const youName = seatDisplayName(game.localOwner), foeName = seatDisplayName(otherOwner(game.localOwner));
+  factionChipEl.textContent = `${youName}: ${you.short} ⚔ ${foe && foe.id !== "neutral" ? foe.short : foeName}`;
+  factionChipEl.title = `${youName} — ${you.name}: ${you.blurb}` + (foe && foe.id !== "neutral" ? `\n${foeName} — ${foe.name}: ${foe.blurb}` : "");
   factionChipEl.classList.remove("hidden");
 }
 

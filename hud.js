@@ -8,7 +8,7 @@
 
 "use strict";
 
-import { game } from "./session.js";
+import { game, seatDisplayName } from "./session.js";
 import {
   resourcesEl, clockEl, scoreBarEl, idleWorkersEl, idleProductionEl,
   scenarioBarEl, scenarioBannerEl, scenarioStatusEl, repairBtn, departBtn,
@@ -318,12 +318,12 @@ export function renderHUD() {
       // game.spectateMatch carries them; it's null in every ordinary game, which keeps the
       // first-person copy exactly as it was for the mode that actually has a human in it.
       const watching = game.spectateMatch;
-      // T-030: "Opponent" rather than a hardcoded "AI" — true today (the opponent always IS the
-      // Odyssey/skirmish AI, since no live multiplayer boot path exists yet), and still honest
-      // once one does (the other seat is a live human then, not a computer).
+      // T-031: seatDisplayName(), not a hardcoded "You"/"Opponent" pair — the SAME "You" today
+      // (game.localOwner's own seat), but now a real chosen name for the other seat once a lobby
+      // ever sets one (session.js's own seatNames), rather than a second sweep to find this site.
       scoreBarEl.textContent = watching
         ? `⚔ ${watching.aName} ${you} · ${watching.bName} ${foe}`
-        : `⚔ You ${you} · Opponent ${foe}`;
+        : `⚔ ${seatDisplayName(game.localOwner)} ${you} · ${seatDisplayName(otherOwner(game.localOwner))} ${foe}`;
       scoreBarEl.classList.remove("hidden");
     } else {
       const mins = Math.floor(state.time / 60);

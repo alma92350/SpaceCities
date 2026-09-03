@@ -28,6 +28,13 @@ export const game = {
   // individual redesign rather than a mechanical seam (an AI-difficulty display has no meaning
   // once the "other side" is a live human, for instance).
   localOwner: "player",
+  // T-031 (FR-12's own "all-seats end-of-match score screen" needs a way to label a seat that
+  // isn't the raw owner id): real, CHOSEN display names for connected seats — keyed by owner id,
+  // e.g. `{ai: "Commander Vex"}` once a lobby/join flow (still Phase 4 work; nothing sets this
+  // yet) hands a seat a real human's name. Empty today, on every boot path, same as `localOwner`
+  // above — see seatDisplayName() below for how an empty/missing entry still resolves to
+  // something sane ("You" / "Opponent") rather than ever falling back to the bare owner id.
+  seatNames: {},
   input: null,   // the current input controller (input.js attachInput), or null before a game
   // The ADR-0004 seam every command-issuing UI module (input.js, inputCommands.js,
   // hudSelection.js) submits through — never null once a game is running, though which kind it
@@ -142,3 +149,17 @@ export const game = {
   // so an ordinary game can never inherit a leftover multiplier.
   spectateSpeed: 1,
 };
+
+// T-031: the ONE place a seat's owner id (`"player"`/`"ai"`, or a future third+ seat's own id)
+// turns into text a player actually reads — first-person, matching every existing call site's
+// own convention ("You: ..." / "... Opponent"), never the bare id itself. `owner === localOwner`
+// is ALWAYS "You", even if a future lobby happened to also record a real name for that same seat
+// — a player's own screen calls their own seat "You", not their own chosen name, in every
+// first-person context this seam serves today. Anyone else gets their real `seatNames` entry once
+// a lobby/join flow (Phase 4) sets one, or the same "Opponent" fallback every existing call site
+// already hardcoded before this function existed, otherwise.
+/** @param {string} owner @returns {string} */
+export function seatDisplayName(owner) {
+  if (owner === game.localOwner) return "You";
+  return game.seatNames[owner] || "Opponent";
+}

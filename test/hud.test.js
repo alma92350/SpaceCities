@@ -84,6 +84,17 @@ test("renderHUD: a WATCHED match names both entrants in the score bar — there 
   assert.match(scoreBarEl.textContent, /\bYou\b/, "an ordinary match still addresses the player directly");
 });
 
+test("T-031: the score bar shows a real chosen opponent name, once one is on record, instead of the generic \"Opponent\" fallback", () => {
+  const state = setup(405);
+  state.time = DEFAULT_MATCH_TIME_LIMIT - 60;
+  game.seatNames = { ai: "Commander Vex" };
+  try {
+    renderHUD();
+    assert.match(scoreBarEl.textContent, /Commander Vex/, "session.js's seatDisplayName must be consulted, not a hardcoded \"Opponent\"");
+    assert.doesNotMatch(scoreBarEl.textContent, /\bOpponent\b/);
+  } finally { game.seatNames = {}; }
+});
+
 test("renderHUD: the countdown respects a matchTimeLimit override, not just the 40-minute default", () => {
   const state = setup(403, { matchTimeLimit: 1200 });   // "Quick 20"
   state.time = 1200 - 30;   // 0:30 left on the SHORT override
