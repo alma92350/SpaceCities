@@ -35,6 +35,21 @@ async function listen(server) {
   return server.address().port;
 }
 
+// T-036 side-quest: this sandboxed CI's 4 cores occasionally can't service a real WS handshake
+// promptly under a full-suite run's own worker_threads pressure from ~115+ OTHER files — a real
+// server that's momentarily just slow, not unreachable. net/wsClientTransport.js's own
+// connectTimeoutMs (added for exactly this) turns that from "hangs until the native ~300s default"
+// into a fast, retriable failure; this wraps it into a few short attempts rather than one long one,
+// used only by the one test below that's shown itself exposed to this under full-suite load.
+async function connectResilient(url, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { return await createWsClientTransport(url, { connectTimeoutMs: 20000 }); }
+    catch (err) { lastErr = err; }
+  }
+  throw lastErr;
+}
+
 async function setupOneSeat() {
   const worker = spawnMatchWorker();
   const server = createServer();
@@ -164,10 +179,16 @@ test("T-034: two concurrent matches on the SAME server route a connection by ?ma
     // thread pressure than a real deploy (a couple of real players joining seconds apart, never
     // hundreds of test processes fighting 4 cores) ever would be, and buys this test nothing a
     // sequential proof doesn't already give it.
-    const tA = await createWsClientTransport(`ws://localhost:${port}/ws?match=${wsA.matchId}&seat=player`);
+    //
+    // connectResilient, not a bare createWsClientTransport, for the SAME reason taken one step
+    // further: even fully sequential, this test was still observed to occasionally hit the native
+    // WebSocket connect timeout (~300s) under a full-suite run — this real local server was simply
+    // too starved of CPU for a while to answer promptly, not genuinely broken. A few short, bounded
+    // attempts tolerate that transient stall without weakening what the test actually proves.
+    const tA = await connectResilient(`ws://localhost:${port}/ws?match=${wsA.matchId}&seat=player`);
     const stateA = await new Promise(resolve => tA.onEvent(e => { if (e.type === "state") resolve(e.state); }));
     tA.close();
-    const tB = await createWsClientTransport(`ws://localhost:${port}/ws?match=${wsB.matchId}&seat=player`);
+    const tB = await connectResilient(`ws://localhost:${port}/ws?match=${wsB.matchId}&seat=player`);
     const stateB = await new Promise(resolve => tB.onEvent(e => { if (e.type === "state") resolve(e.state); }));
     tB.close();
     // Two independently-seeded workers generate two different maps — the simplest available proof

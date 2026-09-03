@@ -75,6 +75,16 @@
    guarantees the FIRST push on any new connection is a fresh full snapshot, never a delta against a
    dead connection's stale one, so this is belt-and-suspenders clarity more than a load-bearing
    reset.
+
+   connectTimeoutMs (opt-in, default unbounded — unchanged for every caller that omits it): bounds
+   patience for the FIRST handshake only, never a later reconnect (T-029b's own automatic retry is
+   deliberately unbounded/un-backed-off, per this header above — this opt must not shorten that).
+   Added chasing a real, environment-specific flake: a caller can hit the underlying native
+   WebSocket's own effectively-unbounded connect timeout (observed ~300s) when the SERVER is merely
+   slow to service the upgrade for a while (e.g. a sandboxed CI box under heavy parallel test load),
+   not genuinely unreachable — a caller that would rather fail fast and retry itself (test/
+   wsReconnect.test.js's own new tests; test/wsWorkerTransport.test.js's "two concurrent matches"
+   test) can now do that instead of waiting out the native default.
    ============================================================ */
 
 "use strict";
@@ -99,7 +109,7 @@ import { encode } from "./commandEnvelope.js";
  *   refused, closed before welcome, malformed welcome payload)
  */
 export function createWsClientTransport(url, opts = {}) {
-  const { reconnectDelayMs = 1500 } = opts;
+  const { reconnectDelayMs = 1500, connectTimeoutMs } = opts;
   return new Promise((resolve, reject) => {
     let ws = null;
     let seq = 0;
@@ -140,8 +150,26 @@ export function createWsClientTransport(url, opts = {}) {
       const myWs = new WebSocket(url);
       ws = myWs;
       let welcomedThisConnection = false;   // guards a stray/duplicate welcome on THIS ONE connection
+      let connectTimedOut = false;          // WE aborted this attempt on purpose — the "close" handler
+                                             // below must treat that as "the first attempt failed",
+                                             // never as a post-success disconnect worth reconnecting from
+
+      // Bounded initial-connect patience (see this file's own header) — only ever armed for the
+      // very FIRST attempt (settled is still false at that point); a later reconnect leaves it
+      // unset, preserving T-029b's own deliberately-unbounded retry cadence untouched.
+      const connectTimeoutTimer = (connectTimeoutMs && !settled) ? setTimeout(() => {
+        connectTimedOut = true;
+        // fail() BEFORE close(): closing a still-CONNECTING WebSocket synchronously fires ITS OWN
+        // "error" event as part of aborting the handshake — reaching the "error" listener below
+        // before this callback would otherwise get back to its own fail() call. fail()'s guard is
+        // idempotent (whichever call reaches it first wins), so calling it here first is what makes
+        // the caller actually see THIS timeout's own message, not a generic "connection failed" one.
+        fail(new Error(`WebSocket connection timed out after ${connectTimeoutMs}ms`));
+        myWs.close();
+      }, connectTimeoutMs) : null;
 
       myWs.addEventListener("error", () => {
+        if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);
         // Only the very first connection attempt ever gets an outer-promise rejection out of this —
         // once the transport is live (settled), a reconnect attempt's own error is just a precursor
         // to its "close" event below, which is where the actual retry decision happens.
@@ -159,6 +187,11 @@ export function createWsClientTransport(url, opts = {}) {
         pendingBySeq.clear();
 
         if (closed) return;   // the CALLER closed this on purpose — never reconnect
+        // connectTimedOut's own fail() call above already settled (rejected) the outer promise —
+        // this later, asynchronous "close" (from the myWs.close() that same callback issued) must
+        // not be mistaken for "the transport was live and just dropped", or it would schedule an
+        // orphaned reconnect loop nothing ever awaits or can cancel.
+        if (connectTimedOut) return;
         if (!settled) { fail(new Error("WebSocket closed before the welcome handshake completed")); return; }
 
         // T-029b: an unexpected close after the transport was already live — retry, whatever the
@@ -175,6 +208,7 @@ export function createWsClientTransport(url, opts = {}) {
         if (msg.type === "welcome") {
           if (welcomedThisConnection) return;   // a stray duplicate welcome on this SAME connection
           welcomedThisConnection = true;
+          if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);   // the handshake beat the clock
 
           // Named distinctly from the outer seed/planetId (T-034) they get assigned to just below —
           // a bare `const { planetId, seed }` here would SHADOW those for the rest of this block

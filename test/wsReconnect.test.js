@@ -20,6 +20,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
+import { createServer as createTcpServer } from "node:net";
 import { createGameState } from "../engine/state.js";
 import { mulberry32 } from "../engine/rng.js";
 import { createMatch, stepMatch } from "../server/matchLoop.js";
@@ -175,4 +176,70 @@ test("reconnecting after the server itself restarts (a brand-new match, a differ
   } finally {
     stopTickingA(); stopTickingB?.(); transport.close(); if (serverB) await closeServer(serverB);
   }
+});
+
+/* ---------- connectTimeoutMs: bounded patience for the FIRST handshake only ----------
+   Discovered while chasing an environment-specific flake: test/wsWorkerTransport.test.js's own
+   "two concurrent matches" test occasionally hit undici's native, effectively-unbounded WebSocket
+   connect timeout (observed ~300s) under this sandboxed CI's full-suite parallel load — a real
+   server that's merely SLOW to service an upgrade for a while, not genuinely unreachable. Opt-in
+   (default unbounded, exactly today's behavior for every caller that doesn't pass it) so a caller
+   that wants to fail fast and retry itself — as that test now does — can. */
+
+test("connectTimeoutMs: a stalled initial handshake (server accepts the TCP connection but never answers it) rejects promptly, not after the native default", async () => {
+  // A raw TCP server, not an HTTP one — accepts the connection and does nothing further, so the
+  // client's own WebSocket upgrade request never gets ANY response. Simulates a server that's
+  // merely too busy to service this connection promptly, the exact real-world condition this opt
+  // exists for, deterministically and without depending on network/proxy blackhole behavior.
+  const tcpServer = createTcpServer(() => { /* accept, then never respond */ });
+  await new Promise(resolve => tcpServer.listen(0, resolve));
+  const port = tcpServer.address().port;
+  try {
+    const startedAt = Date.now();
+    await assert.rejects(
+      createWsClientTransport(`ws://localhost:${port}/?seat=player`, { connectTimeoutMs: 300 }),
+      /timed out/i,
+    );
+    const elapsed = Date.now() - startedAt;
+    assert.ok(elapsed < 5000, `connectTimeoutMs must actually bound the wait, not merely fire after some much longer native default (took ${elapsed}ms)`);
+  } finally { tcpServer.close(); }
+});
+
+test("connectTimeoutMs: an ordinary connect that completes well within the budget succeeds normally", async () => {
+  const match = makeMatch(1004);
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  const port = await listen(server);
+  const stopTicking = startTicking(match, wsMatch);
+  try {
+    const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`, { connectTimeoutMs: 5000 });
+    const state = await waitForEvent(transport, e => e.type === "state");
+    assert.ok(state.state, "a generous connectTimeoutMs must never interfere with an ordinary fast connect");
+    transport.close();
+  } finally { stopTicking(); await closeServer(server); }
+});
+
+test("connectTimeoutMs only bounds the FIRST connection attempt — a later automatic reconnect is never cut short by it", async () => {
+  const match = makeMatch(1005);
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  let rawSocket = null;
+  server.on("upgrade", (req, socket) => { rawSocket = socket; });
+  const port = await listen(server);
+  const stopTicking = startTicking(match, wsMatch);
+  try {
+    // A connectTimeoutMs shorter than reconnectDelayMs: if it wrongly re-armed for the RECONNECT
+    // too (not just this transport's first attempt), the reconnect below would be aborted by it
+    // before this real, near-instant local server ever got a chance to answer.
+    const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`, { connectTimeoutMs: 100, reconnectDelayMs: 400 });
+    await waitForEvent(transport, e => e.type === "state");
+
+    const disconnected = waitForEvent(transport, e => e.type === "disconnected");
+    rawSocket.destroy();
+    await disconnected;
+
+    const reconnected = await waitForEvent(transport, e => e.type === "reconnected", 3000);
+    assert.equal(reconnected.sameMatch, true, "connectTimeoutMs must never apply to T-029b's own deliberately-unbounded reconnect cadence");
+    transport.close();
+  } finally { stopTicking(); await closeServer(server); }
 });
