@@ -94,7 +94,7 @@ const match = createMatch(state);
 // open uncertainty U5 tracks that measurement separately and explicitly; this interval is a
 // reasoned starting point against the outage-window math above, not a claim U5 is resolved.
 const SNAPSHOT_INTERVAL_MS = 5000;
-if (dataDir) setInterval(() => writeSnapshot(dataDir, matchId, match.state), SNAPSHOT_INTERVAL_MS);
+const snapshotTimer = dataDir ? setInterval(() => writeSnapshot(dataDir, matchId, match.state), SNAPSHOT_INTERVAL_MS) : null;
 
 match.emitAck = rec => {
   parentPort.postMessage({ type: "commandResult", seat: rec.owner, seq: rec.seq, result: toCommandResult(rec.result) });
@@ -115,9 +115,19 @@ parentPort.on("message", msg => {
 
 parentPort.postMessage({ type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId });
 
-setInterval(() => {
+// T-035 (FR-6): a final push still goes out WITH `over: true` (so every connected client's own
+// showGameOver fires — see boot.js's render loop, which already reads game.state.over generically,
+// T-030's own seam), but nothing ticks or pushes again after — a finished match has no more state
+// to advance and no one left who should keep paying its CPU/bandwidth cost. The periodic snapshot
+// stops too: an ended match's own last snapshot before this point is all a restart could ever need
+// to recover (there's nothing further to lose).
+const tickTimer = setInterval(() => {
   stepMatch(match, TICK_DT);
   for (const seat of match.state.owners) {
     parentPort.postMessage({ type: "state", seat, proj: projectFor(match.state, seat) });
+  }
+  if (match.state.over) {
+    clearInterval(tickTimer);
+    if (snapshotTimer) clearInterval(snapshotTimer);
   }
 }, TICK_MS);

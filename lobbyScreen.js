@@ -170,10 +170,32 @@ function renderHostCard(container) {
     const created = res.json;
     linkInput.value = shareLink(created.matchId);
     linkRow.classList.remove("hidden");
-    status.textContent = "Match created — share the link, then start whenever you're ready.";
-    hostBtn.textContent = "▶ Start playing";
     hostBtn.disabled = false;
-    hostBtn.onclick = () => joinLive(created.matchId, created.owner, created.token, status);
+    if (created.started) {
+      // Today's host form always requests two open seats, so this path isn't reachable from it yet
+      // — kept honest for a future seatKinds picker (an "open","ai" match auto-starts on creation,
+      // T-035's own FR-4 "all seats filled" clause) rather than assumed away.
+      status.textContent = "Match created and already live.";
+      hostBtn.textContent = "▶ Enter match";
+      hostBtn.onclick = () => joinLive(created.matchId, created.owner, created.token, status);
+      return;
+    }
+    status.textContent = "Match created — share the link, or start now against the built-in AI.";
+    // FR-4's "the host starts it" clause: POSTs /start (idempotent — a no-op if a second player's
+    // own join already auto-started it first, FR-4's OTHER clause) before connecting, so an
+    // unfilled seat is genuinely AI-filled (T-035, FR-3) by the time this seat's own client boots.
+    hostBtn.textContent = "▶ Start match";
+    hostBtn.onclick = async () => {
+      hostBtn.disabled = true;
+      status.textContent = "Starting…";
+      const startRes = await apiPost(`/api/matches/${encodeURIComponent(created.matchId)}/start`, { token: created.token });
+      if (!startRes.ok) {
+        status.textContent = `Could not start the match (${(startRes.json && startRes.json.error) || startRes.status}).`;
+        hostBtn.disabled = false;
+        return;
+      }
+      await joinLive(created.matchId, created.owner, created.token, status);
+    };
   });
   card.appendChild(hostBtn);
 

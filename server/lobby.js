@@ -13,10 +13,11 @@
      redesign this file, but createMatch REJECTS any `seatKinds` whose length isn't 2 rather than
      silently truncating or padding — an honest, loud "not yet" beats a match that quietly ignores
      half its requested seats.
-   - No AI-fill, no "start a match", no worker spawning. FR-3 ("unfilled open seats become AI
-     seats AT MATCH START") is T-035's own row ("Match lifecycle: start conditions, AI fill...") —
-     nothing in this file interprets or transitions `status` beyond treating it as a plain string;
-     a match created here simply stays "open" for the whole of this file's own scope.
+   - startMatch (T-035) is the one status TRANSITION this file owns — "open" to "started", a
+     one-way door — but still no AI-fill decision and no worker spawning here: WHEN to call it
+     (the host's own explicit trigger, or automatically once every open seat has a real owner) and
+     what "AI-fill" actually means for a seat nobody claimed by then are tools/serve.js's own
+     wiring, the same "model vs wiring" split T-033 already drew for createMatch/joinMatch.
    - No HTTP/WS wiring at all. Reachable from a real browser (a shareable join link) is T-034's
      own job. This file is deliberately the SAME kind of standalone, tested layer T-020's wire
      schema and T-021's codec were before T-023 wired them into a live match loop.
@@ -88,6 +89,9 @@ export function createLobby() {
   function joinMatch(matchId, seatIndex) {
     const match = matches.get(matchId);
     if (!match) return { ok: false, code: "no-such-match" };
+    // T-035: once started, the window for a casual join has closed — an AI-filled seat is only
+    // reachable again through T-036's own reclaim flow, never a fresh join.
+    if (match.status !== "open") return { ok: false, code: "already-started" };
     const seat = match.seats[seatIndex];
     if (!seat) return { ok: false, code: "no-such-seat" };
     if (seat.kind !== "open") return { ok: false, code: "seat-not-open" };
@@ -109,5 +113,20 @@ export function createLobby() {
     return { ok: true, owner: seat.owner };
   }
 
-  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat };
+  /**
+   * T-035 (FR-4): the ONE transition out of "open" — a one-way door, never re-openable. This file
+   * still doesn't decide WHEN to call it (host-triggered vs. all-seats-filled) or spawn anything;
+   * that's tools/serve.js's own wiring, the same "model vs wiring" split T-033 already drew for
+   * createMatch/joinMatch themselves.
+   * @returns {{ok:true, match:Object}|{ok:false, code:string}}
+   */
+  function startMatch(matchId) {
+    const match = matches.get(matchId);
+    if (!match) return { ok: false, code: "no-such-match" };
+    if (match.status !== "open") return { ok: false, code: "already-started" };
+    match.status = "started";
+    return { ok: true, match };
+  }
+
+  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, startMatch };
 }

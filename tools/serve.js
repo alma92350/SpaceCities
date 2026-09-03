@@ -36,6 +36,16 @@
    for IT — see that file's own header for the non-destructive-passthrough-plus-catch-all mechanism
    this file's own catch-all (below) is the other half of.
 
+   T-035 (FR-4): a match no longer spawns its worker the instant it's created — createMatch/joinMatch
+   only ever update server/lobby.js's own bookkeeping now. startAndSpawnIfReady is the one place a
+   worker actually starts, called after any join that completes the seating (FR-4's "automatically
+   when all seats are filled"), after the host's own explicit POST /api/matches/:id/start (FR-4's
+   "the host starts it"), and inline from createMatch itself for a seatKinds:["open","ai"] match
+   (seat 1 needs no human at all, so it's "filled" from the moment it exists — no separate start
+   step should ever be needed for what is, from the host's own seat, an ordinary AI skirmish).
+   aiEnabled is decided from the REAL seat state at that moment, not the seat's initial kind alone:
+   an "open" seat nobody claimed by start time is FR-3's own "unfilled open seats become AI seats."
+
    KNOWN GAP, named rather than silently shipped: server/matchSnapshot.js is still "one demo match,
    one fixed filename" (its own header says so) — with two or more concurrent matches BOTH getting a
    real DATA_DIR (production only; unset in local dev and every test), their periodic snapshots would
@@ -218,11 +228,13 @@ export async function createAppServer() {
 
   // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by
   // this match's own id (server/matchWorker.js's workerData.matchId override, T-034) so the lobby's
-  // id and the live match's id are always the SAME id, never two independently-minted ones.
-  // aiEnabled follows seat 1's own kind directly: an "ai"-kind seat is an ordinary skirmish
-  // opponent (today's single-player default, unchanged); an "open"-kind seat starts with NOBODY
-  // driving it — not even the built-in AI (T-034a) — until a real human joins, exactly FR-3's own
-  // "AI fill for open seats" being T-035's job, not this one's.
+  // id and the live match's id are always the SAME id, never two independently-minted ones. Called
+  // only once a match has actually STARTED (T-035, startAndSpawnIfReady below) — never eagerly at
+  // creation any more. aiEnabled (T-034a's own seam) is decided from the seats' REAL state at that
+  // moment: an "ai"-kind seat is an ordinary skirmish opponent; an "open"-kind seat nobody ever
+  // joined is FR-3's own "unfilled open seats become AI seats at match start" — AI-filled the
+  // instant the match starts, never before (a still-open, still-waiting seat must stay genuinely
+  // undriven, not secretly AI-controlled while a real join is still possible).
   async function spawnWorkerFor(match) {
     const seed = (Math.floor(Math.random() * 0x100000000)) >>> 0;
     const worker = new Worker(MATCH_WORKER_FILE, {
@@ -230,7 +242,8 @@ export async function createAppServer() {
         matchId: match.id,
         createGameStateOpts: {
           planetId: match.config.planetId, sizeMult: match.config.sizeMult, resourceMult: match.config.resourceMult,
-          matchTimeLimit: match.config.matchTimeLimit, seed, aiEnabled: match.seats[1].kind === "ai",
+          matchTimeLimit: match.config.matchTimeLimit, seed,
+          aiEnabled: match.seats[1].kind === "ai" || !match.seats[1].owner,
         },
         // KNOWN GAP (this file's own header): two+ concurrent matches with a real dataDir would
         // collide on server/matchSnapshot.js's still-single fixed filename. Threaded through
@@ -252,6 +265,27 @@ export async function createAppServer() {
     liveMatches.set(match.id, { worker, wsMatch });
   }
 
+  // T-035 (FR-4): "all seats filled" — every seat is either not "open" kind (an "ai"/"agent" seat
+  // is always pre-filled, never waited on) or genuinely has a real owner. For today's two-seat
+  // shapes this means: ["open","ai"] is filled the instant the host's own auto-join lands (seat 1
+  // needs no human at all); ["open","open"] is filled only once a second human actually joins.
+  function seatsFilled(match) {
+    return match.seats.every(s => s.kind !== "open" || s.owner);
+  }
+
+  // The ONE place anything actually starts a match: called after the host's own creating join,
+  // after any join that might complete the seating, and from the host's own explicit /start
+  // request. Idempotent by construction (server/lobby.js's own startMatch refuses a second
+  // transition), so every caller can invoke it unconditionally without first checking status
+  // itself — "maybe start, maybe it's already started" is exactly the same call either way.
+  async function startAndSpawnIfReady(match) {
+    const started = lobby.startMatch(match.id);
+    if (!started.ok) return false;   // already started (or, in principle, gone) — not this call's to redo
+    await spawnWorkerFor(match);
+    if (dataDir) writeLobbySnapshot(dataDir, lobby);
+    return true;
+  }
+
   async function handleCreateMatch(req, res) {
     const body = await readJsonBody(req);
     if (body === null) { respondJson(res, 400, { error: "bad-json" }); return; }
@@ -268,9 +302,11 @@ export async function createAppServer() {
     // The host auto-claims seat 0 in the SAME request that creates the match — a stranger opening
     // a shareable link should never find a match that exists but has nobody in it yet.
     const joined = lobby.joinMatch(match.id, 0);
-    await spawnWorkerFor(match);
+    // Auto-starts ONLY when seat 1 needed no human to begin with (seatKinds:["open","ai"]) — an
+    // ordinary ["open","open"] host still waits, per FR-4, for a second join or their own /start.
+    const started = seatsFilled(match) ? await startAndSpawnIfReady(match) : false;
     if (dataDir) writeLobbySnapshot(dataDir, lobby);
-    respondJson(res, 201, { matchId: match.id, seatIndex: 0, owner: joined.owner, token: joined.token });
+    respondJson(res, 201, { matchId: match.id, seatIndex: 0, owner: joined.owner, token: joined.token, started });
   }
 
   function handleListMatches(req, res) {
@@ -291,8 +327,26 @@ export async function createAppServer() {
     }
     const joined = lobby.joinMatch(matchId, seatIndex);
     if (!joined.ok) { respondJson(res, 409, { error: joined.code }); return; }
+    // FR-4's own "automatically when all seats are filled" clause: a join that completes the
+    // seating starts the match right here, in the same request — the joiner proceeds straight to
+    // connecting, never a separate "now wait for someone to press start" step of their own.
+    const started = seatsFilled(match) ? await startAndSpawnIfReady(match) : false;
     if (dataDir) writeLobbySnapshot(dataDir, lobby);
-    respondJson(res, 200, { matchId, seatIndex, owner: joined.owner, token: joined.token });
+    respondJson(res, 200, { matchId, seatIndex, owner: joined.owner, token: joined.token, started });
+  }
+
+  // FR-4's other clause: "the host starts it" — a deliberate override that AI-fills whatever seat
+  // is STILL open regardless of whether anyone else ever joins. Host-only (seat 0's own token),
+  // and idempotent: a host who clicks Start after a second player already triggered auto-start
+  // just gets confirmation, never an error — see startAndSpawnIfReady's own header.
+  async function handleStartMatch(req, res, matchId) {
+    const body = await readJsonBody(req);
+    if (body === null) { respondJson(res, 400, { error: "bad-json" }); return; }
+    const match = lobby.getMatch(matchId);
+    if (!match) { respondJson(res, 404, { error: "no-such-match" }); return; }
+    if (!lobby.reclaimSeat(matchId, 0, body.token).ok) { respondJson(res, 403, { error: "not-the-host" }); return; }
+    if (match.status === "open") await startAndSpawnIfReady(match);
+    respondJson(res, 200, { matchId, started: true });
   }
 
   const server = createServer((req, res) => {
@@ -301,6 +355,8 @@ export async function createAppServer() {
     if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res); return; }
     const joinMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/join$/.exec(url.pathname);
     if (joinMatch) { handleJoinMatch(req, res, decodeURIComponent(joinMatch[1])); return; }
+    const startMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/start$/.exec(url.pathname);
+    if (startMatch) { handleStartMatch(req, res, decodeURIComponent(startMatch[1])); return; }
     requestHandler(req, res);
   });
 
@@ -324,6 +380,13 @@ export async function createAppServer() {
   return {
     server,
     lobby,
+    // Exposed the same reason `lobby` is: test/httpServer.test.js's own T-035 aiEnabled proof needs
+    // to inspect the REAL opts a live match's worker was actually spawned with — checking that
+    // directly is both faster AND more correct than waiting to OBSERVE AI behavior over a real WS
+    // connection would be, since a fresh AI-filled seat's own buildings start outside the other
+    // seat's fog (this engine's ordinary two-base-apart skirmish layout), making "did state.buildings
+    // for owner ai grow" an unreliable, slow proxy for a property this already answers directly.
+    liveMatches,
     close() {
       if (snapshotTimer) clearInterval(snapshotTimer);
       for (const { worker, wsMatch } of liveMatches.values()) { wsMatch.close(); worker.terminate(); }

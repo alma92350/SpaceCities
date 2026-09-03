@@ -121,7 +121,7 @@ test("GET /api/matches lists nothing on a fresh server — no auto-booted demo m
   });
 });
 
-test("POST /api/matches creates a match, auto-joins the host to seat 0, and the match is immediately live", async () => {
+test("POST /api/matches (default seatKinds, both open) creates a match, auto-joins the host to seat 0, and reports it's NOT started yet — waiting for a second player or an explicit start (T-035, FR-4)", async () => {
   await withApp(async (app, port) => {
     const created = await postJson(port, "/api/matches", { planetId: "ferros" });
     assert.equal(created.status, 201);
@@ -131,12 +131,88 @@ test("POST /api/matches creates a match, auto-joins the host to seat 0, and the 
     assert.equal(created.json.owner, "player");
     assert.equal(typeof created.json.token, "string");
     assert.ok(created.json.token.length > 0);
+    assert.equal(created.json.started, false, "an ordinary two-open-seat match waits for a second seat, it doesn't start itself");
 
-    // Immediately live: the host can connect over WS using exactly what this response gave them.
+    // Not live yet: no worker exists for this match until something actually starts it.
+    await assert.rejects(createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=player&token=${created.json.token}`));
+  });
+});
+
+test("POST /api/matches with seatKinds:['open','ai'] auto-starts immediately — no second human to wait for (T-035, FR-4's own \"all seats filled\" clause: an ai-kind seat counts as already filled)", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
+    assert.equal(created.json.started, true);
     const transport = await createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=player&token=${created.json.token}`);
     const state = await new Promise(resolve => transport.onEvent(e => { if (e.type === "state") resolve(e.state); }));
     assert.ok(state.units instanceof Map);
     transport.close();
+  });
+});
+
+test("POST /api/matches/:id/start (host-only) starts a waiting match on demand — FR-4's \"the host starts it\" clause", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+    await assert.rejects(createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=player&token=${created.json.token}`),
+      "fixture sanity: not live before start");
+
+    const started = await postJson(port, `/api/matches/${created.json.matchId}/start`, { token: created.json.token });
+    assert.equal(started.status, 200);
+
+    const transport = await createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=player&token=${created.json.token}`);
+    const state = await new Promise(resolve => transport.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    assert.ok(state.units instanceof Map);
+    transport.close();
+  });
+});
+
+test("POST /api/matches/:id/start refuses anyone but the host (seat 0's own token)", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+    const res = await postJson(port, `/api/matches/${created.json.matchId}/start`, { token: "not-the-hosts-token" });
+    assert.equal(res.status, 403);
+  });
+});
+
+test("POST /api/matches/:id/start on an already-started match is a harmless no-op success, not an error — the host's own \"Start\" click must work whether or not a second player already triggered it", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+    await postJson(port, `/api/matches/${created.json.matchId}/join`, {});   // auto-starts it
+    const res = await postJson(port, `/api/matches/${created.json.matchId}/start`, { token: created.json.token });
+    assert.equal(res.status, 200);
+  });
+});
+
+test("POST /api/matches/:id/start on an unknown match returns a clear 404", async () => {
+  await withApp(async (app, port) => {
+    const res = await postJson(port, "/api/matches/00000000-0000-0000-0000-000000000000/start", { token: "x" });
+    assert.equal(res.status, 404);
+  });
+});
+
+test("T-035 (FR-3): starting a match with its second seat still unfilled really hands it to the built-in AI — proven on the REAL spawned worker's own opts, not by waiting to observe it through the other seat's fog", async () => {
+  // An early version of this test waited on a real WebSocket connection to SEE owner "ai" build
+  // something — flawed, not just slow: a fresh AI-filled seat's own buildings start on the far side
+  // of this engine's ordinary two-bases-apart skirmish layout, outside the "player" seat's own fog,
+  // so "did state.buildings for ai grow" never fires within any reasonable wait, through no fault of
+  // the AI. T-034a's own engine-level tests already prove aiEnabled:true genuinely produces AI
+  // behavior (600 ticks, 2 buildings -> 5, no fog in the way there); what THIS layer actually needs
+  // to prove is narrower and answerable directly: did tools/serve.js compute aiEnabled correctly and
+  // hand it to the REAL spawned worker for an unfilled seat.
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+    await postJson(port, `/api/matches/${created.json.matchId}/start`, { token: created.json.token });
+    const live = app.liveMatches.get(created.json.matchId);
+    assert.ok(live, "the match must actually have a live worker once started");
+    assert.equal(live.wsMatch.createGameStateOpts.aiEnabled, true, "seat 1 was never joined — FR-3's own AI fill must have engaged for it");
+  });
+});
+
+test("T-035 (FR-3, control): a SECOND HUMAN filling seat 1 gets aiEnabled:false — the built-in AI must never also be fighting a real player for the same seat", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+    await postJson(port, `/api/matches/${created.json.matchId}/join`, {});   // auto-starts it
+    const live = app.liveMatches.get(created.json.matchId);
+    assert.equal(live.wsMatch.createGameStateOpts.aiEnabled, false, "a human-joined seat must stay human-controlled, never secretly AI-driven too (T-034a)");
   });
 });
 
@@ -202,9 +278,12 @@ test("joining a match whose only open seat is already taken returns a clear 409,
 test("seatKinds:['open','ai'] hosts an ordinary skirmish-vs-AI through the lobby — no second human ever needed", async () => {
   await withApp(async (app, port) => {
     const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
+    // T-035: this auto-starts immediately (seat 1 needs no human), so it's no longer in the OPEN
+    // listing at all by the time this checks — exactly the same reason a started ["open","open"]
+    // match drops out too. Nothing left to browse for; a join attempt is still the real proof an
+    // "ai" seat is never human-joinable, started or not.
     const list = JSON.parse((await get(port, "/api/matches")).body);
-    const match = list.matches.find(m => m.id === created.json.matchId);
-    assert.equal(match.seats[1].kind, "ai");
+    assert.equal(list.matches.some(m => m.id === created.json.matchId), false, "an auto-started match is no longer publicly listed as open");
     const joinAttempt = await postJson(port, `/api/matches/${created.json.matchId}/join`, {});
     assert.equal(joinAttempt.status, 409, "an ai-kind seat is never open to a human join");
   });
@@ -212,8 +291,10 @@ test("seatKinds:['open','ai'] hosts an ordinary skirmish-vs-AI through the lobby
 
 test("two matches created back to back run fully independently — different seeds, different live workers, no cross-talk over HTTP or WS", async () => {
   await withApp(async (app, port) => {
-    const a = await postJson(port, "/api/matches", { planetId: "ferros" });
-    const b = await postJson(port, "/api/matches", { planetId: "ferros" });
+    // seatKinds:["open","ai"] so both are immediately live — this test's own point is cross-talk
+    // isolation between two CONCURRENT matches, not T-035's own start-condition semantics.
+    const a = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
+    const b = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
     assert.notEqual(a.json.matchId, b.json.matchId);
     const tA = await createWsClientTransport(`ws://localhost:${port}/ws?match=${a.json.matchId}&seat=player&token=${a.json.token}`);
     const tB = await createWsClientTransport(`ws://localhost:${port}/ws?match=${b.json.matchId}&seat=player&token=${b.json.token}`);
@@ -226,7 +307,7 @@ test("two matches created back to back run fully independently — different see
 
 test("a WebSocket upgrade aimed at /mcp is refused — the reserved namespace isn't secretly also a game socket", async () => {
   await withApp(async (app, port) => {
-    const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
     await assert.rejects(createWsClientTransport(`ws://localhost:${port}/mcp?match=${created.json.matchId}&seat=player&token=${created.json.token}`));
   });
 });
@@ -240,7 +321,9 @@ test("a WebSocket upgrade naming a match id that was never created is refused, n
 test("createAppServer().close() stops every live match's worker and ws attachment, without touching the http.Server itself", async () => {
   const app = await createAppServer();
   const port = await listen(app.server);
-  const created = await postJson(port, "/api/matches", { planetId: "ferros" });
+  // Immediately live (seatKinds:["open","ai"]) so close()'s own effect is actually what this test
+  // proves — a match that was never live to begin with would make the rejection below vacuous.
+  const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
   try {
     assert.doesNotThrow(() => app.close());
     assert.doesNotThrow(() => app.close(), "idempotent");

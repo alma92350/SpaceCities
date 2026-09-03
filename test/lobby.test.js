@@ -159,3 +159,42 @@ test("reclaimSeat refuses an unclaimed seat (no token exists yet to match agains
   assert.equal(result.code, "no-such-seat");
   assert.equal(lobby.reclaimSeat("not-a-real-id", 0, "anything").ok, false);
 });
+
+// T-035: FR-4's own start conditions. startMatch is the ONE transition out of "open" — this file
+// still doesn't decide WHEN to call it (host-triggered vs. all-seats-filled is tools/serve.js's
+// own wiring, same "model vs wiring" split T-033 already drew for create/join) or spawn anything;
+// it only ever flips status and refuses to flip it twice.
+test("startMatch transitions an open match to \"started\", and it drops out of listOpenMatches", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  const result = lobby.startMatch(match.id);
+  assert.equal(result.ok, true);
+  assert.equal(result.match.status, "started");
+  assert.equal(lobby.getMatch(match.id).status, "started", "the SAME match object the lobby itself tracks, not a copy");
+  assert.deepEqual(lobby.listOpenMatches(), []);
+});
+
+test("startMatch refuses an unknown match, without throwing", () => {
+  const lobby = createLobby();
+  const result = lobby.startMatch("not-a-real-id");
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "no-such-match");
+});
+
+test("startMatch refuses a match that's already started — starting is a one-way door", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  lobby.startMatch(match.id);
+  const result = lobby.startMatch(match.id);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "already-started");
+});
+
+test("joinMatch refuses a seat once the match has started — the window for a casual join has closed (T-036's reclaim flow is the only way back into an AI-filled seat)", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  lobby.startMatch(match.id);
+  const result = lobby.joinMatch(match.id, 1);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "already-started");
+});

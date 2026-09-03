@@ -109,6 +109,44 @@ test("two independently-fresh-booted workers get DIFFERENT matchIds — not a ha
   } finally { await Promise.all([a.terminate(), b.terminate()]); }
 });
 
+test("T-035 (FR-6): once a match ends, the worker stops ticking/pushing state — a finished match must not go on spending CPU and bandwidth forever", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spacecities-matchworker-over-test-"));
+  try {
+    const seed = 271828;
+    const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
+    const match = createMatch(state);
+    const aiCC = [...match.state.buildings.values()].find(b => b.owner === "ai" && b.type === "command");
+    match.state.buildings.delete(aiCC.id);   // last Command Center gone -> checkWinCondition ends it on the very next tick
+    await writeSnapshot(dir, "match-about-to-end", match.state);
+
+    const worker = new Worker(WORKER_FILE, {
+      workerData: { createGameStateOpts: { planetId: "ferros", seed }, dataDir: dir },
+    });
+    try {
+      // Straight to the "over" push, not a separate wait for "ready" first — two sequential
+      // waitFor() calls would each add their OWN listener only once the previous one resolves,
+      // and this match ends on literally its first tick, fast enough that a second listener
+      // registered just after "ready" resolves could genuinely miss the "state" message that
+      // follows it.
+      const overMsg = await waitFor(worker, m => m.type === "state" && m.proj.over === true);
+      assert.equal(overMsg.proj.winner, "player");
+      const overTick = overMsg.proj.tick;
+
+      // A real wait, not just "the first over:true arrived" — proving it stopped needs to observe
+      // an ABSENCE over real time, several TICK_MS (50ms) periods' worth. Compares proj.tick, not
+      // "any message at all": the SAME final tick posts one "state" message PER SEAT (the loop
+      // above), so a second, same-tick message for the other seat is expected and fine — only a
+      // LATER tick number would mean the worker kept going after the match was already over.
+      let sawLaterTick = false;
+      const onMsg = m => { if (m.type === "state" && m.proj.tick > overTick) sawLaterTick = true; };
+      worker.on("message", onMsg);
+      await new Promise(resolve => setTimeout(resolve, 300));
+      worker.off("message", onMsg);
+      assert.equal(sawLaterTick, false, "the worker must stop ticking once the match is over — no LATER tick may ever be pushed");
+    } finally { await worker.terminate(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("T-034: workerData.matchId, when given, is adopted as this fresh match's own id instead of minting a new one — the lobby's own id must be the live match's id too", async () => {
   const worker = new Worker(WORKER_FILE, {
     workerData: { matchId: "lobby-minted-id-123", createGameStateOpts: { planetId: "ferros", seed: SEED } },

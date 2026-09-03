@@ -13,9 +13,15 @@ import { createServer } from "node:http";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
 import { createWsClientTransport } from "../net/wsClientTransport.js";
 import { testTransportContract } from "./transportContract.js";
+import { createGameState } from "../engine/state.js";
+import { mulberry32 } from "../engine/rng.js";
+import { createMatch } from "../server/matchLoop.js";
+import { writeSnapshot } from "../server/matchSnapshot.js";
 
 const WORKER_FILE = join(dirname(fileURLToPath(import.meta.url)), "..", "server", "matchWorker.js");
 let nextSeed = 600000;
@@ -206,4 +212,33 @@ test("attachWsMatchWorker(...).close() stops accepting new upgrades and closes e
     // only what it itself set up. Proving idempotence is what's left to verify from outside.
     assert.doesNotThrow(() => wsMatch.close(), "closing the ws-worker attachment twice must be harmless");
   } finally { server.close(); worker.terminate(); }
+});
+
+test("T-035 (FR-6): once a match ends, BOTH connected seats receive over:true and the same winner over their own real WebSocket connection", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spacecities-wsworker-over-test-"));
+  try {
+    const seed = 555555;
+    const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
+    const match = createMatch(state);
+    const aiCC = [...match.state.buildings.values()].find(b => b.owner === "ai" && b.type === "command");
+    match.state.buildings.delete(aiCC.id);   // ends the match on the worker's very first tick
+    await writeSnapshot(dir, "match-about-to-end-ws", match.state);
+
+    const worker = new Worker(WORKER_FILE, { workerData: { createGameStateOpts: { planetId: "ferros", seed }, dataDir: dir } });
+    const server = createServer();
+    const wsMatch = await attachWsMatchWorker(server, worker);
+    const port = await listen(server);
+    try {
+      const playerT = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+      const aiT = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);
+      const playerOver = await new Promise(resolve => playerT.onEvent(e => { if (e.type === "state" && e.state.over) resolve(e.state); }));
+      const aiOver = await new Promise(resolve => aiT.onEvent(e => { if (e.type === "state" && e.state.over) resolve(e.state); }));
+      // The SAME shared fact, reconstructed independently over two separate real connections —
+      // which seat that means "you won" for is entirely game.localOwner's own job client-side
+      // (overlays.js's showGameOver, already covered by test/overlays.test.js's own T-030 tests).
+      assert.equal(playerOver.winner, "player");
+      assert.equal(aiOver.winner, "player");
+      playerT.close(); aiT.close();
+    } finally { wsMatch.close(); server.close(); worker.terminate(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });

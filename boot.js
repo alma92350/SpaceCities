@@ -421,6 +421,11 @@ export function restartToMapSelect() {
   if (loop) loop.stop();
   if (game.input) { game.input.destroy(); game.input = null; }
   exitObserverMode();   // a dangling spectateId into a galaxy that's about to be nulled would wedge the next game's input guards
+  // T-035: every Transport's own close() is guaranteed safe to call regardless of kind (the shared
+  // contract test/transportContract.js holds every implementation to) — a live network match's real
+  // WebSocket must not linger, still receiving pushes, after its owner has already left. bootState's
+  // own next call always reassigns game.transport before anything could read it again.
+  if (game.transport) { game.transport.close(); game.transport = null; }
   game.state = null;
   game.galaxy = null;
   // No game, no fixture in play. Every path that leaves a LIVE competition match has already

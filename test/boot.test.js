@@ -61,7 +61,7 @@ const doc = installFakeDom({ context: fakeCtx });
 doc.addEventListener = () => {};
 doc.removeEventListener = () => {};
 
-const { pauseLoop, resumeLoop, togglePause, startGame, startOdyssey, initiateJump, notifyColony, isUnderAttackEvent, bootState } = await import("../boot.js");
+const { pauseLoop, resumeLoop, togglePause, startGame, startOdyssey, initiateJump, notifyColony, isUnderAttackEvent, bootState, restartToMapSelect } = await import("../boot.js");
 // dom.js is already loaded (boot.js imports it statically) — re-importing it here just returns
 // the SAME cached module, i.e. the SAME `pauseBtn` object boot.js's syncPause() mutates. A
 // second, independent observable of the same `manual` boolean: the topbar button's label.
@@ -834,6 +834,27 @@ test("T-034: booting with a live network transport (no .tick() of its own) never
   assert.equal(advanced.tick, 0, "the SERVER'S OWN worker owns this match's ticking — nothing here may advance it locally");
 
   game.state = null;
+  game.input = null;
+  hideObjectives();
+  resetPause();
+});
+
+// T-035 (FR-6): restartToMapSelect() is every "leave the match" path's own end point — the game-over
+// screen's Restart button (overlays.js's showGameOver callback), Home, a fresh game after a loaded
+// one — and for a live network match it used to just null game.state and walk away, leaving the
+// real WebSocket connection open and still receiving pushes forever. Every Transport in this
+// codebase already guarantees close() is safe to call (test/transportContract.js's own shared
+// contract), so this needn't distinguish loopback from a live one — always closing is correct and
+// harmless either way.
+test("T-035 (FR-6): restartToMapSelect() closes the live transport — a network match's own WebSocket must not linger after leaving it", () => {
+  resetPause();
+  resetSetup();
+  startGame("ferros");
+  let closed = false;
+  game.transport = { submitCommand: () => Promise.resolve({ ok: true }), onEvent() {}, close() { closed = true; } };
+  restartToMapSelect();
+  assert.equal(closed, true, "leaving a match must close whatever transport it was using");
+
   game.input = null;
   hideObjectives();
   resetPause();
