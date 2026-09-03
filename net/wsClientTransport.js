@@ -14,6 +14,14 @@
    reassembleProjection) into the exact same shape a loopback StateEvent's `state` field already
    has before it is ever handed to onEvent. Nothing above this file ever sees the wire shape.
 
+   ADR-0009 M2 (T-028a): the fog grid isn't part of that wire shape either any more — this file
+   also creates and holds this seat's own persistent Fog (createFog(map), right alongside map
+   itself, at welcome time) and hands it to reassembleProjection on every "state" message, which
+   recomputes it from the wire's own units/buildings via engine/fog.js's updateFog, the exact same
+   pure function the server runs. One object, reused and mutated in place for the life of this
+   connection — explored accumulates monotonically, the same guarantee state.fogs[owner] already
+   gives server-side.
+
    Async on purpose, unlike createLoopbackTransport: establishing a real socket and waiting for
    that first welcome message is genuinely asynchronous, where loopback wraps an
    already-constructed session synchronously. The resolved Transport's own methods stay
@@ -25,6 +33,7 @@
 
 import { generateMap } from "../engine/map.js";
 import { mulberry32 } from "../engine/rng.js";
+import { createFog } from "../engine/fog.js";
 import { reassembleProjection } from "../engine/projection.js";
 import { encode } from "./commandEnvelope.js";
 
@@ -44,6 +53,9 @@ export function createWsClientTransport(url) {
     const pendingBySeq = new Map();   // seq -> resolve(CommandResult)
     const handlers = new Set();
     let map = null;
+    let fog = null;   // this seat's OWN persistent fog (ADR-0009 M2) — created once at welcome,
+                       // mutated in place by every reassembleProjection call from then on
+    let seat = null;
 
     function emit(event) {
       if (closed) return;
@@ -75,12 +87,14 @@ export function createWsClientTransport(url) {
         if (settled) return;   // a stray/duplicate welcome after the handshake already completed
         const { planetId, seed, sizeMult, resourceMult, swapAsym } = msg.createGameState;
         map = generateMap(planetId, mulberry32(seed), { sizeMult, resourceMult, swapAsym });
+        fog = createFog(map);
+        seat = msg.seat;
         settled = true;
         resolve(makeTransport());
         return;
       }
       if (msg.type === "state") {
-        emit({ type: "state", state: reassembleProjection(msg.proj, map) });
+        emit({ type: "state", state: reassembleProjection(msg.proj, map, fog, seat) });
         return;
       }
       if (msg.type === "commandResult") {

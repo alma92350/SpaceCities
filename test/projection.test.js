@@ -1,7 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGameState, makeUnit } from "../engine/state.js";
-import { updateFog } from "../engine/fog.js";
+import { updateFog, createFog } from "../engine/fog.js";
+import { generateMap } from "../engine/map.js";
+import { mulberry32 } from "../engine/rng.js";
 import { supplyUsed, supplyCap } from "../engine/supply.js";
 import { playerScore } from "../engine/victory.js";
 import { projectFor, reassembleProjection } from "../engine/projection.js";
@@ -57,6 +59,15 @@ function buildScenario() {
   state.units.set(scout.id, scout);
   updateFog(state, state.fogs.player, "player");
   state.units.delete(scout.id);   // the scout itself isn't part of what this file is testing
+  // Recompute once more so state.fogs.player.visible reflects CURRENT units (scout gone) rather
+  // than staying frozen mid-scout — exactly the invariant engine/sim.js's own tick() always keeps
+  // (fog is recomputed fresh every tick, right after any entity change, never left stale). Without
+  // this, `visible` would still show the deleted scout's own sight radius as "currently visible",
+  // an inconsistency real gameplay can never produce and that a client-side fog recompute (which
+  // only ever sees CURRENT entities, same as this second call) could never reproduce either.
+  // `explored` is unaffected either way — it only ever grows, so the scout's one real contribution
+  // (discovering the hidden node below) survives permanently regardless of this second call.
+  updateFog(state, state.fogs.player, "player");
 
   // Events: one AI-owned at a visible point (should pass on visibility, not ownership), one
   // AI-owned far away (should be excluded), one ownerless "environmental" event at a visible point
@@ -167,10 +178,11 @@ test("another seat's player record is public-only — no resources, no upgrades 
   assert.equal(ai.supplyCap, supplyCap(state, "ai"));
 });
 
-test("fogs carries only the requesting seat's own fog", () => {
+test("the fog grid is never part of the wire payload — the client recomputes it locally (ADR-0009 M2)", () => {
   const { state } = buildScenario();
   const proj = projectFor(state, "player");
-  assert.deepEqual(Object.keys(proj.fogs), ["player"]);
+  assert.equal(proj.fogs, undefined,
+    "shipping the fog grid every tick is exactly what M2 removes — own units/buildings are already in the payload, which is everything engine/fog.js's updateFog needs to recompute it client-side");
 });
 
 test("owners is passed through unchanged", () => {
@@ -286,21 +298,121 @@ test("M0: projectFor(s, 'player') renders pixel-identically to s once reassemble
 
   const proj = projectFor(state, "player");
   const wire = JSON.parse(JSON.stringify(proj));
-  const view = reassembleProjection(wire, state.map);
+  // Since M2, fog is no longer part of the wire — reassembleProjection recomputes it from the
+  // wire's own units/buildings. Seeded from state.fogs.player's OWN current arrays rather than a
+  // blank createFog(): this test's job is render parity, not fog-recompute-from-zero (the
+  // dedicated tests below cover that against a real multi-tick sequence, where "zero" is honest —
+  // here buildScenario()'s discovered hidden node was found by a scout that no longer exists, so a
+  // truly blank start could never recover that EXPLORED history no CURRENTLY-live unit witnesses,
+  // exactly the gap a client who was actually connected the whole time would never hit for real).
+  // The seed only supplies history a one-shot test has no other way to reconstruct; the recompute
+  // itself still runs for real, against CURRENT units, same as any other call.
+  const fog = createFog(state.map);
+  fog.explored.set(state.fogs.player.explored);
+  fog.visible.set(state.fogs.player.visible);
+  const view = reassembleProjection(wire, state.map, fog, "player");
   const projCtx = recordingCtx();
   drawFrame(projCtx, view, camera, 800, 600, null, null, 1, false);
 
   assert.deepEqual(projCtx.calls, realCtx.calls);
 });
 
-test("reassembleProjection works for any seat, not just a hardcoded 'player' — derives the seat from the projection's own fogs key", () => {
+test("reassembleProjection merges the wire's current node amounts into the LOCAL map's own nodes, not just an unused top-level field", () => {
+  // Both existing reassembly tests above pass state.map itself as the reassembly target — the
+  // SAME object the wire was derived from, so a node's amount already agrees trivially either
+  // way and this bug is invisible to them. A real net/wsClientTransport.js client instead builds
+  // its OWN, separately-generated map (from the same seed) once at welcome time and reuses it
+  // across every subsequent state push — this is that scenario.
+  const { state } = buildScenario();
+  const chartedNode = state.map.nodes.find(n => !n.hidden);
+  const originalAmount = chartedNode.amount;
+  chartedNode.amount = originalAmount - 37;   // the server's own copy has been harvested down
+
+  const proj = projectFor(state, "player");
+  const wire = JSON.parse(JSON.stringify(proj));
+
+  const freshMap = generateMap(state.planetId, mulberry32(state.seed),
+    { sizeMult: state.sizeMult, resourceMult: state.resourceMult, swapAsym: state.swapAsym });
+  const freshNodeBefore = freshMap.nodes.find(n => n.id === chartedNode.id);
+  assert.equal(freshNodeBefore.amount, originalAmount,
+    "fixture sanity: the freshly regenerated map still has the node's ORIGINAL amount — proving this really is a separate instance from state.map, not a coincidental alias");
+
+  const view = reassembleProjection(wire, freshMap, createFog(freshMap), "player");
+  const seen = view.map.nodes.find(n => n.id === chartedNode.id);
+  assert.equal(seen.amount, chartedNode.amount,
+    "the client's own map must reflect the server's current (harvested-down) amount, not the map's generation-time default");
+});
+
+test("reassembleProjection works for any seat, not just a hardcoded 'player'", () => {
   const { state } = buildScenario();
   const proj = projectFor(state, "ai");
   const wire = JSON.parse(JSON.stringify(proj));
-  const view = reassembleProjection(wire, state.map);
-  assert.equal(view.fog, wire.fogs.ai);
-  assert.equal(view.fogAI, wire.fogs.ai);
+  const fog = createFog(state.map);
+  const view = reassembleProjection(wire, state.map, fog, "ai");
+  assert.equal(view.fog, fog, "fog/fogAI alias the SAME recomputed fog object the caller handed in");
+  assert.equal(view.fogAI, fog);
   assert.ok(view.units instanceof Map);
   assert.ok(view.buildings instanceof Map);
   assert.deepEqual(view.selection, []);
+});
+
+/* ============================================================
+   ADR-0009 M2: the fog grid is no longer shipped — reassembleProjection recomputes it from the
+   wire's own units/buildings using engine/fog.js's updateFog, the exact same pure function
+   engine/sim.js already runs server-side every tick. These tests prove the property M2 actually
+   depends on: a client's own recompute must agree with the server's, byte for byte, or players see
+   ghosts (ADR-0009's own stated risk) — not just "renders about right" (the M0 test above), but the
+   underlying grids themselves.
+   ============================================================ */
+
+test("client-recomputed fog agrees with the server's own fog bit-for-bit, accumulated over a real sequence of ticks", () => {
+  // Deliberately NOT buildScenario(): its discovered hidden node is found by a scout that is
+  // then deleted, so state.fogs.player carries EXPLORED history no currently-live unit witnesses
+  // — recoverable by a client that was accumulating the whole time (this test), never by a
+  // one-shot snapshot (which is exactly why the M0 test above seeds instead of starting blank).
+  // This fixture instead drives BOTH fogs through the SAME real sequence of moves, exactly
+  // mirroring how net/wsClientTransport.js actually receives a stream of ticks in production —
+  // the property this whole mechanism actually depends on holding.
+  const state = createGameState({ planetId: "ferros", seed: 23 });
+  const worker = [...state.units.values()].find(u => u.owner === "player");
+  const map = generateMap(state.planetId, mulberry32(state.seed),
+    { sizeMult: state.sizeMult, resourceMult: state.resourceMult, swapAsym: state.swapAsym });
+  const fog = createFog(map);
+
+  const waypoints = [[0, 0], [300, 0], [0, 300], [-500, 150], [200, -400]];
+  for (const [dx, dy] of waypoints) {
+    worker.x += dx; worker.y += dy;
+    updateFog(state, state.fogs.player, "player");   // the server's own per-tick call
+    const wire = JSON.parse(JSON.stringify(projectFor(state, "player")));
+    reassembleProjection(wire, map, fog, "player");   // the client's own per-tick call
+  }
+
+  assert.deepEqual([...fog.explored], [...state.fogs.player.explored]);
+  assert.deepEqual([...fog.visible], [...state.fogs.player.visible]);
+});
+
+test("explored accumulates across multiple state pushes with the SAME persistent fog object — never cleared, only ever added to", () => {
+  const state = createGameState({ planetId: "ferros", seed: 11 });
+  const worker = [...state.units.values()].find(u => u.owner === "player");
+  const map = generateMap(state.planetId, mulberry32(state.seed),
+    { sizeMult: state.sizeMult, resourceMult: state.resourceMult, swapAsym: state.swapAsym });
+  const fog = createFog(map);   // ONE persistent object, exactly as net/wsClientTransport.js holds across every "state" message
+
+  // First push: the worker at its starting position.
+  updateFog(state, state.fogs.player, "player");
+  let wire = JSON.parse(JSON.stringify(projectFor(state, "player")));
+  reassembleProjection(wire, map, fog, "player");
+  const exploredNearStart = [...fog.explored].reduce((a, v) => a + v, 0);
+  assert.ok(exploredNearStart > 0, "fixture sanity: starting position reveals something");
+
+  // Move the worker far away and push again — the OLD area must stay explored (monotonic) even
+  // though it's no longer currently visible.
+  worker.x += 2000; worker.y += 2000;
+  updateFog(state, state.fogs.player, "player");
+  wire = JSON.parse(JSON.stringify(projectFor(state, "player")));
+  reassembleProjection(wire, map, fog, "player");
+  const exploredAfterMove = [...fog.explored].reduce((a, v) => a + v, 0);
+
+  assert.ok(exploredAfterMove >= exploredNearStart,
+    "explored must never shrink — the client's own accumulated memory can only grow, matching the server's own updateFog contract");
 });
