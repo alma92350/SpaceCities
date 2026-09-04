@@ -218,3 +218,101 @@ test("with aiEnabled:false, tick() never lets the built-in AI act for owner \"ai
     if (b.owner === "ai") assert.equal(b.queue.length, 0, `${b.type} must never get an autonomous production order`);
   }
 });
+
+/* ---------- T-041 (FR-1): ownerDefs from a caller-supplied config; N-seat state.owners ----------
+   Deliberately narrow, matching this task's own row: the SCAFFOLD (owners/players/fogs/seeding)
+   becomes genuinely N-capable, reusing what docs/analysis/01-engine-nplayer-seams.md's own audit
+   already found owner-generic (combat, movement, victory — the "rebels" tests above already prove
+   it for a manually-spliced 3rd owner). What this does NOT touch: state.controllers{} (T-042, the
+   AI decision layer is still exactly the 2-slot state.ai/state.playerAi), opponentsOf() (T-043),
+   and a REAL N-position map generator (T-044 — basePositions below is this task's own deliberate
+   stopgap, an explicit override for owners the map's own 2-keyed map.bases doesn't have a real
+   position for yet, never meant to survive past T-044 landing a real one). ---------- */
+
+test("T-041: omitting ownerDefs is byte-identical to before this option existed — every existing caller is completely unaffected", () => {
+  const state = createGameState({ planetId: "ferros", seed: 42 });
+  assert.deepEqual(state.owners, ["player", "ai"]);
+});
+
+test("T-041: a caller-supplied ownerDefs (N owners) plus basePositions for the owners the map doesn't already have produces a real, fully-seeded N-owner scaffold", () => {
+  const ownerDefs = [
+    { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+    { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+    { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    { id: "pirates", faction: "neutral", isAI: true, color: "#a78bfa" },
+  ];
+  const state = createGameState({
+    planetId: "ferros",
+    ownerDefs,
+    basePositions: { rebels: { x: 900, y: 300 }, pirates: { x: 300, y: 900 } },
+  });
+  assert.deepEqual(state.owners, ["player", "ai", "rebels", "pirates"]);
+  for (const id of state.owners) {
+    assert.ok(state.players[id], `players.${id} exists`);
+    assert.equal(state.players[id].id, id);
+    assert.ok(state.fogs[id], `fogs.${id} exists`);
+    const cc = [...state.buildings.values()].find(b => b.owner === id && b.type === "command");
+    assert.ok(cc, `${id} has a seeded Command Center`);
+    assert.equal([...state.units.values()].filter(u => u.owner === id && u.type === "worker").length, 3, `${id} has 3 starting workers`);
+  }
+  const rebelCC = [...state.buildings.values()].find(b => b.owner === "rebels" && b.type === "command");
+  assert.equal(rebelCC.x, 900);
+  assert.equal(rebelCC.y, 300);
+});
+
+test("T-041: an explicit ownerDefs overrides playerFaction/aiFaction — the shortcut opts only apply to the DEFAULT 2-owner pair, not a caller's own more detailed config", () => {
+  const state = createGameState({
+    planetId: "ferros",
+    playerFaction: "frontier", aiFaction: "syndicate",   // must be ignored below
+    ownerDefs: [
+      { id: "player", faction: "miners", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+    ],
+  });
+  assert.equal(state.players.player.faction, "miners", "the explicit ownerDefs entry wins over the shortcut playerFaction opt");
+  assert.equal(state.players.ai.faction, "neutral", "the explicit ownerDefs entry wins over the shortcut aiFaction opt");
+});
+
+test("T-041: a 4-seat, AI-only match plays headlessly to a real winner via ordinary tick() — real combat, real movement, real N-way victory, no UI", () => {
+  const ownerDefs = [
+    { id: "player", faction: "neutral", isAI: true, color: "#4fd1ff" },
+    { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+    { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    { id: "pirates", faction: "neutral", isAI: true, color: "#a78bfa" },
+  ];
+  // A tight cluster (not the real, far-apart 2-seat map bases — this task doesn't touch the map
+  // generator, T-044 does) so a single attacking force can reach every base quickly, keeping this
+  // test fast and its outcome unambiguous.
+  const state = createGameState({
+    planetId: "ferros",
+    ownerDefs,
+    basePositions: {
+      player: { x: 800, y: 500 }, ai: { x: 950, y: 500 },
+      rebels: { x: 800, y: 650 }, pirates: { x: 950, y: 650 },
+    },
+  });
+
+  // Everyone but "player" starts with a Command Center weakened to a single hit — this test's own
+  // proof is that REAL combat/movement/victory resolve correctly for four owners at once, not that
+  // it can grind through three full 1000-hp bases; T-042's own AI decision layer (not built yet)
+  // is what would normally arm every seat anyway, so a slow siege here would prove nothing extra.
+  for (const id of ["ai", "rebels", "pirates"]) {
+    const cc = [...state.buildings.values()].find(b => b.owner === id && b.type === "command");
+    cc.hp = 1;
+  }
+
+  // "player"'s own opening force, given real attack-move orders toward the cluster's center —
+  // engine/commands.js's own real order shape, the same one test/projection.test.js's own fixture
+  // already uses to drive combat units in a test without a live input layer.
+  for (let i = 0; i < 6; i++) {
+    const skiff = makeUnit("skiff", "player", 800 + i * 10, 480);
+    skiff.order = { type: "attack-move", x: 875, y: 575 };
+    state.units.set(skiff.id, skiff);
+  }
+
+  let ticks = 0;
+  while (!state.over && ticks < 2000) { tick(state, 0.1); ticks++; }
+
+  assert.equal(state.over, true, `a 4-seat match must reach a real winner within a bounded number of ticks (stopped after ${ticks})`);
+  assert.equal(state.winner, "player", "the only seat with a live Command Center and an armed force must be the one left standing");
+});

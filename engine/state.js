@@ -186,7 +186,13 @@ export function createAiController(planetId, opts = {}) {
  * @param {{ planetId?: string, rng?: () => number, seed?: number, sizeMult?: number,
  *   resourceMult?: number, swapAsym?: boolean, matchTimeLimit?: number, popCap?: number, endless?: boolean,
  *   aiApm?: number, aiMicro?: boolean, aiEnabled?: boolean,
- *   aiStrategy?: string, difficulty?: string, aiArchetype?: string, playerFaction?: string, aiFaction?: string }} [opts]
+ *   aiStrategy?: string, difficulty?: string, aiArchetype?: string, playerFaction?: string, aiFaction?: string,
+ *   ownerDefs?: {id: string, faction: string, isAI: boolean, color: string}[],
+ *   basePositions?: Object.<string, {x: number, y: number}> }} [opts]
+ *   ownerDefs (T-041): a caller-supplied N-entry side list, replacing the default ["player","ai"]
+ *   pair wholesale — omitted (every caller today), byte-identical to before. basePositions: a
+ *   per-owner start-position override, consulted before map.bases — a deliberate stopgap for
+ *   owners the 2-keyed map generator has no real position for yet (T-044's own later job).
  * @returns {State}
  */
 export function createGameState(opts = {}) {
@@ -209,14 +215,20 @@ export function createGameState(opts = {}) {
     swapAsym: !!opts.swapAsym,
   });
 
-  // The sides in this world. Today always exactly the human "player" and the AI
+  // The sides in this world. Today almost always exactly the human "player" and the AI
   // opponent, but the SCAFFOLD is owner-generic: state.owners is the canonical
   // side list, and the player map, per-owner fog, seeding, persistence and the
   // victory check are all driven by ITERATING it — not by two hardcoded names.
   // So a future N-faction world is a change to this list, not a sweep across the
   // engine. (state.fog / state.fogAI stay as aliases into state.fogs so the many
   // existing fog consumers keep working unchanged.)
-  const ownerDefs = [
+  //
+  // T-041 (FR-1): opts.ownerDefs lets a caller supply its own N-entry list — omitted (every
+  // existing caller), this is byte-identical to the literal 2-entry pair it always was, so
+  // playerFaction/aiFaction keep meaning exactly what they always did. Once a caller passes its
+  // own ownerDefs, those two shortcut opts are simply never consulted (the caller's own entries
+  // already carry `faction` per owner) — the more detailed config wins, not both at once.
+  const ownerDefs = opts.ownerDefs || [
     // Faction is a passive-trait bundle (engine/factions.js). It defaults to
     // "neutral" (no traits) so a bare createGameState — every engine test —
     // behaves exactly as before; the setup screen (main.js) passes the real
@@ -318,7 +330,14 @@ export function createGameState(opts = {}) {
   // skirmish) and prime its vision before the first render — both by iterating owners,
   // so the id-minting order and fog state are byte-identical to the old player-then-ai
   // pair. map.bases is keyed by owner id (engine/map.js).
-  for (const id of owners) seedPlayer(state, id, map.bases[id]);
+  //
+  // T-041: opts.basePositions is an explicit per-owner override, consulted FIRST — the map
+  // generator itself still only ever produces "player"/"ai" (a real N-position generator is
+  // T-044's own, later job); this is a deliberate stopgap so a caller with its own ownerDefs can
+  // supply where the extra owners start, without this file needing any map-generation logic of
+  // its own. Every existing caller leaves it unset, so map.bases[id] alone decides, exactly as
+  // before this option existed.
+  for (const id of owners) seedPlayer(state, id, (opts.basePositions && opts.basePositions[id]) || map.bases[id]);
   for (const id of owners) updateFog(state, state.fogs[id], id);
 
   // Hard difficulty's economic edge (engine/aiDifficulty.js): seed the synthetic hardEdge
