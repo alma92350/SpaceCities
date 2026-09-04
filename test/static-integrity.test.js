@@ -234,6 +234,15 @@ test("every shipped browser module is reachable from index.html's entry point", 
     "net/wsServerTransport.js",
     "net/wsWorkerTransport.js", "server/matchWorker.js", "server/matchSnapshot.js",
     "server/lobby.js", "server/lobbySnapshot.js",
+    // T-039: net/abuseGuard.js's only real caller is net/wsWorkerTransport.js itself (the general
+    // per-connection rate gate conn.onmessage runs on every inbound message) — it inherits THAT
+    // file's own invisible-edge status rather than carrying a reason of its own, the same class as
+    // engine/projectionDelta.js/server/matchSnapshot.js above. Unlike net/chatLimiter.js (T-038),
+    // which came OUT of this list once chat.js (a real browser module) started importing its
+    // MAX_CHAT_LEN for the client-side optimistic length cap, nothing client-side ever needs
+    // abuseGuard.js's own exports — deciding whether to throttle or disconnect a connection is
+    // inherently a server-side question — so this one has no equivalent future exit.
+    "net/abuseGuard.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

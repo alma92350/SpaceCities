@@ -598,3 +598,129 @@ test("T-038: transport.sendChat() is delivered as a real {type:'chat'} event via
     player.close(); ai.close();
   } finally { wsMatch.close(); server.close(); worker.terminate(); }
 });
+
+/* ---------- T-039 (FR-10): rate limiting and abuse guards on every client-driven path ---------- */
+
+function rawEnvelope(seq) {
+  return JSON.stringify({ v: 1, seq, tick: null, cmd: { t: "stop", ids: [] } });
+}
+
+function countCommandResults(ws, ms) {
+  return new Promise(resolve => {
+    let n = 0;
+    const handler = ev => { if (JSON.parse(ev.data).type === "commandResult") n++; };
+    ws.addEventListener("message", handler);
+    setTimeout(() => { ws.removeEventListener("message", handler); resolve(n); }, ms);
+  });
+}
+
+function waitClosed(ws, ms) {
+  return new Promise(resolve => {
+    const timer = setTimeout(() => resolve(false), ms);
+    ws.addEventListener("close", () => { clearTimeout(timer); resolve(true); });
+  });
+}
+
+test("T-039: a burst beyond the general rate limit is partially throttled, but the connection stays open and keeps working", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const results = countCommandResults(player, 300);
+    for (let i = 0; i < 50; i++) player.send(rawEnvelope(i));   // 40 allowed + 10 throttled — under the 20-strike abuse threshold
+    const n = await results;
+    assert.ok(n > 0 && n < 50, `some, but not all, of a 50-message burst must get through — got ${n}`);
+    // The connection itself must still be alive and functional afterward — 10 strikes is well
+    // under the 20-strike disconnect threshold, so this is throttling, not abuse. Wait past the
+    // FULL 1s rate window (not just the burst's own settle time above) before the follow-up send —
+    // otherwise the burst's own timestamps haven't aged out yet and would throttle this one too,
+    // which would be this test's own timing bug, not a real product defect.
+    await new Promise(resolve => setTimeout(resolve, 1100));
+    const echo = countCommandResults(player, 300);
+    player.send(rawEnvelope(9000));
+    assert.equal(await echo, 1, "the connection must still relay an ordinary command after the burst has passed");
+    player.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-039: a sustained flood — enough throttled messages to cross the abuse threshold — gets the connection disconnected", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const closed = waitClosed(player, 5000);
+    for (let i = 0; i < 100; i++) player.send(rawEnvelope(i));   // 40 allowed + 60 throttled — well past the 20-strike threshold
+    assert.equal(await closed, true, "a connection that keeps getting throttled must eventually be disconnected outright");
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-039: disconnecting one seat for abuse never affects the match for the other seat — it keeps receiving state pushes", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const flooder = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    const flooderClosed = waitClosed(flooder, 5000);
+    for (let i = 0; i < 100; i++) flooder.send(rawEnvelope(i));
+    assert.equal(await flooderClosed, true, "fixture sanity: the flooding seat is actually disconnected");
+    // The OTHER seat must be completely unaffected — still connected, and the match's own tick
+    // loop must still be pushing it fresh state, exactly as if nothing had happened.
+    const nextState = new Promise(resolve => {
+      ai.addEventListener("message", function handler(ev) {
+        const msg = JSON.parse(ev.data);
+        if (msg.type === "state") { ai.removeEventListener("message", handler); resolve(msg); }
+      });
+    });
+    assert.ok(await nextState, "the surviving seat must keep receiving ordinary state pushes after the other seat was disconnected for abuse");
+    ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-039: a flood of malformed/garbage frames (not even valid JSON) is bounded by the same general rate gate and eventually disconnected", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const closed = waitClosed(player, 5000);
+    for (let i = 0; i < 100; i++) player.send("not even json {{{");
+    assert.equal(await closed, true, "the general rate gate runs BEFORE JSON.parse, so a garbage flood must be bounded exactly like a command flood");
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-039: ordinary light traffic, well under the rate limit, is never throttled or disconnected", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const results = countCommandResults(player, 400);
+    for (let i = 0; i < 5; i++) player.send(rawEnvelope(i));   // well under the 40/second allowance
+    assert.equal(await results, 5, "every one of a small, ordinary burst must be relayed and answered — no false positives");
+    player.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-039: a determined chat-flooder — repeatedly past net/chatLimiter.js's own stricter limit — also eventually gets disconnected, not just silently ignored forever", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const closed = waitClosed(player, 5000);
+    // 25 chat sends, all well within the general 40/second allowance, so every one reaches
+    // net/chatLimiter.js's own check: the first 5 succeed, the remaining 20 are rejected by ITS
+    // stricter 5-per-10s limit — 20 rejections is exactly the abuse threshold.
+    for (let i = 0; i < 25; i++) player.send(JSON.stringify({ type: "chat", text: `spam ${i}` }));
+    assert.equal(await closed, true, "repeated chat-limit rejections must count toward the same abuse escalation as a raw command flood");
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});

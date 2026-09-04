@@ -56,6 +56,24 @@
    chatTimestampsBySeat is keyed by SEAT, not by connection — surviving a reconnect (T-036), the
    same durable-identity reasoning bySeat's own token-based reclaim already relies on, so a quick
    disconnect/reconnect cycle can't reset a seat's own rate-limit budget for free.
+
+   T-039 (FR-10): RATE LIMITING AND ABUSE GUARDS, layered in front of EVERY client-driven path a
+   seat connection's own conn.onmessage handles — a command envelope, a chat message, even a
+   malformed/garbage frame — not just chat's own already-existing limit above. net/abuseGuard.js
+   owns the two pure decisions (see its own header for the full reasoning): checkRate is a general,
+   generous per-connection rate gate that runs FIRST, before any parsing at all, so a flood of
+   oversized garbage is bounded by raw message count, not just a flood of well-formed commands;
+   recordStrike escalates — every rejection from EITHER checkRate OR net/chatLimiter.js's own
+   stricter chat-specific checks is one strike, and enough of them within its own (longer) window
+   gets the connection closed outright via conn.close(), never merely throttled forever. That
+   close() is the ONLY new mechanism this task adds — it reuses the exact same onclose handler
+   below (bySeat.delete/seatDisconnected) T-036's own disconnect/AI-takeover path already runs for
+   ANY dropped connection, so "without affecting the match" (this task's own exit criterion) comes
+   for free: the match's tick loop and every OTHER seat/spectator are already built to not care WHY
+   a connection went away, only that it did. guard is created per CONNECTION (a plain local, not a
+   Map keyed by seat like chatTimestampsBySeat) — see net/abuseGuard.js's own header for why a
+   legitimate reconnect must never inherit a strike count a DIFFERENT, already-disconnected
+   connection racked up.
    ============================================================ */
 
 "use strict";
@@ -64,6 +82,7 @@ import { acceptUpgrade } from "./ws.js";
 import { buildStateMessage } from "./wsServerTransport.js";
 import { SPECTATOR_SEAT } from "../engine/projection.js";
 import { validChatLength, tryConsume } from "./chatLimiter.js";
+import { createGuardState, checkRate, recordStrike } from "./abuseGuard.js";
 
 /**
  * @param {import("http").Server} httpServer
@@ -136,8 +155,18 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
           bySeat.set(seat, conn);
           conn.send(welcomePayload(seat));
           worker.postMessage({ type: "seatConnected", seat });
+          const guard = createGuardState();   // T-039 — per CONNECTION, not per seat; see this file's own header
 
           conn.onmessage = (data, isBinary) => {
+            const now = Date.now();
+            // T-039: the general rate gate runs FIRST, before even attempting to parse — a flood
+            // of oversized garbage has a real CPU cost from parsing alone, so gating on raw message
+            // count (not successfully-decoded ones) is what actually bounds that too, not just a
+            // flood of well-formed-but-excessive commands. Every rejection (this gate, or chat's
+            // own stricter one below) is a strike; enough of them and the connection is closed
+            // outright — see net/abuseGuard.js's own header for the two-stage reasoning.
+            if (!checkRate(guard, now)) { if (recordStrike(guard, now)) conn.close(); return; }
+
             if (isBinary) return;   // a client only ever sends a JSON command envelope, never binary
             let envelope;
             try { envelope = JSON.parse(data); } catch { return; }   // malformed JSON: nothing to relay
@@ -147,10 +176,10 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
               // worker (no seq/ack, not part of the sim), and a rejection (too long / rate-limited)
               // is always silent: no error frame, just nothing sent, same "malformed JSON" posture
               // immediately above.
-              if (!validChatLength(envelope.text)) return;
+              if (!validChatLength(envelope.text)) { if (recordStrike(guard, now)) conn.close(); return; }
               let timestamps = chatTimestampsBySeat.get(seat);
               if (!timestamps) { timestamps = []; chatTimestampsBySeat.set(seat, timestamps); }
-              if (!tryConsume(timestamps, Date.now())) return;
+              if (!tryConsume(timestamps, now)) { if (recordStrike(guard, now)) conn.close(); return; }
               const wire = JSON.stringify({ type: "chat", from: seat, text: envelope.text });
               for (const c of bySeat.values()) c.send(wire);   // every seat, including the sender itself
               for (const c of spectators) c.send(wire);        // read-only recipients (T-037)
