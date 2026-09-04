@@ -16,7 +16,7 @@ import { BUILDINGS, UNITS, canAfford, prereqsMet, isElectrifiable } from "./enti
 import { powerCap, powerDraw } from "./industry.js";
 import { researchTech } from "./techtree.js";
 import { supplyUsed, supplyCap } from "./supply.js";
-import { canAct, spend, canAffordKeeping, tryBuild } from "./aiCommon.js";
+import { canAct, spend, canAffordKeeping, tryBuild, controllerFor } from "./aiCommon.js";
 import { wantsDeepIndustry } from "./aiWorkers.js";
 import { difficultyFor } from "./aiDifficulty.js";
 import { strategyFor } from "./aiStrategy.js";
@@ -100,7 +100,7 @@ export function rivalGateEligible(state, owner = "ai") {
   let banked = 0;
   for (const com in BUILDINGS.antimatter_gate.feed) banked += res[com] || 0;
   if (banked < RIVAL_GATE_BUFFER) return false;
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);   // T-042
   return df.mult === "hard" || wantsDeepIndustry(state, controller.archetype, strategyFor(state, owner), owner);
 }
 

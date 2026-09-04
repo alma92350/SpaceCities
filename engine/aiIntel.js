@@ -41,7 +41,7 @@
 
 import { UNITS, BUILDINGS } from "./entities.js";
 import { isVisibleAt } from "./fog.js";
-import { otherOwner } from "./aiCommon.js";
+import { otherOwner, controllerFor } from "./aiCommon.js";
 // aiStrategy.js is the pure, import-free leaf its own header describes, so this is a downward
 // edge with no cycle — the same one aiWorkers/aiMilitary/aiEconomy already have.
 import { strategyFor } from "./aiStrategy.js";
@@ -179,7 +179,7 @@ export function sightEnemy(state, owner = "ai") {
  * @param {State} state @param {string} [owner] @returns {void}
  */
 export function updateIntel(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   if (!controller) return;
   const live = sightEnemy(state, owner);
   refreshChannel(controller, state.time, "intelMil", "intelMilAt", live.mil);
@@ -196,7 +196,7 @@ export function updateIntel(state, owner = "ai") {
  * @returns {{ posture: number|null, confidence: number, mil: number, eco: number, age: number|null }}
  */
 export function readEnemy(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   if (!controller) return { posture: null, confidence: 0, mil: 0, eco: 0, age: null };
   // Each channel's stored PEAK, faded by its own elapsed time — the fade lives here, at the read,
   // and is never written back (see channelValue).
@@ -276,7 +276,7 @@ export const ADAPT_RATE = 0.04;      // …and then moves at most this far per t
  * @param {State} state @param {string} [owner] @param {number} [adaptivity] @returns {number}
  */
 export function updateAdaptMode(state, owner = "ai", adaptivity = 1) {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   if (!controller) return ADAPT_NEUTRAL;
   const cur = controller.adaptMode == null ? ADAPT_NEUTRAL : controller.adaptMode;
   if (adaptivity <= 0) { controller.adaptMode = ADAPT_NEUTRAL; return ADAPT_NEUTRAL; }
@@ -312,7 +312,7 @@ const DEFENCE_SWING = 0.6;
  * @param {State} state @param {string} [owner] @returns {number}
  */
 export function adaptDefenceMult(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   const mode = controller && controller.adaptMode != null ? controller.adaptMode : ADAPT_NEUTRAL;
   const strategy = strategyFor(state, owner);
   const swing = DEFENCE_SWING * (strategy.defenceSwingMult ?? 1);

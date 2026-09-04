@@ -24,7 +24,7 @@ import { checkWinCondition, DEFAULT_MATCH_TIME_LIMIT } from "../engine/victory.j
 import { serializeGame, deserializeGame } from "../engine/persist.js";
 import { createFog, isVisibleAt } from "../engine/fog.js";
 import { tick } from "../engine/sim.js";
-import { isHumanControlled } from "../engine/aiCommon.js";
+import { isHumanControlled, controllerFor, accrueActionBudget, canAct, spend } from "../engine/aiCommon.js";
 
 function commandCenterOf(state, owner) {
   return [...state.buildings.values()].find(b => b.owner === owner && b.type === "command");
@@ -315,4 +315,102 @@ test("T-041: a 4-seat, AI-only match plays headlessly to a real winner via ordin
 
   assert.equal(state.over, true, `a 4-seat match must reach a real winner within a bounded number of ticks (stopped after ${ticks})`);
   assert.equal(state.winner, "player", "the only seat with a live Command Center and an armed force must be the one left standing");
+});
+
+/* ---------- T-042 (ADR-0008): state.controllers{} replacing the 2-slot state.ai/state.playerAi ----
+   Deliberately narrow, matching this task's own row — the DATA MODEL becomes N-capable (a real
+   registry engine/controllers.js's controllerFor reads by owner id, not two hardcoded names), and
+   accrueActionBudget/canAct/spend/runAI/aiContext all become N-safe FOR FREE, since they already
+   thread ctx.owner through controllerFor rather than reading state.ai/state.playerAi directly
+   (docs/analysis/01-engine-nplayer-seams.md's own §7.1 finding). What this does NOT touch:
+   engine/sim.js's own tick() dispatch (still only ever auto-drives owner "ai" — a real seat's own
+   controller order/rotation is a SEPARATE, deliberately deferred concern, see this task's own
+   TASKS.md closure entry for why folding it in here would have been fingerprint-changing for the
+   EXISTING 2-seat case, which must stay byte-identical through T-047); otherOwner()/opponentsOf()
+   (T-043); and the SAVE WIRE FORMAT itself, which stays exactly 2-keyed ("ai"/"playerAi", `pa`-
+   prefixed fields) — engine/persist.js's deserializeGame gains the SAME state.controllers{} +
+   alias wiring createGameState does (a loaded game needs it too, or controllerFor would see nothing
+   at all for a restored match), but reads/writes the identical wire keys as before; a REAL N-keyed
+   save shape and its SAVE_VERSION bump are T-045's own, later, separate job. ---------- */
+
+test("T-042: state.controllers{} exists, keyed by owner — the SAME AiController objects state.ai/state.playerAi have always pointed at", () => {
+  const state = createGameState({ planetId: "ferros" });
+  assert.equal(state.controllers.ai, state.ai, "state.controllers.ai must be the identical object state.ai already resolves to");
+  assert.equal(state.controllers.player, state.playerAi, "state.controllers.player must be the identical object state.playerAi already resolves to (null, by default)");
+});
+
+test("T-042: state.ai / state.playerAi stay live, read-write ALIASES into state.controllers — not a one-time snapshot", () => {
+  const state = createGameState({ planetId: "ferros" });
+  // Reassigning through the OLD name (T-036's own AI-takeover/reclaim pattern, matchWorker.js) must
+  // be visible through the NEW registry immediately — controllerFor has nothing else to read.
+  state.ai = null;
+  assert.equal(state.controllers.ai, null, "writing state.ai = null must update state.controllers.ai too");
+  assert.equal(controllerFor(state, "ai"), null);
+
+  const fresh = { apm: 90, micro: true };
+  state.playerAi = fresh;   // exactly the plain-object shape test/combat.test.js already assigns
+  assert.equal(state.controllers.player, fresh, "writing state.playerAi must update state.controllers.player too");
+  assert.equal(controllerFor(state, "player"), fresh);
+
+  // And the reverse direction: writing through the NEW registry must be visible through the OLD
+  // name too, for the ~39 existing test files docs/analysis/01-engine-nplayer-seams.md's own §7.2
+  // found still reading state.ai/state.playerAi directly.
+  state.controllers.ai = fresh;
+  assert.equal(state.ai, fresh, "writing state.controllers.ai must be visible through state.ai too");
+});
+
+test("T-042 (FR-1/ADR-0008): a THIRD owner's own AI controller, populated via ownerDefs, is reachable through controllerFor — the exit criterion this task actually names", () => {
+  const state = createGameState({
+    planetId: "ferros",
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    ],
+    basePositions: { rebels: { x: 900, y: 300 } },
+  });
+  assert.ok(state.controllers.rebels, "a third owner marked isAI:true must get a real controller, not be silently dropped");
+  assert.equal(controllerFor(state, "rebels"), state.controllers.rebels);
+  assert.equal(isHumanControlled(state, "rebels"), false);
+});
+
+test("T-042: N AI seats each act on their own budget — independently, never sharing or colliding", () => {
+  const state = createGameState({
+    planetId: "ferros",
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    ],
+    basePositions: { rebels: { x: 900, y: 300 } },
+  });
+  state.controllers.ai.apm = 1200;      // 20 actions/second — comfortably past the >=1 threshold after 1s, clear of float noise
+  state.controllers.rebels.apm = 12000; // 200 actions/second — a deliberately DIFFERENT, much larger budget
+  for (let i = 0; i < 10; i++) accrueActionBudget(state, 0.1, "ai");        // 1 sim-second total
+  for (let i = 0; i < 10; i++) accrueActionBudget(state, 0.1, "rebels");    // same wall time
+
+  assert.equal(canAct(state, "ai"), true, "the slow seat's own 1-second accrual must be enough for its own budget");
+  assert.equal(canAct(state, "rebels"), true, "the fast seat's own budget must independently have accrued its own, much larger, allowance");
+  assert.ok(state.controllers.rebels.actionBudget > state.controllers.ai.actionBudget,
+    "two seats accruing the SAME wall-clock time at DIFFERENT apm must end up with DIFFERENT budgets — proof they are genuinely independent, not sharing one shared counter");
+  spend(state, "ai");
+  assert.equal(canAct(state, "rebels"), true, "spending FROM one seat's own budget must never touch another seat's");
+});
+
+test("T-042: a save round-trip restores state.controllers{} too, not just state.ai/state.playerAi — a loaded game's AI must still be reachable via controllerFor", () => {
+  const state = createGameState({ planetId: "ferros", seed: 5 });
+  const loaded = deserializeGame(serializeGame(state));
+  assert.ok(loaded.controllers, "a deserialized state must have a real controllers registry, not just the legacy ai/playerAi fields");
+  assert.equal(controllerFor(loaded, "ai"), loaded.controllers.ai);
+  assert.ok(loaded.controllers.ai, "the restored AI controller must actually be reachable through the new registry");
+  assert.equal(loaded.controllers.ai.apm, state.controllers.ai.apm ?? null);
+});
+
+test("T-042: aiEnabled:false still round-trips as a null controller, reachable both ways (T-034a preserved)", () => {
+  const state = createGameState({ planetId: "ferros", aiEnabled: false });
+  assert.equal(state.controllers.ai, null);
+  const loaded = deserializeGame(serializeGame(state));
+  assert.equal(loaded.controllers.ai, null);
+  assert.equal(loaded.ai, null);
+  assert.equal(controllerFor(loaded, "ai"), null);
 });

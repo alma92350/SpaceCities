@@ -341,9 +341,17 @@
  * @property {Object.<string, Fog>} fogs   per-owner fog, keyed by owner id; state.fog/state.fogAI are aliases into it
  * @property {Fog} fog
  * @property {Fog} fogAI
- * @property {AiState} ai
- * @property {AiState|null} playerAi   the SECOND AI controller, driving owner "player" in self-play
- *   (tools/selfplay.js). null in a normal game; populated after createGameState, never by it
+ * @property {Object.<string, AiState|null>} controllers   T-042 — the real, N-capable AI controller
+ *   registry, keyed by owner id (engine/controllers.js's controllerFor). "ai" is always present in
+ *   a normal 2-owner match; "player" (self-play, tools/selfplay.js) and any owner beyond the
+ *   default pair (T-041's own ownerDefs) are populated only when isAI:true for that owner.
+ * @property {AiState} [ai]   LIVE accessor alias into controllers.ai (engine/controllers.js's
+ *   attachControllerAliases) — not a real constructive field, installed right after the state
+ *   object itself is built, hence optional here: every real State has it by the time anything else
+ *   runs, but the object literal that becomes one doesn't include it yet at construction.
+ * @property {AiState|null} [playerAi]   the SAME kind of live alias, into controllers.player — the
+ *   SECOND AI controller, driving owner "player" in self-play (tools/selfplay.js). null in a normal
+ *   game; populated after createGameState, never by it
  * @property {Array<Object>} events
  * @property {Array<{id:string, x:number, y:number, owner:string, spawnAt:number}>} craters
  *   pending Helium Bomb craters awaiting maturity into a real ResourceNode (engine/bomb.js)

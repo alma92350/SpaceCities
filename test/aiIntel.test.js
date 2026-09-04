@@ -398,7 +398,7 @@ test("the read is a pure function of state — same state, same answer", () => {
 import { adaptivityFor, DIFFICULTY_OPTIONS } from "../engine/aiDifficulty.js";
 
 test("adaptivity is a difficulty dial: Easy never adapts, Hard adapts hardest", () => {
-  const at = mult => adaptivityFor({ ai: { difficulty: mult } }, "ai");
+  const at = mult => adaptivityFor({ controllers: { ai: { difficulty: mult } } }, "ai");
   assert.equal(at("easy"), 0,
     "Easy must never act on the read — its play stays learnable and exploitable, same argument as counterEvery: 0");
   assert.equal(at("medium"), 1, "Medium carries no value, so it composes as ordinary adaptation");

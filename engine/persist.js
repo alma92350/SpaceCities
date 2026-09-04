@@ -18,6 +18,7 @@ import { generateMap } from "./map.js";
 import { mulberry32 } from "./rng.js";
 import { createFog, updateFog } from "./fog.js";
 import { archetypeFor } from "./aiArchetypes.js";
+import { attachControllerAliases } from "./controllers.js";
 import { CRATER_NODE_AMOUNT } from "./bomb.js";
 import { WRECK_SPAWN_DELAY } from "./wreckage.js";
 import { LOGI_PRIORITIES } from "./haul.js";   // the enum a building's logiPriority (below) is coerced against
@@ -784,22 +785,29 @@ function rehydratePlanet(P) {
     buildings,
     selection: [],
     fogs, fog, fogAI,
-    // Restore the AI controller's bookkeeping into the grouped `state.ai` (see engine/state.js).
-    // Wire keys stay `aiThink`/`aiScoutId`/… under the save's `ai:` object for backward compat;
-    // only the live shape is nested. The archetype is re-derived from the planet id, not persisted.
+    // T-042: state.controllers{} (see engine/state.js/engine/controllers.js) — a loaded game needs
+    // its own registry too, or controllerFor would see nothing at all for a restored match, even
+    // though the wire format itself and state.ai/state.playerAi (below) restore exactly as they
+    // always have. The wire format is UNCHANGED here — still exactly `ai:`/`playerAi:` keys,
+    // `aiThink`/`aiScoutId`/… and `pa`-prefixed fields respectively; a real N-keyed save shape is
+    // T-045's own, later, separate job (ADR-0008's own SAVE_VERSION bump).
     // T-034a: `=== null` on purpose, not a truthy check — an OLD save simply lacks the `ai` key
     // (P.ai undefined) and must still default to a populated controller, exactly as it always has;
     // only an EXPLICIT null (a save of a match where a human occupied seat "ai") stays null.
-    ai: P.ai === null ? null : cleanController(P.ai, "ai", P.planetId),
-    // Restore Tier 1 self-play's second controller (see the matching comment in serPlanet above)
-    // — null for every save that predates it or never activated self-play, exactly like state.ai
-    // itself would be if createGameState were ever called without seeding it (it never is; this
-    // is playerAi's only construction path outside tools/selfplay.js's own direct assignment).
-    playerAi: P.playerAi ? cleanController(P.playerAi, "pa", P.planetId) : null,
+    controllers: {
+      ai: P.ai === null ? null : cleanController(P.ai, "ai", P.planetId),
+      // Restore Tier 1 self-play's second controller (see the matching comment in serPlanet above)
+      // — null for every save that predates it or never activated self-play, exactly like the "ai"
+      // controller itself would be if createGameState were ever called without seeding it (it
+      // never is; this is its only construction path outside tools/selfplay.js's own direct
+      // assignment).
+      player: P.playerAi ? cleanController(P.playerAi, "pa", P.planetId) : null,
+    },
     events: [],
     craters,
     wrecks,
   };
+  attachControllerAliases(state);
   for (const id of owners) updateFog(state, state.fogs[id], id);
   // This state's OWN counter (T-016), independent of any other live state's — never trust a
   // saved value as ground truth (there isn't one to trust; nothing serializes state.nextEntityId

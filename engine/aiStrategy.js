@@ -26,6 +26,8 @@
 
 "use strict";
 
+import { controllerFor } from "./controllers.js";
+
 export const STRATEGIES = {
   default: {
     name: "Adaptive",
@@ -137,11 +139,12 @@ export const STRATEGIES = {
 /** The active strategy for `owner` (default "ai", so every existing save/test/call site that
  * predates self-play — the overwhelming majority — reads state.ai.strategy exactly as before) —
  * STRATEGIES.default if unset/unknown. Tier 1 self-play (tools/selfplay.js) passes owner="player"
- * to read state.playerAi.strategy instead, its own independently-picked overlay; deliberately NOT
- * an import of engine/aiCommon.js's controllerFor, so this file stays the pure, import-free leaf
- * its header describes. */
+ * to read state.playerAi.strategy instead, its own independently-picked overlay. T-042:
+ * controllerFor now comes from engine/controllers.js, a true zero-import leaf — NOT
+ * engine/aiCommon.js, so this file stays exactly the pure, import-free-of-the-AI-LAYER leaf its
+ * header describes (test/static-integrity.test.js's own cycle check has nothing to catch here). */
 /** @param {State} state @param {string} [owner] @returns {Strategy} */
 export function strategyFor(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   return (controller && STRATEGIES[controller.strategy]) || STRATEGIES.default;
 }

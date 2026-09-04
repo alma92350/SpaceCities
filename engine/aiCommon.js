@@ -17,23 +17,23 @@
 
 import { issueBuild } from "./commands.js";
 import { findPlacement } from "./colliders.js";
+import { controllerFor } from "./controllers.js";
 
 const APM_BURST_FRAC = 1 / 15;   // a busy AI can bank at most ~4 seconds' worth of unspent actions
 
 /* ---------- owner resolution (Tier 1 self-play) ---------- */
 
-// Which controller object is driving `owner` this match — state.ai for "ai" (always present,
-// every match ever created), or state.playerAi for "player" (present only when self-play —
-// tools/selfplay.js — has populated it; null otherwise). Every AI phase module threads its
-// ctx.owner through this instead of ever reaching for state.ai directly, so the two controllers'
-// action budgets, scout ids, wave timers etc. can never collide or leak into one shared object —
+// Which controller object is driving `owner` this match — state.controllers[owner] (T-042), a real
+// N-capable registry; "ai" is always present (every match ever created), "player" only when
+// self-play (tools/selfplay.js) has populated it, null otherwise. Every AI phase module threads its
+// ctx.owner through this instead of ever reaching for state.ai/state.controllers directly, so each
+// controller's action budget, scout id, wave timer etc. can never collide or leak into another's —
 // see the header comment on engine/ai.js's runAI(state, dt, owner) for why that matters.
-/** @param {State} state @param {string} owner @returns {AiState|undefined} */
-export function controllerFor(state, owner) {
-  if (owner === "ai") return state.ai;
-  if (owner === "player") return state.playerAi;
-  return null;
-}
+// Re-exported (not just called) from engine/controllers.js — the real, import-free leaf T-042
+// introduced (docs/analysis/01-engine-nplayer-seams.md's own §7.1 "Option (iii)") — so every
+// existing `import { controllerFor } from "./aiCommon.js"` call site across the AI layer keeps
+// working completely unchanged.
+export { controllerFor };
 
 // T-017/ADR-0008: the fairness gates (formation dispatch, idle-worker auto-assignment) want "is a
 // human actually driving this seat", not a hardcoded owner literal — a seat is human-controlled
