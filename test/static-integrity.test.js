@@ -243,6 +243,13 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // abuseGuard.js's own exports — deciding whether to throttle or disconnect a connection is
     // inherently a server-side question — so this one has no equivalent future exit.
     "net/abuseGuard.js",
+    // T-049: net/mcp.js's only real caller is tools/serve.js's createAppServer (the /mcp route),
+    // the exact same class as net/ws.js/net/wsWorkerTransport.js/server/lobby.js above — a real,
+    // tested dependency whose only path from index.html runs through a Node server entry point,
+    // never a browser import. An MCP agent client is a server-to-server peer, never something a
+    // browser tab loads, so unlike net/chatLimiter.js's own past exit there is no future wiring
+    // step that would ever make this reachable from index.html.
+    "net/mcp.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

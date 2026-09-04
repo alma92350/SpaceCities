@@ -14,10 +14,17 @@
 
    T-027 — "the real multiplayer server" this file's header used to say it was ahead of — lands
    here: ADR-0010's own deployment decision #7 is "serve everything on one port: static assets, the
-   game WebSocket, and /mcp." createAppServer() is that server. /mcp is RESERVED (a 501, not a 404
-   or a hijacked WebSocket upgrade) since T-049 (Phase 6) is its real implementation — this file's
-   only job is to make sure nothing else quietly claims that path first, static serving and the
-   game socket both included.
+   game WebSocket, and /mcp." createAppServer() is that server.
+
+   T-049: /mcp is now the real Streamable HTTP + JSON-RPC 2.0 MCP endpoint (net/mcp.js — protocol
+   revision 2026-07-28), not the earlier 501 placeholder. A SINGLE exact path, per that revision's
+   own "the server MUST provide a single HTTP endpoint path" rule — unlike the placeholder, which
+   reserved the whole /mcp/* namespace as a stopgap before the real shape was known, /mcp/anything
+   now falls through to ordinary static resolution (a 404, since no such file exists) exactly like
+   any other unknown path; there is no URL-based sub-routing in this protocol, only the JSON-RPC
+   `method` field in the body. The registered `tools` list here is empty — T-051/T-052/T-053
+   (Phase 6's own later tasks) are what actually populate it with real lobby/observation/action
+   tools, closing over `lobby`/`liveMatches` the same way the HTTP handlers below already do.
 
    T-029: a match runs inside its own worker_threads Worker (server/matchWorker.js), relayed to real
    WebSocket connections by net/wsWorkerTransport.js — ADR-0011's own architecture, not a shortcut
@@ -69,6 +76,7 @@ import { runBenchSuite } from "./bench.js";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
 import { createLobby, OWNER_IDS } from "../server/lobby.js";
 import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
+import { createMcpServer } from "../net/mcp.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -124,16 +132,6 @@ const MATCH_WORKER_FILE = join(ROOT, "server", "matchWorker.js");
 const requestHandler = async (req, res) => {
   try {
     const pathname = new URL(req.url, "http://localhost").pathname;
-
-    // Reserved, not a 404: T-049 (Phase 6) is /mcp's real implementation. A distinct status
-    // (501, not the static handler's 404 or the traversal guard's 403) says "this path is real
-    // and spoken for" rather than "doesn't exist" — checked before static resolution so nothing
-    // under this namespace can ever be shadowed by an actual on-disk /mcp file or directory.
-    if (pathname === "/mcp" || pathname.startsWith("/mcp/")) {
-      res.writeHead(501, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ error: "not_implemented", message: "MCP transport not yet implemented — see TASKS.md T-049." }));
-      return;
-    }
 
     // The boot-time probe result, if DATA_DIR is set — 404s exactly like any other unknown path
     // in local dev, where dataProbeResult is null. See docs/adr/0012, TASKS.md T-008a.
@@ -202,6 +200,18 @@ function respondJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
+// The RAW body string for /mcp — unlike readJsonBody above, this does NOT parse it: net/mcp.js's
+// own handleRequest does its own JSON.parse so a malformed body becomes a spec-correct JSON-RPC
+// -32700 Parse error response, not a generic 400 this file would otherwise have to invent.
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
+}
+
 // The safe subset of a server/lobby.js match record a stranger browsing the open-match list may
 // see: never a seat's own token (a bearer credential — server/lobby.js's own header), never the
 // live createGameStateOpts seed (would let a spectator predict resource-node placement ahead of
@@ -218,15 +228,21 @@ function publicMatch(match) {
   };
 }
 
-// Builds one fresh HTTP server: static assets, the /mcp reservation, the lobby's three HTTP
+// Builds one fresh HTTP server: static assets, the real /mcp endpoint, the lobby's three HTTP
 // endpoints, and every LIVE match's own WebSocket game transport, all on whatever port the caller
 // eventually `.listen()`s. A factory rather than a module-level singleton so tests can build an
-// independent instance per test (its own lobby, its own matches) and tear it down cleanly
-// afterward — the same reason net/wsWorkerTransport.js's attachWsMatchWorker is a function and not
-// a side effect of importing it.
+// independent instance per test (its own lobby, its own matches, its own mcpServer) and tear it
+// down cleanly afterward — the same reason net/wsWorkerTransport.js's attachWsMatchWorker is a
+// function and not a side effect of importing it.
 export async function createAppServer() {
   const dataDir = process.env.DATA_DIR || null;   // production only — same gate dataProbeResult/__bench already use above
   const lobby = dataDir ? restoreLobby(dataDir) : createLobby();
+  // T-049: no tools registered yet — T-051/T-052/T-053 append the real lobby/observation/action
+  // tools here once they exist, closing over `lobby`/`liveMatches` the same as the HTTP handlers
+  // below already do. An empty registry is a normal, fully spec-conformant MCP server (tools/list
+  // just returns an empty array) — there is nothing for an agent to actually DO yet, but the wire
+  // protocol itself is real and already testable end-to-end.
+  const mcpServer = createMcpServer({ serverInfo: { name: "SpaceCities", version: "1.1.0" }, tools: [] });
   const liveMatches = new Map();   // matchId -> {worker, wsMatch} — only matches THIS boot actually spawned a worker for
 
   // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by
@@ -361,8 +377,21 @@ export async function createAppServer() {
     respondJson(res, 200, { matchId, started: true });
   }
 
+  // T-049: the real MCP endpoint — net/mcp.js's handleRequest is transport-agnostic (plain
+  // {httpMethod, origin, headers, rawBody} in, {status, body} out), so this is the ONLY place that
+  // touches a real http.IncomingMessage/ServerResponse for it. A non-POST method (GET, DELETE, …)
+  // still reaches handleRequest with an empty rawBody — it replies 405 on its own before ever
+  // looking at the body, so there's no need to special-case that here.
+  async function handleMcp(req, res) {
+    const rawBody = req.method === "POST" ? await readRawBody(req) : "";
+    const result = await mcpServer.handleRequest({ httpMethod: req.method, origin: req.headers.origin, headers: req.headers, rawBody });
+    if (result.body === null) { res.writeHead(result.status, { "Cache-Control": "no-store" }).end(); return; }
+    respondJson(res, result.status, result.body);
+  }
+
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/mcp") { handleMcp(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "POST") { handleCreateMatch(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res); return; }
     const joinMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/join$/.exec(url.pathname);

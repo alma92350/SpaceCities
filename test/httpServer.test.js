@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { createAppServer } from "../tools/serve.js";
 import { createWsClientTransport } from "../net/wsClientTransport.js";
+import { PROTOCOL_VERSION } from "../net/mcp.js";
 
 async function listen(server) {
   await new Promise(resolve => server.listen(0, resolve));
@@ -73,20 +74,53 @@ test("static assets: the server still serves index.html correctly", async () => 
   });
 });
 
-test("/mcp is RESERVED, not a 404 — a distinct response, since T-049 (Phase 6) is its real implementation", async () => {
+test("T-049: GET /mcp is 405 — this protocol revision has no GET SSE endpoint, and the real handler (not the old 501 placeholder) now answers", async () => {
   await withApp(async (app, port) => {
     const res = await get(port, "/mcp");
-    assert.equal(res.status, 501, "501 Not Implemented: a real, recognized endpoint, just not built yet");
-    assert.match(res.headers["content-type"], /application\/json/);
-    const body = JSON.parse(res.body);
-    assert.equal(body.error, "not_implemented");
+    assert.equal(res.status, 405);
   });
 });
 
-test("/mcp reserves its whole namespace, not just the exact path", async () => {
+test("T-049: /mcp is a SINGLE exact path — /mcp/anything is no longer specially reserved, it 404s like any other unknown path", async () => {
   await withApp(async (app, port) => {
     const res = await get(port, "/mcp/tools/list");
-    assert.equal(res.status, 501);
+    assert.equal(res.status, 404);
+  });
+});
+
+test("T-049: POST /mcp speaks real Streamable HTTP + JSON-RPC 2.0 (protocol revision 2026-07-28) end to end, over a real HTTP connection", async () => {
+  await withApp(async (app, port) => {
+    const payload = {
+      jsonrpc: "2.0", id: 1, method: "server/discover",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    };
+    const res = await new Promise((resolve, reject) => {
+      const body = JSON.stringify(payload);
+      const req = httpRequest({
+        host: "localhost", port, path: "/mcp", method: "POST",
+        headers: {
+          "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body),
+          "MCP-Protocol-Version": PROTOCOL_VERSION, "Mcp-Method": "server/discover",
+        },
+      }, r => {
+        const chunks = [];
+        r.on("data", c => chunks.push(c));
+        r.on("end", () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+    assert.equal(res.status, 200);
+    const json = JSON.parse(res.body);
+    assert.equal(json.result.resultType, "complete");
+    assert.deepEqual(json.result.supportedVersions, [PROTOCOL_VERSION]);
+    assert.deepEqual(json.result.capabilities, { tools: {} });
+    assert.deepEqual(json.result._meta["io.modelcontextprotocol/serverInfo"], { name: "SpaceCities", version: "1.1.0" });
   });
 });
 
