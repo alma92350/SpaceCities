@@ -1,0 +1,96 @@
+/* ============================================================
+   T-051 (FR-13): the first REAL MCP tools — list_matches, join_match, leave_match — the ones
+   T-049a's own tests deliberately deferred (they minted seat handles directly via
+   lobby.joinMatch() as a correct stand-in, not because a real tool was out of reach). This is
+   that real tool: createLobbyTools(lobby) returns a `tools` array ready to hand straight to
+   net/mcp.js's createMcpServer, the same shape tools/serve.js's own `mcpServer` construction
+   already expects.
+
+   Deliberately thin over the EXISTING lobby model, never a second implementation of it: every
+   tool here calls straight into server/lobby.js (createMatch/listOpenMatches/joinMatch/
+   leaveSeat) and reuses tools/serve.js's own publicMatch() redaction — an agent sees exactly
+   the same safe subset of a match record a stranger browsing GET /api/matches already does,
+   never a seat's real token or the live createGameStateOpts seed.
+
+   join_match hands back a seat_handle (server/mcpSeatHandle.js's mintSeatHandle), never the raw
+   {matchId, seatIndex, token} triple — the whole point of the "Stateful Tools" pattern T-049a
+   built is that an agent tracks ONE opaque string across every later call, not three separate
+   fields it could transcribe wrong. leave_match is wrapped in withSeat so an invalid or already-
+   spent handle is rejected the exact same way every future seat-scoped tool (T-052/T-053) will
+   reject one.
+   ============================================================ */
+
+"use strict";
+
+import { publicMatch } from "./lobby.js";
+import { mintSeatHandle, withSeat } from "./mcpSeatHandle.js";
+
+// A tool execution error (isError:true) carrying the lobby's own rejection code in the text — a
+// model can read "seat-taken"/"already-started"/"no-such-match" and decide what to try next
+// (list_matches again, a different seat, a different match) far better than a generic failure.
+function rejection(code) {
+  return { content: [{ type: "text", text: `Could not complete: ${code}` }], isError: true };
+}
+
+/** @param {Object} lobby a createLobby() instance (server/lobby.js) */
+export function createLobbyTools(lobby) {
+  return [
+    {
+      name: "list_matches",
+      title: "List open matches",
+      description: "Lists every match currently open for a seat to join — world, size, resource level, match length, which seats are taken, and whether spectators are allowed. Never includes a seat's real token or the match's random seed.",
+      inputSchema: { type: "object", properties: {}, additionalProperties: false },
+      handler: () => {
+        const matches = lobby.listOpenMatches().map(publicMatch);
+        return {
+          content: [{ type: "text", text: matches.length ? `${matches.length} open match(es).` : "No open matches right now." }],
+          structuredContent: { matches },
+        };
+      },
+    },
+    {
+      name: "join_match",
+      title: "Join a match",
+      description: "Joins an open seat in the named match, returning a seat_handle — pass this SAME string as the seat_handle argument to every later tool call made as this seat (leave_match, and every observation/action tool once they exist). If seat_index is omitted, the first still-open seat is claimed automatically.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          match_id: { type: "string", description: "A match id from list_matches" },
+          seat_index: { type: "integer", description: "Which seat to claim; omit to auto-pick the first open one" },
+        },
+        required: ["match_id"],
+      },
+      handler: ({ match_id, seat_index }) => {
+        let seatIndex = seat_index;
+        if (seatIndex === undefined) {
+          const match = lobby.getMatch(match_id);
+          if (!match) return rejection("no-such-match");
+          seatIndex = match.seats.findIndex(s => s.kind === "open" && !s.owner);
+          if (seatIndex === -1) return rejection("no-open-seat");
+        }
+        const joined = lobby.joinMatch(match_id, seatIndex);
+        if (!joined.ok) return rejection(joined.code);
+        const seat_handle = mintSeatHandle(match_id, seatIndex, joined.token);
+        return {
+          content: [{ type: "text", text: `Joined match ${match_id} as seat ${seatIndex} (${joined.owner}). Keep this seat_handle for every later call.` }],
+          structuredContent: { seat_handle, match_id, seat_index: seatIndex, owner: joined.owner },
+        };
+      },
+    },
+    {
+      name: "leave_match",
+      title: "Leave a match before it starts",
+      description: "Voluntarily gives up a seat joined via join_match, freeing it for someone else — only while the match is still open. Once a match has started, use the in-match surrender action instead (not this tool).",
+      inputSchema: {
+        type: "object",
+        properties: { seat_handle: { type: "string", description: "The seat_handle join_match returned" } },
+        required: ["seat_handle"],
+      },
+      handler: withSeat(lobby, ({ seat }) => {
+        const left = lobby.leaveSeat(seat.matchId, seat.seatIndex, seat.token);
+        if (!left.ok) return rejection(left.code);
+        return { content: [{ type: "text", text: `Left match ${seat.matchId}, seat ${seat.seatIndex}.` }] };
+      }),
+    },
+  ];
+}

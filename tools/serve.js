@@ -74,9 +74,10 @@ import { Worker } from "node:worker_threads";
 import { runProbe } from "./dataProbe.js";
 import { runBenchSuite } from "./bench.js";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
-import { createLobby, OWNER_IDS } from "../server/lobby.js";
+import { createLobby, OWNER_IDS, publicMatch } from "../server/lobby.js";
 import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
 import { createMcpServer } from "../net/mcp.js";
+import { createLobbyTools } from "../server/mcpLobbyTools.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -212,22 +213,6 @@ function readRawBody(req) {
   });
 }
 
-// The safe subset of a server/lobby.js match record a stranger browsing the open-match list may
-// see: never a seat's own token (a bearer credential — server/lobby.js's own header), never the
-// live createGameStateOpts seed (would let a spectator predict resource-node placement ahead of
-// discovering it in-fog). spectatorsEnabled (T-037) IS meant for exactly this audience — a
-// prospective spectator needs to know before attempting to watch, same reason a seat's own
-// kind/taken state is public.
-function publicMatch(match) {
-  return {
-    id: match.id, status: match.status, createdAt: match.createdAt,
-    planetId: match.config.planetId, sizeMult: match.config.sizeMult ?? 1, resourceMult: match.config.resourceMult ?? 1,
-    matchTimeLimit: match.config.matchTimeLimit ?? null,
-    seats: match.seats.map(s => ({ kind: s.kind, taken: !!s.owner })),
-    spectatorsEnabled: match.config.spectatorsEnabled !== false,
-  };
-}
-
 // Builds one fresh HTTP server: static assets, the real /mcp endpoint, the lobby's three HTTP
 // endpoints, and every LIVE match's own WebSocket game transport, all on whatever port the caller
 // eventually `.listen()`s. A factory rather than a module-level singleton so tests can build an
@@ -237,12 +222,11 @@ function publicMatch(match) {
 export async function createAppServer() {
   const dataDir = process.env.DATA_DIR || null;   // production only — same gate dataProbeResult/__bench already use above
   const lobby = dataDir ? restoreLobby(dataDir) : createLobby();
-  // T-049: no tools registered yet — T-051/T-052/T-053 append the real lobby/observation/action
-  // tools here once they exist, closing over `lobby`/`liveMatches` the same as the HTTP handlers
-  // below already do. An empty registry is a normal, fully spec-conformant MCP server (tools/list
-  // just returns an empty array) — there is nothing for an agent to actually DO yet, but the wire
-  // protocol itself is real and already testable end-to-end.
-  const mcpServer = createMcpServer({ serverInfo: { name: "SpaceCities", version: "1.1.0" }, tools: [] });
+  // T-051: the real lobby tools (list_matches/join_match/leave_match), closing over this SAME
+  // `lobby` the HTTP handlers below already share — an MCP agent and a browser client see and
+  // mutate the identical lobby state, never two independent copies. T-052/T-053 append the real
+  // observation/action tools here once they exist, closing over `liveMatches` the same way.
+  const mcpServer = createMcpServer({ serverInfo: { name: "SpaceCities", version: "1.1.0" }, tools: createLobbyTools(lobby) });
   const liveMatches = new Map();   // matchId -> {worker, wsMatch} — only matches THIS boot actually spawned a worker for
 
   // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by

@@ -35,9 +35,16 @@ export function mintSeatHandle(matchId, seatIndex, token) {
  * is rejected exactly like a bad token on the WebSocket reconnect path already is. Never
  * throws: a malformed handle (bad base64, non-JSON, wrong shape) is just another rejection
  * reason, not a crash a caller has to guard against separately.
+ *
+ * T-051: the resolved shape carries `token` too (not just `owner`), so a tool that needs to make
+ * a FURTHER authenticated lobby call on this same seat (leave_match's own `leaveSeat`) can pass
+ * it straight through — that mutation re-validates the token itself, the same self-authenticating
+ * shape `reclaimSeat` already has, rather than trusting that whatever called it must already have
+ * gone through `withSeat`. A tool handler that has no use for the raw token just ignores it; it's
+ * the seat's OWN already-proven-valid credential, not a new thing exposed to it.
  * @param {Object} lobby a createLobby() instance (server/lobby.js)
  * @param {string} handle
- * @returns {{ok:true, matchId:string, seatIndex:number, owner:string}|{ok:false, code:string}}
+ * @returns {{ok:true, matchId:string, seatIndex:number, owner:string, token:string}|{ok:false, code:string}}
  */
 export function resolveSeatHandle(lobby, handle) {
   let parsed;
@@ -52,7 +59,7 @@ export function resolveSeatHandle(lobby, handle) {
   }
   const claim = lobby.reclaimSeat(matchId, seatIndex, token);
   if (!claim.ok) return { ok: false, code: claim.code };
-  return { ok: true, matchId, seatIndex, owner: claim.owner };
+  return { ok: true, matchId, seatIndex, owner: claim.owner, token };
 }
 
 /**

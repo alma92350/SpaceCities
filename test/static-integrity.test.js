@@ -253,6 +253,9 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // T-049a: server/mcpSeatHandle.js's only real callers are the MCP TOOLS that will use
     // withSeat (T-051/T-052/T-053) — themselves server-side, same as net/mcp.js just above.
     "server/mcpSeatHandle.js",
+    // T-051: server/mcpLobbyTools.js's only real caller is tools/serve.js's own mcpServer
+    // construction — same class as net/mcp.js/server/mcpSeatHandle.js just above.
+    "server/mcpLobbyTools.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

@@ -56,7 +56,7 @@ function buildSeats(config) {
   return seatKinds.map(kind => ({ kind, owner: null, token: null }));
 }
 
-/** @returns {{matches: Map<string, Object>, createMatch: Function, listOpenMatches: Function, getMatch: Function, joinMatch: Function, reclaimSeat: Function}} */
+/** @returns {{matches: Map<string, Object>, createMatch: Function, listOpenMatches: Function, getMatch: Function, joinMatch: Function, reclaimSeat: Function, leaveSeat: Function, startMatch: Function}} */
 export function createLobby() {
   const matches = new Map();
 
@@ -114,6 +114,31 @@ export function createLobby() {
   }
 
   /**
+   * T-051: the twin of joinMatch — frees an OPEN match's seat back to unowned (kind untouched, so
+   * it stays exactly as re-joinable as it was before anyone ever claimed it), for an MCP agent
+   * that has nothing analogous to T-036's own disconnect detection (no persistent connection at
+   * all to lose) and needs an explicit way to voluntarily give up a seat before a match starts.
+   * Self-authenticating like reclaimSeat, on purpose: every other mutating function here already
+   * re-checks its own token rather than trusting an already-validated caller, and a seat's own
+   * token is retired the moment it's freed — a departed seat's old token can never reclaim
+   * whoever joins next, only the fresh one joinMatch mints for them.
+   * @returns {{ok:true}|{ok:false, code:string}}
+   */
+  function leaveSeat(matchId, seatIndex, token) {
+    const match = matches.get(matchId);
+    if (!match) return { ok: false, code: "no-such-match" };
+    const seat = match.seats[seatIndex];
+    if (!seat || !seat.token) return { ok: false, code: "no-such-seat" };
+    if (seat.token !== token) return { ok: false, code: "bad-token" };
+    // Mirrors joinMatch's own "already-started" refusal: once live, a seat leaves through the
+    // engine's own surrender (engine/victory.js, T-046), not by vanishing from the lobby model.
+    if (match.status !== "open") return { ok: false, code: "already-started" };
+    seat.owner = null;
+    seat.token = null;
+    return { ok: true };
+  }
+
+  /**
    * T-035 (FR-4): the ONE transition out of "open" — a one-way door, never re-openable. This file
    * still doesn't decide WHEN to call it (host-triggered vs. all-seats-filled) or spawn anything;
    * that's tools/serve.js's own wiring, the same "model vs wiring" split T-033 already drew for
@@ -128,5 +153,24 @@ export function createLobby() {
     return { ok: true, match };
   }
 
-  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, startMatch };
+  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, leaveSeat, startMatch };
+}
+
+// The safe subset of a match record a stranger (browsing the open-match list, or an MCP agent's
+// own list_matches, T-051) may see: never a seat's own token (a bearer credential — this file's
+// own header), never the live createGameStateOpts seed (would let a spectator predict resource-
+// node placement ahead of discovering it in-fog). spectatorsEnabled (T-037) IS meant for exactly
+// this audience — a prospective spectator needs to know before attempting to watch, same reason a
+// seat's own kind/taken state is public. Lives here, not in tools/serve.js/server/mcpLobbyTools.js,
+// so BOTH can import the one real redaction without either importing the other (server/lobby.js
+// itself has no imports of its own beyond node:crypto, so nothing importing FROM it can ever cycle
+// back through it).
+export function publicMatch(match) {
+  return {
+    id: match.id, status: match.status, createdAt: match.createdAt,
+    planetId: match.config.planetId, sizeMult: match.config.sizeMult ?? 1, resourceMult: match.config.resourceMult ?? 1,
+    matchTimeLimit: match.config.matchTimeLimit ?? null,
+    seats: match.seats.map(s => ({ kind: s.kind, taken: !!s.owner })),
+    spectatorsEnabled: match.config.spectatorsEnabled !== false,
+  };
 }
