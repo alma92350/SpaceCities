@@ -55,12 +55,12 @@ test("aiEnabled:false round-trips as state.ai === null (T-034a)", () => {
   assert.equal(b.ai, null, "reload must not silently regain a built-in AI for a seat a human is actually playing");
 });
 
-test("a save payload with no ai: key at all (predates T-034a) still restores a populated state.ai, not null (T-034a)", () => {
+test("a save payload with no controllers.ai entry at all (predates T-034a) still restores a populated state.ai, not null (T-034a)", () => {
   const a = createGameState({ planetId: "ferros", seed: 6 });
   const save = serializeGame(a);
-  delete save.ai;   // simulate a save file written before this field could ever be null
+  delete save.controllers.ai;   // simulate a save file written before this field could ever be null
   const b = deserializeGame(save);
-  assert.ok(b.ai, "an absent ai: key must default to a populated controller, not to null");
+  assert.ok(b.ai, "an absent controllers.ai entry must default to a populated controller, not to null");
 });
 
 test("deserializeGame rejects an unknown save version", () => {
@@ -250,10 +250,12 @@ test("every AI-controller bookkeeping field survives a save/load round trip (C9)
 const TRANSIENT_STATE = new Set([
   "map",        // regenerated from the seed — that's the whole point of a seed-driven save
   "owners",     // derived from the world's own roster
-  "fogs",       // per-owner alias block; the two fogs themselves ARE persisted
-  "fog", "fogAI",
-  "controllers", // T-042: per-owner registry block; its "ai"/"player" entries are covered by the
-                 // live "ai"/"playerAi" aliases below, which the ai:/playerAi: wire keys DO persist
+  "fogs",       // per-owner alias block; the two fogs themselves ARE persisted, under "fogs" itself
+  // T-045: fog/fogAI and ai/playerAi are ALIASES (engine/state.js's own convention) into fogs.*/
+  // controllers.* — "fogs"/"controllers" ARE the real persisted N-keyed containers (both now
+  // reach the wire under their own name, unlike the pre-T-045 ai:/playerAi:/fog:/fogAI: pair),
+  // so only the alias NAMES need declaring transient, not the containers themselves.
+  "fog", "fogAI", "ai", "playerAi",
   "selection",  // a UI concern, deliberately not restored
   "events",     // per-tick outbox, drained by the view
   "unitGrid",   // broad-phase index, rebuilt every tick (engine/grid.js)
@@ -398,4 +400,88 @@ test("the same holds for a galaxy save", () => {
 
   assert.deepEqual(diffPaths(first, second), [],
     "a galaxy field written but never read back resets silently on load");
+});
+
+/* ============================================================
+   T-045 (ADR-0008): N-fog / N-controller save shape; SAVE_VERSION -> 2.
+
+   The wire format itself was the one deliberately deferred piece of every earlier Phase 5 task
+   — state.js/persist.js's own comments each name this task by number. Replaces the fixed
+   fog:/fogAI: pair with a single N-keyed fogs: {ownerId: [...]}, and the fixed ai:/playerAi:
+   pair (with their aiXxx/paXxx-prefixed field names, needed only to keep two flat sibling keys
+   from colliding) with a single N-keyed controllers: {ownerId: {...}|null}, whose per-owner
+   field names no longer need a prefix at all — each is already nested under its own key. This
+   is the one INTENTIONALLY BREAKING wire change in this whole port (every other Phase 5 task
+   was purely additive to the live state, never the save shape) — ADR-0008 and TASKS.md's own
+   Phase 5 preamble both call it out by name in advance. A v1 save is REJECTED, not migrated:
+   deserializeGame's existing `save.v !== SAVE_VERSION` check already throws on ANY mismatch, so
+   bumping SAVE_VERSION to 2 makes that the version gate for free — rehydratePlanet never needs
+   to understand the old shape at all, since the check runs before it's ever called.
+   ============================================================ */
+
+function ownerDefsN(n) {
+  const ids = ["player", "ai", "rebels", "raiders", "outcasts", "syndicate"];
+  const colors = ["#4fd1ff", "#f87171", "#fbbf24", "#a78bfa", "#34d399", "#fb7185"];
+  return ids.slice(0, n).map((id, i) => ({ id, faction: "neutral", isAI: id !== "player", color: colors[i] }));
+}
+
+test("T-045: SAVE_VERSION is 2", () => {
+  assert.equal(SAVE_VERSION, 2);
+});
+
+test("T-045: a v1-shaped save is rejected cleanly, not migrated or silently misread", () => {
+  const v1Save = { v: 1, seed: 1, planetId: "ferros", time: 0, tick: 0, over: false, winner: null,
+    players: { player: {}, ai: {} }, units: [], buildings: [], nodes: [],
+    fog: [], fogAI: [], ai: null, playerAi: null };
+  assert.throws(() => deserializeGame(v1Save), /unsupported save version/,
+    "a well-formed OLD-shape save must be refused outright, exactly like any other unknown version");
+});
+
+test("T-045: the wire payload is N-keyed — fogs: and controllers:, not the old fixed fog:/fogAI:/ai:/playerAi: pair", () => {
+  const state = createGameState({ planetId: "ferros", seed: 1, ownerDefs: ownerDefsN(4) });
+  const save = serializeGame(state);
+  assert.deepEqual(Object.keys(save.fogs).sort(), ["ai", "player", "raiders", "rebels"]);
+  assert.deepEqual(Object.keys(save.controllers).sort(), ["ai", "player", "raiders", "rebels"]);
+  assert.equal("fog" in save, false, "the old singular fog: key must not survive onto the wire");
+  assert.equal("fogAI" in save, false, "the old fogAI: key must not survive onto the wire");
+  assert.equal("ai" in save, false, "the old top-level ai: key must not survive onto the wire");
+  assert.equal("playerAi" in save, false, "the old top-level playerAi: key must not survive onto the wire");
+});
+
+test("T-045: a real 4-owner match round-trips completely — units, buildings, resources, fog, and every controller", () => {
+  const state = createGameState({ planetId: "ferros", seed: 12, rng: mulberry32(12), ownerDefs: ownerDefsN(4) });
+  for (let i = 0; i < 40; i++) tick(state, 0.1);
+  // Give every AI-controlled owner some real bookkeeping to lose if the round-trip is wrong.
+  for (const id of state.owners) {
+    if (state.controllers[id]) Object.assign(state.controllers[id], { think: 0.4, waveCount: 3, actionBudget: 2 });
+  }
+  const loaded = deserializeGame(serializeGame(state));
+
+  assert.deepEqual(loaded.owners, state.owners, "the owner roster and its order must survive exactly");
+  for (const id of state.owners) {
+    assert.deepEqual(loaded.players[id].resources, state.players[id].resources, `${id}: resources must round-trip`);
+    assert.equal(loaded.fogs[id].explored.reduce((a, v) => a + v, 0), state.fogs[id].explored.reduce((a, v) => a + v, 0),
+      `${id}: explored fog cell count must round-trip`);
+    if (state.controllers[id]) {
+      assert.ok(loaded.controllers[id], `${id}: an AI-driven seat's controller must survive at all`);
+      for (const f of ["think", "waveCount", "actionBudget"])
+        assert.equal(loaded.controllers[id][f], state.controllers[id][f], `${id}: controller.${f} must round-trip`);
+    } else {
+      assert.equal(loaded.controllers[id], null, `${id}: a human-driven seat must stay null, never regain a synthetic AI`);
+    }
+  }
+  const unitsBy = s => [...s.units.values()].map(u => `${u.id}|${u.owner}|${u.type}`).sort();
+  assert.deepEqual(unitsBy(loaded), unitsBy(state), "every owner's units must survive, not just the original pair's");
+});
+
+test("T-045: state.ai / state.playerAi (the live T-042 aliases) still resolve correctly for the default 2-owner case after the wire change", () => {
+  const state = createGameState({ planetId: "ferros", seed: 13 });
+  state.playerAi = { apm: 90, micro: true, strategy: "aggressive", difficulty: "hard",
+    think: 0, scoutId: null, colonyTarget: null, lastThreatAt: null, actionBudget: 0,
+    attackForce: 0, attackDesperate: false, nextAttackAt: null, unitsBuilt: 0, waveCount: 0,
+    nextWaveAt: null, intelMil: 0, intelEco: 0, intelMilAt: null, intelEcoAt: null, intelAt: null, adaptMode: null };
+  const loaded = deserializeGame(serializeGame(state));
+  assert.ok(loaded.ai, "state.ai must still resolve through the live alias into controllers.ai");
+  assert.ok(loaded.playerAi, "state.playerAi must still resolve through the live alias into controllers.player");
+  assert.equal(loaded.playerAi.strategy, "aggressive");
 });

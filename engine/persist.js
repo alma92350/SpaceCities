@@ -45,8 +45,18 @@ import { COM } from "../data.js";
 import { ODYSSEY_WORLDS, isMilestoneId } from "./galaxy.js";
 import { sanitizePolicy } from "./colonyPolicy.js";
 
-export const SAVE_VERSION = 1;
-export const GALAXY_SAVE_VERSION = 1;
+// T-045 (ADR-0008): bumped 1 -> 2 for the N-fog/N-controller wire shape (fogs:/controllers:,
+// replacing the fixed fog:/fogAI:/ai:/playerAi: pair) — deserializeGame's own `save.v !==
+// SAVE_VERSION` check below already rejects ANY mismatched version, so this single bump is the
+// whole version gate: a v1 save throws cleanly, and rehydratePlanet never needs to understand
+// the old shape at all.
+export const SAVE_VERSION = 2;
+// Bumped in lockstep with SAVE_VERSION (test/persist.test.js's own T3 guard insists on this):
+// galaxyPayload embeds serPlanet's own output with no separate per-planet version stamp, so an
+// Odyssey save's outer `v` is the ONLY gate standing between it and a rehydratePlanet call that
+// now expects the new fogs:/controllers: shape — leaving this at 1 would let a genuinely
+// old-shaped galaxy save pass ITS OWN version check and then feed stale-shaped planets in.
+export const GALAXY_SAVE_VERSION = 2;
 
 // --- load-time sanitization -------------------------------------------------
 // A save loaded from a file or localStorage is UNTRUSTED input (a user can hand-edit a file, and
@@ -171,44 +181,49 @@ function cleanDiplomacy(src) {
 // forever, permanently disabling the AI's attack timeout with no crash and no test.
 const KNOWN_STRATEGIES = new Set(Object.keys(STRATEGIES));
 const KNOWN_DIFFICULTIES = new Set(DIFFICULTY_OPTIONS.map(o => o.mult));
-function cleanController(src, prefix, planetId) {
-  const g = key => src ? src[prefix + key] : undefined;
-  const strategy = g("Strategy");
-  const difficulty = g("Difficulty");
-  const target = g("ColonyTarget");
+// T-045: unprefixed field names — under the old fixed ai:/playerAi: wire pair, aiXxx/paXxx
+// prefixes were the only thing keeping the two controllers' flat sibling keys from colliding;
+// now that every controller is nested under its own key in controllers: {ownerId: {...}}, a
+// prefix no longer serves any purpose. `src` is a single controller's own saved object (or
+// null/undefined for a missing one — see this function's call site in rehydratePlanet).
+function cleanController(src, planetId) {
+  const g = key => (src ? src[key] : undefined);
+  const strategy = g("strategy");
+  const difficulty = g("difficulty");
+  const target = g("colonyTarget");
   return {
-    think: num(g("Think"), 0),
-    scoutId: typeof g("ScoutId") === "string" ? g("ScoutId") : null,
+    think: num(g("think"), 0),
+    scoutId: typeof g("scoutId") === "string" ? g("scoutId") : null,
     colonyTarget: (target && typeof target === "object" && Number.isFinite(Number(target.x)) && Number.isFinite(Number(target.y)))
       ? { x: num(target.x, 0), y: num(target.y, 0) } : null,
-    apm: g("Apm") == null ? null : num(g("Apm"), 0),
-    micro: !!g("Micro"),
+    apm: g("apm") == null ? null : num(g("apm"), 0),
+    micro: !!g("micro"),
     strategy: KNOWN_STRATEGIES.has(strategy) ? strategy : "default",
     difficulty: KNOWN_DIFFICULTIES.has(difficulty) ? difficulty : "medium",
-    lastThreatAt: g("LastThreatAt") == null ? null : num(g("LastThreatAt"), 0),
-    actionBudget: num(g("ActionBudget"), 0),
-    attackForce: Math.max(0, num(g("AttackForce"), 0)),
-    attackDesperate: !!g("AttackDesperate"),
-    nextAttackAt: g("NextAttackAt") == null ? null : num(g("NextAttackAt"), 0),
-    unitsBuilt: Math.max(0, Math.floor(num(g("UnitsBuilt"), 0))),
-    waveCount: Math.max(0, Math.floor(num(g("WaveCount"), 0))),
-    nextWaveAt: g("NextWaveAt") == null ? undefined : num(g("NextWaveAt"), 0),
+    lastThreatAt: g("lastThreatAt") == null ? null : num(g("lastThreatAt"), 0),
+    actionBudget: num(g("actionBudget"), 0),
+    attackForce: Math.max(0, num(g("attackForce"), 0)),
+    attackDesperate: !!g("attackDesperate"),
+    nextAttackAt: g("nextAttackAt") == null ? null : num(g("nextAttackAt"), 0),
+    unitsBuilt: Math.max(0, Math.floor(num(g("unitsBuilt"), 0))),
+    waveCount: Math.max(0, Math.floor(num(g("waveCount"), 0))),
+    nextWaveAt: g("nextWaveAt") == null ? undefined : num(g("nextWaveAt"), 0),
     // Opponent belief (engine/aiIntel.js). Additive and defaulted the same conservative way
-    // LastThreatAt is: an old save without these loads as "never seen anything", so a reloaded AI
+    // lastThreatAt is: an old save without these loads as "never seen anything", so a reloaded AI
     // starts honestly blind and goes scouting rather than acting on intel it cannot justify.
     // Clamped at 0 because a negative asset value is meaningless and would invert posture.
     // intelMil/intelEco are PEAKS; each carries its own stamp. A save written before the
     // per-channel stamps existed has neither, and loads with both null — aiIntel.js's channelValue
-    // falls back to the shared IntelAt in exactly that case, which is the closest true statement
-    // the old data supports. Still purely additive, so no SAVE_VERSION bump (CONTRIBUTING §3).
-    intelMil: Math.max(0, num(g("IntelMil"), 0)),
-    intelMilAt: g("IntelMilAt") == null ? null : num(g("IntelMilAt"), 0),
-    intelEco: Math.max(0, num(g("IntelEco"), 0)),
-    intelEcoAt: g("IntelEcoAt") == null ? null : num(g("IntelEcoAt"), 0),
-    intelAt: g("IntelAt") == null ? null : num(g("IntelAt"), 0),
+    // falls back to the shared intelAt in exactly that case, which is the closest true statement
+    // the old data supports.
+    intelMil: Math.max(0, num(g("intelMil"), 0)),
+    intelMilAt: g("intelMilAt") == null ? null : num(g("intelMilAt"), 0),
+    intelEco: Math.max(0, num(g("intelEco"), 0)),
+    intelEcoAt: g("intelEcoAt") == null ? null : num(g("intelEcoAt"), 0),
+    intelAt: g("intelAt") == null ? null : num(g("intelAt"), 0),
     // Clamped to the 0..1 the stance is defined on, so a corrupt save cannot push the AI into a
     // defence multiplier outside its designed swing.
-    adaptMode: g("AdaptMode") == null ? null : Math.min(1, Math.max(0, num(g("AdaptMode"), 0.5))),
+    adaptMode: g("adaptMode") == null ? null : Math.min(1, Math.max(0, num(g("adaptMode"), 0.5))),
     archetype: archetypeFor(planetId),
   };
 }
@@ -493,6 +508,30 @@ function serPlayer(p) {
     resources: { ...p.resources }, upgrades: { ...p.upgrades } };
 }
 
+// T-045: one owner's AI controller bookkeeping, unprefixed — the single source every entry in
+// serPlanet's controllers: {ownerId: {...}|null} goes through, so two controllers can never
+// structurally drift the way the old ai:/playerAi: pair's two independent object literals
+// could. null exactly when nothing is driving that seat (T-034a) — never serialize a synthetic
+// controller for a seat a human actually occupies. Mirrors cleanController's own field list
+// one-for-one (that function is this one's load-side counterpart) — see its comments for why
+// each field is persisted.
+function serController(c) {
+  if (!c) return null;
+  return {
+    think: c.think ?? 0, scoutId: c.scoutId ?? null,
+    apm: c.apm ?? null, micro: !!c.micro,
+    strategy: c.strategy || "default", difficulty: c.difficulty || "medium",
+    lastThreatAt: c.lastThreatAt ?? null, actionBudget: c.actionBudget ?? 0,
+    attackForce: c.attackForce ?? 0, attackDesperate: !!c.attackDesperate,
+    nextAttackAt: c.nextAttackAt ?? null, unitsBuilt: c.unitsBuilt ?? 0,
+    waveCount: c.waveCount ?? 0, nextWaveAt: c.nextWaveAt ?? null,
+    intelMil: c.intelMil ?? 0, intelEco: c.intelEco ?? 0,
+    intelMilAt: c.intelMilAt ?? null, intelEcoAt: c.intelEcoAt ?? null,
+    intelAt: c.intelAt ?? null, adaptMode: c.adaptMode ?? null,
+    colonyTarget: c.colonyTarget ?? null,
+  };
+}
+
 // Strip a unit's transient, session-only bookkeeping before it leaves the live engine — shared by
 // the save format (serPlanet below) and engine/projection.js's per-seat network view, so the
 // denylist is written once. `_gi`/`repairTargetId`/`ferriers`/`repairers` are stamped fresh every
@@ -568,78 +607,18 @@ function serPlanet(state) {
       id: w.id, x: w.x, y: w.y, n: w.n, value: w.value, createdAt: w.createdAt,
       goods: { ...w.goods }, spawnAt: w.spawnAt,
     })),
-    fog: [...state.fog.explored],
-    fogAI: [...state.fogAI.explored],
-    // T-034a: null exactly when a real human occupies seat "ai" (engine/state.js's aiEnabled:false)
-    // — never serialize a synthetic controller for a seat nothing is actually driving.
-    ai: !state.ai ? null : {
-      aiThink: state.ai.think ?? 0, aiScoutId: state.ai.scoutId ?? null,
-      aiApm: state.ai.apm ?? null, aiMicro: !!state.ai.micro,
-      // The player-picked AI strategy (engine/aiStrategy.js) — persisted the same redundant-per-planet
-      // way aiApm/aiMicro already are (not re-derived like the archetype, since it's not a function of
-      // planetId), so an old save without the field defaults to "default" (byte-identical to today).
-      aiStrategy: state.ai.strategy || "default",
-      // The splash-screen Easy/Medium/Hard pick (engine/aiDifficulty.js) — persisted the same
-      // redundant-per-planet way aiApm/aiMicro/aiStrategy already are, so an old save without the
-      // field defaults to "medium" (the same fallback difficultyFor(state) itself applies).
-      aiDifficulty: state.ai.difficulty || "medium",
-      // Sim-time of the last seen threat near home (drives Economic's war-footing window,
-      // engine/ai.js). Additive + nullish-defaulted, so an old save without it loads as "no recent
-      // threat" — the safe, conservative default (a freshly reloaded game reads as being at peace).
-      aiLastThreatAt: state.ai.lastThreatAt ?? null,
-      aiActionBudget: state.ai.actionBudget ?? 0,
-      aiAttackForce: state.ai.attackForce ?? 0, aiAttackDesperate: !!state.ai.attackDesperate,
-      aiNextAttackAt: state.ai.nextAttackAt ?? null, aiUnitsBuilt: state.ai.unitsBuilt ?? 0,
-      // Committed-wave counter (engine/ai.js): drives the economy-raid cadence
-      // (aiWaveCount % RAID_EVERY). Omitting it reset the counter to 0 on every reload,
-      // shifting all subsequent raid-vs-base decisions — the same continue-identically
-      // break the aiNextWaveAt note below warns about. Additive + `|| 0`-defaulted in
-      // ai.js, so old saves without it load fine.
-      aiWaveCount: state.ai.waveCount ?? 0,
-      // Odyssey offense cadence (engine/ai.js) — a scheduled future time. Must be
-      // persisted or a reloaded hostile world fires its next probe a full cadence
-      // early (undefined ?? 0 ⇒ immediately wave-ready), breaking continue-identically.
-      aiNextWaveAt: state.ai.nextWaveAt ?? null,
-      // Opponent belief (engine/aiIntel.js): a fading high-water mark of what this controller has
-      // SEEN of the enemy. Persisted for the same continue-identically reason aiWaveCount is —
-      // dropping it would make a reloaded AI forget the army it scouted and re-derive its whole
-      // posture read from an empty picture, changing every downstream decision.
-      aiIntelMil: state.ai.intelMil ?? 0, aiIntelEco: state.ai.intelEco ?? 0,
-      aiIntelMilAt: state.ai.intelMilAt ?? null, aiIntelEcoAt: state.ai.intelEcoAt ?? null,
-      aiIntelAt: state.ai.intelAt ?? null,
-      aiAdaptMode: state.ai.adaptMode ?? null,
-      // Odyssey colony-ship expansion target (engine/ai.js) — the committed deploy spot
-      // of an in-flight ship. Persisted so a reload doesn't recompute a different target.
-      aiColonyTarget: state.ai.colonyTarget ?? null,
-    },
-    // Tier 1 self-play's SECOND, parallel AI controller (owner "player" — see engine/state.js's
-    // createAiController, engine/ai.js's runAI(state, dt, owner)). Purely additive: every save
-    // that predates this feature (and every non-self-play save made after it) has state.playerAi
-    // === null, so this serializes to `null` and rehydratePlanet's `P.playerAi ? … : null` below
-    // reads that back as null too — a byte-identical round trip with NO SAVE_VERSION bump. Field
-    // names mirror the `ai` block above one-for-one (pa-prefixed instead of ai-prefixed) so the
-    // two controllers can never structurally drift.
-    playerAi: state.playerAi ? {
-      paThink: state.playerAi.think ?? 0, paScoutId: state.playerAi.scoutId ?? null,
-      paApm: state.playerAi.apm ?? null, paMicro: !!state.playerAi.micro,
-      paStrategy: state.playerAi.strategy || "default",
-      paDifficulty: state.playerAi.difficulty || "medium",
-      paLastThreatAt: state.playerAi.lastThreatAt ?? null,
-      paActionBudget: state.playerAi.actionBudget ?? 0,
-      paAttackForce: state.playerAi.attackForce ?? 0, paAttackDesperate: !!state.playerAi.attackDesperate,
-      paNextAttackAt: state.playerAi.nextAttackAt ?? null, paUnitsBuilt: state.playerAi.unitsBuilt ?? 0,
-      paWaveCount: state.playerAi.waveCount ?? 0,
-      paNextWaveAt: state.playerAi.nextWaveAt ?? null,
-      // Opponent belief (engine/aiIntel.js): a fading high-water mark of what this controller has
-      // SEEN of the enemy. Persisted for the same continue-identically reason aiWaveCount is —
-      // dropping it would make a reloaded AI forget the army it scouted and re-derive its whole
-      // posture read from an empty picture, changing every downstream decision.
-      paIntelMil: state.playerAi.intelMil ?? 0, paIntelEco: state.playerAi.intelEco ?? 0,
-      paIntelMilAt: state.playerAi.intelMilAt ?? null, paIntelEcoAt: state.playerAi.intelEcoAt ?? null,
-      paIntelAt: state.playerAi.intelAt ?? null,
-      paAdaptMode: state.playerAi.adaptMode ?? null,
-      paColonyTarget: state.playerAi.colonyTarget ?? null,
-    } : null,
+    // T-045: N-keyed, one entry per owner (state.owners order) — replaces the old fixed
+    // fog:/fogAI: pair. Only `explored` (permanent scouted memory) persists, same as before;
+    // `visible` is recomputed on load (rehydratePlanet's own updateFog pass).
+    fogs: Object.fromEntries(state.owners.map(id => [id, [...state.fogs[id].explored]])),
+    // T-045: N-keyed, one entry per owner — replaces the old fixed ai:/playerAi: pair (whose
+    // aiXxx/paXxx field-name prefixes existed only to keep two flat sibling keys from
+    // colliding; nested under its own owner key, a controller's fields need no prefix at all).
+    // T-034a: null exactly when a real human occupies that seat (engine/state.js's
+    // aiEnabled:false) — never serialize a synthetic controller for a seat nothing is actually
+    // driving. serController is the single source every owner's entry goes through, so two
+    // controllers can never structurally drift the way two independent object literals could.
+    controllers: Object.fromEntries(state.owners.map(id => [id, serController(state.controllers[id])])),
   };
 }
 
@@ -715,9 +694,6 @@ function rehydratePlanet(P) {
     map.nodesById.set(node.id, node);
   }
 
-  const fog = createFog(map); fog.explored = Uint8Array.from(P.fog);
-  const fogAI = createFog(map); fogAI.explored = Uint8Array.from(P.fogAI);
-
   // Keep only entities of a REAL type, coercing their numeric fields — an unknown
   // `type` makes UNITS[type]/BUILDINGS[type] undefined and throws on the first tick;
   // a NaN coord/hp silently corrupts the sim. Drop the former, clean the latter.
@@ -726,14 +702,26 @@ function rehydratePlanet(P) {
   const buildings = new Map();
   for (const b of P.buildings) { const def = BUILDINGS[b.type]; if (def) buildings.set(b.id, cleanEntity(b, def, map)); }
 
-  // Rebuild the owner-generic scaffold from the (two-keyed) save: state.owners is
-  // the side list, state.fogs maps each to its fog, and state.fog/state.fogAI stay
-  // as aliases so the many fog consumers keep working. This mirrors createGameState.
-  // Each player's resources/upgrades are untrusted save data too — sanitized by cleanPlayer
-  // (see its comment) before they reach live gameplay math.
-  const players = { player: cleanPlayer(P.players.player), ai: cleanPlayer(P.players.ai) };
+  // Rebuild the owner-generic scaffold from the save: state.owners is the side list — T-045:
+  // genuinely N-keyed now, derived from however many owners the save's own players: object
+  // actually has, not a hardcoded "player"/"ai" pair — and state.fogs maps each to its own fog,
+  // with state.fog/state.fogAI staying as aliases so the many fog consumers keep working. This
+  // mirrors createGameState. Each player's resources/upgrades are untrusted save data too —
+  // sanitized by cleanPlayer (see its comment) before they reach live gameplay math.
+  const players = Object.fromEntries(Object.entries(P.players || {}).map(([id, p]) => [id, cleanPlayer(p)]));
   const owners = Object.keys(players);
-  const fogs = { player: fog, ai: fogAI };
+
+  // T-045: one fog per owner (state.owners order), replacing the old fixed fog:/fogAI: pair. A
+  // missing/malformed entry for a real owner leaves a fresh, entirely-unexplored fog
+  // (createFog's own default) rather than crashing — the same conservative "safe default, no
+  // exception" posture every other save field in this function already takes.
+  /** @type {Object.<string, Fog>} */
+  const fogs = {};
+  for (const id of owners) {
+    const f = createFog(map);
+    if (Array.isArray(P.fogs && P.fogs[id])) f.explored = Uint8Array.from(P.fogs[id]);
+    fogs[id] = f;
+  }
 
   // Pending Helium Bomb craters (engine/bomb.js) not yet matured — additive, so an older
   // save without the field just has none. A bogus/missing owner (not a real side) or a
@@ -784,25 +772,23 @@ function rehydratePlanet(P) {
     units,
     buildings,
     selection: [],
-    fogs, fog, fogAI,
-    // T-042: state.controllers{} (see engine/state.js/engine/controllers.js) — a loaded game needs
-    // its own registry too, or controllerFor would see nothing at all for a restored match, even
-    // though the wire format itself and state.ai/state.playerAi (below) restore exactly as they
-    // always have. The wire format is UNCHANGED here — still exactly `ai:`/`playerAi:` keys,
-    // `aiThink`/`aiScoutId`/… and `pa`-prefixed fields respectively; a real N-keyed save shape is
-    // T-045's own, later, separate job (ADR-0008's own SAVE_VERSION bump).
-    // T-034a: `=== null` on purpose, not a truthy check — an OLD save simply lacks the `ai` key
-    // (P.ai undefined) and must still default to a populated controller, exactly as it always has;
-    // only an EXPLICIT null (a save of a match where a human occupied seat "ai") stays null.
-    controllers: {
-      ai: P.ai === null ? null : cleanController(P.ai, "ai", P.planetId),
-      // Restore Tier 1 self-play's second controller (see the matching comment in serPlanet above)
-      // — null for every save that predates it or never activated self-play, exactly like the "ai"
-      // controller itself would be if createGameState were ever called without seeding it (it
-      // never is; this is its only construction path outside tools/selfplay.js's own direct
-      // assignment).
-      player: P.playerAi ? cleanController(P.playerAi, "pa", P.planetId) : null,
-    },
+    // T-042: fog: fogs.player / fogAI: fogs.ai — plain one-time-reference aliases (never live
+    // accessors, unlike state.ai/state.playerAi below): a fog OBJECT is always mutated in place,
+    // never reassigned, so a reference copy at construction stays valid for the state's whole
+    // life. Exactly createGameState's own convention (engine/state.js).
+    fogs, fog: fogs.player, fogAI: fogs.ai,
+    // T-042/T-045: state.controllers{} (see engine/state.js/engine/controllers.js) — a loaded
+    // game needs its own registry too, or controllerFor would see nothing at all for a restored
+    // match. T-045: genuinely N-keyed now, one entry per owner, from the save's own controllers:
+    // object — not a hardcoded ai:/playerAi: pair. T-034a: `=== null` on purpose, not a truthy
+    // check — an OLD save (or an owner the save format of the day didn't cover) simply lacks
+    // that owner's entry (undefined) and must still default to a populated controller, exactly
+    // as it always has; only an EXPLICIT null (a save of a match where a human occupied that
+    // seat) stays null.
+    controllers: Object.fromEntries(owners.map(id => {
+      const c = P.controllers && P.controllers[id];
+      return [id, c === null ? null : cleanController(c, P.planetId)];
+    })),
     events: [],
     craters,
     wrecks,
