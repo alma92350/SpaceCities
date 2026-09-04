@@ -263,6 +263,9 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // T-053: server/mcpActionTools.js/server/mcpCommandBridge.js — same class again.
     "server/mcpActionTools.js",
     "server/mcpCommandBridge.js",
+    // T-054: server/mcpEventTools.js — same class again, only ever reached from tools/serve.js's
+    // own mcpServer wiring.
+    "server/mcpEventTools.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

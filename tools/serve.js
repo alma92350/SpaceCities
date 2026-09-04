@@ -81,6 +81,7 @@ import { createLobbyTools } from "../server/mcpLobbyTools.js";
 import { createObservationTools } from "../server/mcpObservationTools.js";
 import { attachProjectionCache } from "../server/mcpObservationCache.js";
 import { createActionTools } from "../server/mcpActionTools.js";
+import { createEventTools } from "../server/mcpEventTools.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
@@ -231,17 +232,21 @@ export async function createAppServer() {
   // this SAME map by reference — matches start (and get an entry here) well after boot, so the
   // tools need the live, growing Map itself, never a snapshot taken at construction time.
   const liveMatches = new Map();
-  // T-051/T-052/T-053: the real lobby tools (list_matches/join_match/leave_match), observation
-  // tools (get_situation/list_entities/get_map_overview/get_tech_options), and action tools
-  // (issue_command) — all closing over this SAME `lobby`/`liveMatches` the HTTP handlers below
-  // already share, so an MCP agent and a browser client see and mutate the identical
-  // lobby/match state, never two independent copies.
+  // T-051/T-052/T-053/T-054: the real lobby tools (list_matches/join_match/leave_match),
+  // observation tools (get_situation/list_entities/get_map_overview/get_tech_options), action
+  // tools (issue_command), and the event-wait tool (wait_for_event) — all closing over this SAME
+  // `lobby`/`liveMatches` the HTTP handlers below already share, so an MCP agent and a browser
+  // client see and mutate the identical lobby/match state, never two independent copies.
+  // wait_for_event reuses the SAME projCache as the observation tools (T-054 added a second
+  // capability, waitForEvent, onto server/mcpObservationCache.js's own cache object) rather than
+  // a parallel one, so both read the identical live per-seat projection stream.
   const mcpServer = createMcpServer({
     serverInfo: { name: "SpaceCities", version: "1.1.0" },
     tools: [
       ...createLobbyTools(lobby),
       ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
       ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null),
+      ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
     ],
   });
 
