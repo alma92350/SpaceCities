@@ -260,6 +260,9 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // both only ever reached from tools/serve.js's own mcpServer/spawnWorkerFor wiring.
     "server/mcpObservationTools.js",
     "server/mcpObservationCache.js",
+    // T-053: server/mcpActionTools.js/server/mcpCommandBridge.js — same class again.
+    "server/mcpActionTools.js",
+    "server/mcpCommandBridge.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

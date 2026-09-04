@@ -80,6 +80,8 @@ import { createMcpServer } from "../net/mcp.js";
 import { createLobbyTools } from "../server/mcpLobbyTools.js";
 import { createObservationTools } from "../server/mcpObservationTools.js";
 import { attachProjectionCache } from "../server/mcpObservationCache.js";
+import { createActionTools } from "../server/mcpActionTools.js";
+import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -229,16 +231,17 @@ export async function createAppServer() {
   // this SAME map by reference — matches start (and get an entry here) well after boot, so the
   // tools need the live, growing Map itself, never a snapshot taken at construction time.
   const liveMatches = new Map();
-  // T-051/T-052: the real lobby tools (list_matches/join_match/leave_match) and observation tools
-  // (get_situation/list_entities/get_map_overview/get_tech_options), closing over this SAME
-  // `lobby`/`liveMatches` the HTTP handlers below already share — an MCP agent and a browser
-  // client see and mutate the identical lobby/match state, never two independent copies. T-053
-  // appends the real action tools here once they exist, the same way.
+  // T-051/T-052/T-053: the real lobby tools (list_matches/join_match/leave_match), observation
+  // tools (get_situation/list_entities/get_map_overview/get_tech_options), and action tools
+  // (issue_command) — all closing over this SAME `lobby`/`liveMatches` the HTTP handlers below
+  // already share, so an MCP agent and a browser client see and mutate the identical
+  // lobby/match state, never two independent copies.
   const mcpServer = createMcpServer({
     serverInfo: { name: "SpaceCities", version: "1.1.0" },
     tools: [
       ...createLobbyTools(lobby),
       ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+      ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null),
     ],
   });
 
@@ -283,13 +286,16 @@ export async function createAppServer() {
       // defaults to enabled.
       spectatorsEnabled: match.config.spectatorsEnabled !== false,
     });
-    // T-052: an independent listener on the SAME worker `attachWsMatchWorker` already listens
-    // to — Node's EventEmitter supports any number of "message" listeners with no interference
-    // between them, so this never competes with or changes that relay. Remembers only the
-    // LATEST per-seat projection so an MCP observation tool can read it on demand, without ever
-    // needing a live WebSocket connection of its own.
+    // T-052/T-053: two more independent listeners on the SAME worker `attachWsMatchWorker`
+    // already listens to — Node's EventEmitter supports any number of "message" listeners with
+    // no interference between them, so neither ever competes with or changes that relay.
+    // projCache remembers only the LATEST per-seat projection so an observation tool can read it
+    // on demand; cmdBridge submits an action tool's command into this SAME worker and resolves
+    // once the matching commandResult comes back — attached ONCE per worker here (not per call),
+    // so its own seq counter and pending-reply map stay live for the worker's whole lifetime.
     const projCache = attachProjectionCache(worker);
-    liveMatches.set(match.id, { worker, wsMatch, projCache });
+    const cmdBridge = attachCommandBridge(worker);
+    liveMatches.set(match.id, { worker, wsMatch, projCache, cmdBridge });
   }
 
   // T-035 (FR-4): "all seats filled" — every seat is either not "open" kind (an "ai"/"agent" seat
