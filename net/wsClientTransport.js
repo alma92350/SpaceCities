@@ -56,6 +56,11 @@
      {type:"disconnected"}                     the connection just dropped unexpectedly; a retry is
                                                 already scheduled — fired at most once per outage,
                                                 not spammed again on every failed retry attempt
+     {type:"desyncDetected", tick}    (T-040)   this seat's own periodic fingerprint report (see
+                                                fingerprintIntervalTicks below) came back flagged by
+                                                net/wsWorkerTransport.js — no UI consumes this today,
+                                                same "plumbing ahead of a consumer" precedent as the
+                                                other two events here
      {type:"reconnected", matchId, sameMatch}  a NEW welcome just arrived on a reconnect attempt.
                                                 sameMatch is whether matchId matches the one this
                                                 connection saw before. On a same-match reconnect this
@@ -85,6 +90,13 @@
    not genuinely unreachable — a caller that would rather fail fast and retry itself (test/
    wsReconnect.test.js's own new tests; test/wsWorkerTransport.test.js's "two concurrent matches"
    test) can now do that instead of waiting out the native default.
+
+   fingerprintIntervalTicks (T-040, FR-20; default 100, ~5s at the ordinary 20Hz rate; 0/falsy opts
+   out entirely): on every state push whose reconstructed tick lands on this interval, sends
+   {type:"fingerprint", tick, fp} — net/fingerprint.js's seatFingerprint computed on THIS SEAT's own
+   just-reassembled state, the one slice a client can independently and correctly compute (its own
+   units/buildings/resources are never fog-filtered). Fully automatic — no caller/UI action needed,
+   an operations self-check running in the background for the life of the connection.
    ============================================================ */
 
 "use strict";
@@ -95,6 +107,7 @@ import { createFog } from "../engine/fog.js";
 import { reassembleProjection } from "../engine/projection.js";
 import { applyDelta } from "../engine/projectionDelta.js";
 import { encode } from "./commandEnvelope.js";
+import { seatFingerprint } from "./fingerprint.js";
 
 /**
  * @param {string} url - a ws:// or wss:// URL, already carrying whatever seat-selection query
@@ -109,7 +122,7 @@ import { encode } from "./commandEnvelope.js";
  *   refused, closed before welcome, malformed welcome payload)
  */
 export function createWsClientTransport(url, opts = {}) {
-  const { reconnectDelayMs = 1500, connectTimeoutMs } = opts;
+  const { reconnectDelayMs = 1500, connectTimeoutMs, fingerprintIntervalTicks = 100 } = opts;
   return new Promise((resolve, reject) => {
     let ws = null;
     let seq = 0;
@@ -244,7 +257,19 @@ export function createWsClientTransport(url, opts = {}) {
           // which carries no match-identity metadata of its own. Found by an actual browser join:
           // without this, overlays.js's seed chip read "Seed undefined" for a live network match —
           // a locally-created State always has a real state.seed, so a wire-reconstructed one must too.
-          emit({ type: "state", state: { ...reassembleProjection(lastProj, map, fog, seat), seed, planetId } });
+          const reconstructed = { ...reassembleProjection(lastProj, map, fog, seat), seed, planetId };
+          emit({ type: "state", state: reconstructed });
+          // T-040 (FR-20): a periodic, fully automatic self-check — no UI, no caller involvement.
+          // Every fingerprintIntervalTicks ticks (default 100, ~5s at the ordinary 20Hz rate)
+          // rather than every single push: cheap per call, but an operations health-check nobody
+          // needs sub-second resolution on has no reason to spend bandwidth on every tick. 0 (or
+          // any falsy value) opts out entirely. net/fingerprint.js's own header explains why THIS
+          // reconstructed object — this seat's own units/buildings/resources, never fog-filtered —
+          // is the one slice a client can compute and land on the exact same string net/matchWorker.js
+          // does, with zero false positives from wire quantization alone.
+          if (fingerprintIntervalTicks && reconstructed.tick % fingerprintIntervalTicks === 0) {
+            ws.send(JSON.stringify({ type: "fingerprint", tick: reconstructed.tick, fp: seatFingerprint(reconstructed, seat) }));
+          }
           return;
         }
         if (msg.type === "commandResult") {
@@ -259,6 +284,13 @@ export function createWsClientTransport(url, opts = {}) {
           // above: safely ignorable by a caller that only knows the universal StateEvent/
           // CommandResultEvent shapes.
           emit({ type: "chat", from: msg.from, text: msg.text });
+          return;
+        }
+        if (msg.type === "desyncDetected") {
+          // T-040: same "safely ignorable extra event kind" posture as chat/disconnected/reconnected
+          // above — no UI consumes this today (matching those three's own precedent: plumbing built
+          // ahead of a consumer, not dead code), but a future one can without any transport change.
+          emit({ type: "desyncDetected", tick: msg.tick });
           return;
         }
       });

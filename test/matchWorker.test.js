@@ -473,3 +473,68 @@ test("T-037 (FR-7): the worker posts a spectator state message unconditionally �
     assert.equal(typeof msg.proj, "object");
   } finally { await worker.terminate(); }
 });
+
+/* ---------- T-040 (FR-20): desync detection via state fingerprint reporting ---------- */
+
+test("T-040: a fingerprint report that matches the worker's own state produces no desyncDetected message", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    // A real seat-scoped fingerprint of THIS worker's own live match.state, computed the exact same
+    // way a well-behaved client would: reach for the freshest state push it just got. seatFingerprint
+    // itself is exercised directly in test/fingerprint.test.js; this proves the WIRING around it.
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const { seatFingerprint } = await import("../net/fingerprint.js");
+    // reconstruct a state-shaped object from the raw wire proj the same minimal way this test needs
+    // (Maps keyed by id, players.player.resources, tick) — full reassembleProjection is client-side
+    // machinery this test has no reason to pull in for a server-side wiring proof.
+    const fakeState = {
+      units: new Map(stateMsg.proj.units.map(u => [u.id, u])),
+      buildings: new Map(stateMsg.proj.buildings.map(b => [b.id, b])),
+      players: stateMsg.proj.players,
+      tick: stateMsg.proj.tick,
+    };
+    const fp = seatFingerprint(fakeState, "player");
+
+    let sawDesync = false;
+    worker.on("message", m => { if (m.type === "desyncDetected") sawDesync = true; });
+    worker.postMessage({ type: "fingerprint", seat: "player", tick: stateMsg.proj.tick, fp });
+    // No ack for a MATCHING report (same "silent on success" posture net/chatLimiter.js/
+    // net/abuseGuard.js already use elsewhere) — settle briefly, then confirm nothing fired.
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(sawDesync, false, "a genuinely matching fingerprint must never be flagged as a desync");
+  } finally { await worker.terminate(); }
+});
+
+test("T-040: a fingerprint report that does NOT match the worker's own state is detected and reported back as desyncDetected", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    worker.postMessage({ type: "fingerprint", seat: "player", tick: stateMsg.proj.tick, fp: "obviously-not-a-real-fingerprint" });
+    const desync = await waitFor(worker, m => m.type === "desyncDetected");
+    assert.equal(desync.seat, "player");
+    assert.equal(desync.tick, stateMsg.proj.tick);
+  } finally { await worker.terminate(); }
+});
+
+test("T-040: a desync report for one seat never fires for the other seat's own correct fingerprint", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "ai");
+    const { seatFingerprint } = await import("../net/fingerprint.js");
+    const fakeState = {
+      units: new Map(stateMsg.proj.units.map(u => [u.id, u])),
+      buildings: new Map(stateMsg.proj.buildings.map(b => [b.id, b])),
+      players: stateMsg.proj.players,
+      tick: stateMsg.proj.tick,
+    };
+    const fp = seatFingerprint(fakeState, "ai");
+    let sawDesync = false;
+    worker.on("message", m => { if (m.type === "desyncDetected") sawDesync = true; });
+    worker.postMessage({ type: "fingerprint", seat: "ai", tick: stateMsg.proj.tick, fp });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(sawDesync, false);
+  } finally { await worker.terminate(); }
+});

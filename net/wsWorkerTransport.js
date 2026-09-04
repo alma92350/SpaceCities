@@ -74,6 +74,17 @@
    Map keyed by seat like chatTimestampsBySeat) — see net/abuseGuard.js's own header for why a
    legitimate reconnect must never inherit a strike count a DIFFERENT, already-disconnected
    connection racked up.
+
+   T-040 (FR-20): DESYNC DETECTION, a thin relay either direction — same "this file only routes,
+   server/matchWorker.js holds the state a check actually needs" split every other worker-relayed
+   concern here already follows. Client -> server {type:"fingerprint", tick, fp}: a seat's own
+   periodic self-check (net/fingerprint.js's seatFingerprint, computed client-side on whatever
+   net/wsClientTransport.js just reassembled), shape-validated here (a real number/string pair or
+   the report is silently dropped, same posture as malformed JSON above) and posted to the worker
+   UNCHANGED — only IT holds the live match.state a comparison needs. Worker -> server
+   {type:"desyncDetected", seat, tick}: relayed back to that SAME seat's own connection only (the
+   existing bySeat lookup onWorkerMessage already does for commandResult/state) — never broadcast;
+   a seat's own desync report is that seat's own business, not everyone else's.
    ============================================================ */
 
 "use strict";
@@ -186,6 +197,17 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
               return;
             }
 
+            if (envelope.type === "fingerprint") {
+              // T-040: relayed to the worker unchanged — only IT holds the live match.state a
+              // report can actually be compared against (see this file's own header). A malformed
+              // report (wrong/missing tick or fp) is dropped right here, same silent posture as
+              // malformed JSON above — no reason to spend a thread-hop on something that could never
+              // produce a meaningful comparison anyway.
+              if (typeof envelope.tick !== "number" || typeof envelope.fp !== "string") return;
+              worker.postMessage({ type: "fingerprint", seat, tick: envelope.tick, fp: envelope.fp });
+              return;
+            }
+
             // Shape validation and application both happen INSIDE the worker (admit()/stepMatch),
             // never here — this handler is a pure relay, exactly ADR-0011's own "parent relays
             // commands and state" wording. The worker answers a shape-rejection immediately and an
@@ -218,6 +240,9 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
           conn.send(JSON.stringify({ type: "commandResult", seq: msg.seq, result: msg.result }));
         } else if (msg.type === "state") {
           conn.send(JSON.stringify({ type: "state", ...buildStateMessage(msg.proj, lastSnapshotBySeat, msg.seat) }));
+        } else if (msg.type === "desyncDetected") {
+          // T-040: that SAME seat's own connection only — never broadcast (this file's own header).
+          conn.send(JSON.stringify({ type: "desyncDetected", tick: msg.tick }));
         }
       }
       worker.on("message", onWorkerMessage);

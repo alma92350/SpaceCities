@@ -61,6 +61,19 @@
                                                     opened (first join OR a reconnect) — cancels any
                                                     pending grace timer and hands control back if the
                                                     AI had already taken over
+       {type:"fingerprint", seat, tick, fp}  (T-040)  a seat's own periodic self-check
+                                                    (net/fingerprint.js's seatFingerprint, computed
+                                                    client-side) — compared against this worker's own
+                                                    CURRENT match.state (the only place that state
+                                                    lives); a mismatch posts {type:"desyncDetected",
+                                                    seat, tick} back AND logs it (console.error) —
+                                                    see the branch below for why comparing against
+                                                    "current", not a historical checkpoint at msg.tick,
+                                                    is a deliberate v1 simplification
+     worker -> parent (continued)
+       {type:"desyncDetected", seat, tick}  (T-040)  this seat's own fingerprint report didn't match
+                                                    — net/wsWorkerTransport.js relays it back to that
+                                                    SAME seat's own connection only, never broadcast
 
    T-036 (FR-5): DISCONNECT -> AI TAKEOVER -> RECLAIM. net/wsWorkerTransport.js owns detecting a
    connect/disconnect (it already tracks bySeat, one hop further out) and relays it here as the two
@@ -107,6 +120,7 @@ import { mulberry32 } from "../engine/rng.js";
 import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
 import { readSnapshot, writeSnapshot } from "./matchSnapshot.js";
+import { seatFingerprint } from "../net/fingerprint.js";
 
 const { seed } = workerData.createGameStateOpts;
 const dataDir = workerData.dataDir || null;
@@ -176,6 +190,24 @@ parentPort.on("message", msg => {
     // Hands control back unconditionally — a harmless no-op if the grace period never actually
     // fired (already null), the real point if it did.
     match.state[aiSlotFor(msg.seat)] = null;
+    return;
+  }
+  if (msg.type === "fingerprint") {
+    // T-040 (FR-20): compared against THIS worker's own CURRENT match.state — not a historical
+    // checkpoint at msg.tick — a deliberate v1 simplification (net/fingerprint.js's own header
+    // documents why this file is the only place that can do the comparison at all: match.state
+    // lives only here). Under real network latency a client's own report always reflects a tick
+    // slightly behind whatever this worker is at by the time it arrives, so an occasional benign
+    // mismatch from tick drift alone is possible — acceptable for what this is: an operations
+    // signal a human reviews (console.error below), never an enforcement action (no disconnect, no
+    // correction), so a rare false positive costs a look at a log line, not a wrongly-punished
+    // player. A genuine, sustained divergence (the actual target) reproduces on every report, tick
+    // drift or not.
+    const expected = seatFingerprint(match.state, msg.seat);
+    if (expected !== msg.fp) {
+      console.error(`desync detected: match ${matchId} seat ${msg.seat} tick ${msg.tick} — client fingerprint does not match server state`);
+      parentPort.postMessage({ type: "desyncDetected", seat: msg.seat, tick: msg.tick });
+    }
     return;
   }
 });

@@ -724,3 +724,93 @@ test("T-039: a determined chat-flooder — repeatedly past net/chatLimiter.js's 
     assert.equal(await closed, true, "repeated chat-limit rejections must count toward the same abuse escalation as a raw command flood");
   } finally { wsMatch.close(); server.close(); worker.terminate(); }
 });
+
+/* ---------- T-040 (FR-20): desync detection via state fingerprint reporting ---------- */
+
+function nextDesyncFrom(ws) {
+  return new Promise(resolve => {
+    ws.addEventListener("message", function handler(ev) {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "desyncDetected") { ws.removeEventListener("message", handler); resolve(msg); }
+    });
+  });
+}
+
+test("T-040: a wrong fingerprint report is relayed to the worker and the resulting desyncDetected comes back on that SAME connection", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    // Wait for a real state push first — proves this test's own report happens once a match is
+    // genuinely live and ticking, not merely at the welcome handshake.
+    await new Promise(resolve => {
+      player.addEventListener("message", function handler(ev) {
+        if (JSON.parse(ev.data).type === "state") { player.removeEventListener("message", handler); resolve(); }
+      });
+    });
+    const desync = nextDesyncFrom(player);
+    player.send(JSON.stringify({ type: "fingerprint", tick: 1, fp: "definitely-wrong" }));
+    const msg = await desync;
+    assert.equal(msg.tick, 1);
+    player.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-040: a desyncDetected for one seat is never sent to the OTHER seat's connection", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    let aiSawDesync = false;
+    ai.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "desyncDetected") aiSawDesync = true; });
+    const playerDesync = nextDesyncFrom(player);
+    player.send(JSON.stringify({ type: "fingerprint", tick: 1, fp: "definitely-wrong" }));
+    await playerDesync;
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.equal(aiSawDesync, false, "a seat's own desync report is that seat's own business, never broadcast");
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-040: a malformed fingerprint report (missing/wrong-typed fields) is silently dropped — no crash, no relay, connection stays open", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    let sawDesync = false;
+    player.addEventListener("message", ev => { if (JSON.parse(ev.data).type === "desyncDetected") sawDesync = true; });
+    player.send(JSON.stringify({ type: "fingerprint" }));                    // no tick, no fp
+    player.send(JSON.stringify({ type: "fingerprint", tick: "not-a-number", fp: 42 }));   // wrong types
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(sawDesync, false, "malformed reports must never even reach the worker's own comparison");
+    // The connection itself must still be alive and functional — a malformed report is not abuse.
+    const echo = countCommandResults(player, 300);
+    player.send(rawEnvelope(1));
+    assert.equal(await echo, 1);
+    player.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-040: a REAL client transport's own periodic self-check never triggers a false-positive desync, even with T-028b's own wire quantization in play", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`, { fingerprintIntervalTicks: 2 });
+    let sawDesync = false;
+    transport.onEvent(e => { if (e.type === "desyncDetected") sawDesync = true; });
+    // A short, real cadence (every 2 ticks, ~100ms at the ordinary 20Hz rate) — several real
+    // reports round-trip well within this wait, over a genuinely live, ticking match.
+    await new Promise(resolve => setTimeout(resolve, 600));
+    assert.equal(sawDesync, false, "a genuinely non-diverged client must never be flagged, even once real wire quantization (T-028b) is actually in play");
+    transport.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
