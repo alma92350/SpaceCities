@@ -252,6 +252,8 @@ const TRANSIENT_STATE = new Set([
   "owners",     // derived from the world's own roster
   "fogs",       // per-owner alias block; the two fogs themselves ARE persisted
   "fog", "fogAI",
+  "controllers", // T-042: per-owner registry block; its "ai"/"player" entries are covered by the
+                 // live "ai"/"playerAi" aliases below, which the ai:/playerAi: wire keys DO persist
   "selection",  // a UI concern, deliberately not restored
   "events",     // per-tick outbox, drained by the view
   "unitGrid",   // broad-phase index, rebuilt every tick (engine/grid.js)
