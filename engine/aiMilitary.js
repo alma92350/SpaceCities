@@ -26,7 +26,7 @@ import { issueAttackMove, issueMove } from "./commands.js";
 import { isVisibleAt, isExploredAt, nearestUnexploredPoint } from "./fog.js";
 import { hostility, provoked } from "./diplomacy.js";
 import { chargingPlayerWonder } from "./wonder.js";
-import { canAct, spend, controllerFor, otherOwner } from "./aiCommon.js";
+import { canAct, spend, controllerFor, opponentsOf } from "./aiCommon.js";
 import { effectiveMix } from "./aiWorkers.js";
 import { playerUnits, playerBuildings } from "./state.js";
 import { difficultyFor, adaptivityFor } from "./aiDifficulty.js";
@@ -441,12 +441,14 @@ const RETREAT_SIGHT = 260;      // ...if it can see at least as many enemy comba
 // visibleThreatsNearHome, so the two-line owner/role/visibility test lives in exactly one place.
 // `owner` defaults to "ai" so every pre-existing (single-owner) caller is unaffected; a self-play
 // "player" controller passes its own owner so it reacts to what IT has seen through state.fog,
-// never state.fogAI — the fairness guarantee this whole module exists to keep.
+// never state.fogAI — the fairness guarantee this whole module exists to keep. T-043: every OTHER
+// owner counts as an enemy (opponentsOf, FFA — no alliances), not one hardcoded rival; for the
+// shipped 2-seat case opponentsOf is always a single-element array, so this is byte-identical.
 function* visibleEnemyCombatUnits(state, owner = "ai") {
-  const enemyOwner = otherOwner(owner);
+  const enemies = opponentsOf(state, owner);
   const fog = state.fogs[owner];
   for (const u of state.units.values()) {
-    if (u.owner !== enemyOwner || UNITS[u.type].role !== "combat") continue;
+    if (!enemies.includes(u.owner) || UNITS[u.type].role !== "combat") continue;
     if (!isVisibleAt(fog, u.x, u.y)) continue;
     yield u;
   }
@@ -544,17 +546,19 @@ export function playerHasPresence(state, owner = "player") {
 // start coordinate the enemy has long since left.
 const RAID_EVERY = 3;   // every Nth Tactical wave goes for the economy instead of the base
 
-// The enemy's economy to snipe: the nearest enemy WORKER `owner` can see. A Tactical raid peels a
-// wave onto the worker line to cripple production rather than grinding the defended main base.
-// Null when no worker is in sight — nothing to raid, so the caller falls back to the ordinary base
-// assault. `owner` defaults to "ai" so the pre-existing (single-owner) call site is unaffected.
+// The enemy economy to snipe: the nearest visible worker belonging to ANY opponent `owner` can see
+// (T-043: opponentsOf, not one hardcoded rival — nearest-wins already picks sensibly across a wider
+// pool). A Tactical raid peels a wave onto the worker line to cripple production rather than
+// grinding the defended main base. Null when no worker is in sight — nothing to raid, so the caller
+// falls back to the ordinary base assault. `owner` defaults to "ai" so the pre-existing
+// (single-owner) call site is unaffected.
 export function raidTarget(state, owner = "ai") {
-  const enemyOwner = otherOwner(owner);
+  const enemies = opponentsOf(state, owner);
   const fog = state.fogs[owner];
   const from = state.map.bases[owner];
   let best = null, bestD = Infinity;
   for (const u of state.units.values()) {
-    if (u.owner !== enemyOwner || UNITS[u.type]?.role !== "worker") continue;
+    if (!enemies.includes(u.owner) || UNITS[u.type]?.role !== "worker") continue;
     if (!isVisibleAt(fog, u.x, u.y)) continue;
     const d = Math.hypot(u.x - from.x, u.y - from.y);
     if (d < bestD) { bestD = d; best = u; }
@@ -566,13 +570,14 @@ export function raidTarget(state, owner = "ai") {
 // engine/aiSuperweapon.js's own chooseAttackTarget(state, ctx.cc), a file this Tier stays out of —
 // reads exactly as before. A self-play "player" controller passes its own owner, so every read
 // below (seen buildings/units, the fallback start coordinate, the fog sweep) resolves off ITS OWN
-// fog (state.fogs[owner]) and targets the OTHER side (otherOwner(owner)), never a hardcoded
-// "player"/state.fogAI pair.
+// fog (state.fogs[owner]) and targets every OTHER side (T-043: opponentsOf(owner), never a
+// hardcoded "player"/state.fogAI pair or a single hardcoded rival) — nearest-wins already picks
+// sensibly across a wider candidate pool, so no new "which rival do I focus on" policy is needed.
 export function chooseAttackTarget(state, cc, owner = "ai") {
-  const enemyOwner = otherOwner(owner);
+  const enemies = opponentsOf(state, owner);
   const fog = state.fogs[owner];
   const from = cc || { x: state.map.bases[owner].x, y: state.map.bases[owner].y };
-  const seen = e => e.owner === enemyOwner && isVisibleAt(fog, e.x, e.y);
+  const seen = e => enemies.includes(e.owner) && isVisibleAt(fog, e.x, e.y);
   const seenBuildings = [...state.buildings.values()].filter(seen);
   const ccs = seenBuildings.filter(b => b.type === "command");
   const nearestOf = list => {
@@ -586,9 +591,20 @@ export function chooseAttackTarget(state, cc, owner = "ai") {
   const target = nearestOf(ccs) || nearestOf(seenBuildings)
       || nearestOf([...state.units.values()].filter(seen));
   if (target) return target;
-  const start = state.map.bases[enemyOwner];
-  if (!isExploredAt(fog, start.x, start.y)) return start;   // haven't looked at the start yet — go there
-  return nearestUnexploredPoint(fog, from.x, from.y) || start;   // else search the map for a hidden CC
+  // Nothing seen of ANY opponent yet: head for the nearest opponent start this map actually has a
+  // position for — state.map.bases is still 2-keyed pre-T-044 (engine/state.js's own basePositions
+  // is a seeding-time-only stopgap, never written back into map.bases), so an opponent beyond the
+  // original pair may have no entry here at all yet; skip it rather than crash on `undefined.x`.
+  // For the shipped 2-seat case `starts` is always the same single element the old code used, so
+  // this is byte-identical: prefer one not yet explored (still worth a look, nearest first — the
+  // old `if (!isExploredAt(start...)) return start`), else fall through to the blind fog sweep
+  // (already fully owner-agnostic, unchanged) and finally the nearest known start regardless of
+  // explored state (the old `|| start`) — or, only reachable for an opponent with no known start at
+  // all, `from` itself as a last-resort no-op rather than an undefined target.
+  const starts = enemies.map(o => state.map.bases[o]).filter(Boolean);
+  const unexploredStarts = starts.filter(s => !isExploredAt(fog, s.x, s.y));
+  if (unexploredStarts.length) return nearestOf(unexploredStarts);
+  return nearestUnexploredPoint(fog, from.x, from.y) || nearestOf(starts) || from;
 }
 
 // The next unit to build: normally the next entry in the archetype's mix, but
@@ -629,12 +645,14 @@ export function pickNextUnitType(state, archetype, owner = "ai") {
 // test/balance.test.js turret-line proof), overriding the unit-type counter above —
 // prefersBuildings targeting and its 150 range (outranging the turret's 130) do the rest once it's
 // queued. `owner` defaults to "ai" so the pre-existing (single-owner) call site is unaffected.
+// T-043: tallies across every OTHER owner combined (opponentsOf), not one hardcoded rival — the
+// existing "most-common-type wins" pick already generalizes over a wider combined pool.
 export function counterToPlayerArmy(state, owner = "ai") {
-  const enemyOwner = otherOwner(owner);
+  const enemies = opponentsOf(state, owner);
   const fog = state.fogs[owner];
   const counts = {};
   for (const u of state.units.values()) {
-    if (u.owner !== enemyOwner || UNITS[u.type].role !== "combat") continue;
+    if (!enemies.includes(u.owner) || UNITS[u.type].role !== "combat") continue;
     if (!isVisibleAt(fog, u.x, u.y)) continue;   // can't counter what it hasn't seen
     counts[u.type] = (counts[u.type] || 0) + 1;
   }
@@ -647,7 +665,7 @@ export function counterToPlayerArmy(state, owner = "ai") {
     // BUILDINGS[b.type]?.attack (not a hardcoded "turret" check) so a future
     // second static-defense tier (docs/improvement-roadmap.md Phase 4, gated on
     // this landing first) is read for free. Only "turret" qualifies today.
-    if (b.owner !== enemyOwner || b.constructing || !BUILDINGS[b.type]?.attack) continue;
+    if (!enemies.includes(b.owner) || b.constructing || !BUILDINGS[b.type]?.attack) continue;
     if (!isVisibleAt(fog, b.x, b.y)) continue;   // same fog discipline as the unit scan
     staticDefense++;
   }
@@ -691,6 +709,12 @@ export function updateScout(state, ctx, defending = false) {
   controller.scoutId = scout.id;
   const w = state.map.width, h = state.map.height;
   const home = { x: scout.x, y: scout.y };
+  // T-043: ctx.enemyOwner is the PRIMARY opponent (opponentsOf(state,owner)[0] — see aiContext),
+  // but state.map.bases is still 2-keyed pre-T-044 (basePositions is a seeding-time-only stopgap,
+  // engine/state.js — it never writes back into map.bases), so an opponent beyond the original
+  // pair may have no entry here yet. `pb` guards that: with no known bias direction, the box sweep
+  // above still ran and already revealed fog, so skipping the swing leg is a safe degrade, not a
+  // silently-worse scout — never a crash on `undefined.x`.
   const pb = state.map.bases[enemyOwner];
   issueMove([scout], w * 0.42, h * 0.22);
   issueMove([scout], w * 0.58, h * 0.22, true);
@@ -699,6 +723,6 @@ export function updateScout(state, ctx, defending = false) {
   // ...then swing toward the enemy's side to actually see the army it needs to
   // counter (a pure centre sweep can miss what's massing at the enemy base),
   // stopping short of diving into the base itself, before folding back home.
-  issueMove([scout], home.x + (pb.x - home.x) * 0.6, home.y + (pb.y - home.y) * 0.6, true);
+  if (pb) issueMove([scout], home.x + (pb.x - home.x) * 0.6, home.y + (pb.y - home.y) * 0.6, true);
   issueMove([scout], home.x, home.y, true);   // and head home to fold back into the army
 }

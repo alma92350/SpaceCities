@@ -24,7 +24,7 @@ import { checkWinCondition, DEFAULT_MATCH_TIME_LIMIT } from "../engine/victory.j
 import { serializeGame, deserializeGame } from "../engine/persist.js";
 import { createFog, isVisibleAt } from "../engine/fog.js";
 import { tick } from "../engine/sim.js";
-import { isHumanControlled, controllerFor, accrueActionBudget, canAct, spend } from "../engine/aiCommon.js";
+import { isHumanControlled, controllerFor, opponentsOf, accrueActionBudget, canAct, spend } from "../engine/aiCommon.js";
 
 function commandCenterOf(state, owner) {
   return [...state.buildings.values()].find(b => b.owner === owner && b.type === "command");
@@ -413,4 +413,50 @@ test("T-042: aiEnabled:false still round-trips as a null controller, reachable b
   assert.equal(loaded.controllers.ai, null);
   assert.equal(loaded.ai, null);
   assert.equal(controllerFor(loaded, "ai"), null);
+});
+
+/* ---------- T-043 (ADR-0008): opponentsOf() replacing otherOwner()'s "exactly one enemy" axiom ----
+   otherOwner(owner) itself is NOT deleted — hud.js and overlays.js still use it exactly as before
+   for the head-to-head "you vs. the foe" scoreboard line, a genuinely 2-party display concern that
+   is its own separate (and later) N-player UI question, well outside this task's own acceptance
+   criterion ("AI targets sensibly with 3+ opponents") and outside docs/analysis/
+   01-engine-nplayer-seams.md's own scope (an audit of engine/, which neither file is under).
+
+   opponentsOf(state, owner) is the new, N-capable primitive every AI DECISION call site migrates
+   to instead: engine/aiIntel.js's sightEnemy, engine/aiMilitary.js's visibleEnemyCombatUnits/
+   raidTarget/chooseAttackTarget/counterToPlayerArmy, and engine/ai.js's aiContext. Each of those
+   widens its old single-owner equality filter (`e.owner === enemyOwner`) to a multi-owner
+   membership test (`opponents.includes(e.owner)`) — for the EXISTING 2-seat case opponentsOf
+   always returns a single-element array, so `.includes()` behaves identically to the old `===` and
+   every existing nearest/most-common/highest-value comparison the target-picking logic already did
+   is untouched: it just now considers a wider candidate pool. No new "which rival do I focus on"
+   policy was invented — the existing nearest-wins/most-seen-wins logic already generalizes. ---- */
+
+test("T-043: opponentsOf() returns the OTHER owners in state.owners order — a single-element array for the shipped 2-seat case", () => {
+  const state = createGameState({ planetId: "ferros" });
+  assert.deepEqual(opponentsOf(state, "player"), ["ai"]);
+  assert.deepEqual(opponentsOf(state, "ai"), ["player"]);
+});
+
+test("T-043: opponentsOf() lists every OTHER seat for 3+ owners, never just one", () => {
+  const state = createGameState({
+    planetId: "ferros",
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+      { id: "raiders", faction: "neutral", isAI: true, color: "#a78bfa" },
+    ],
+    basePositions: { rebels: { x: 900, y: 300 }, raiders: { x: 300, y: 900 } },
+  });
+  assert.deepEqual(opponentsOf(state, "player"), ["ai", "rebels", "raiders"],
+    "the old otherOwner() axiom would have silently dropped two of these three");
+  assert.deepEqual(opponentsOf(state, "rebels"), ["player", "ai", "raiders"],
+    "a non-default owner id must see every OTHER seat too, not just the original pair");
+});
+
+test("T-043: opponentsOf() degrades to the legacy pair on a minimal fixture with no state.owners", () => {
+  assert.deepEqual(opponentsOf({}, "player"), ["ai"],
+    "a hand-built test fixture that never set state.owners must still behave like the original 2-seat game");
+  assert.deepEqual(opponentsOf({}, "ai"), ["player"]);
 });

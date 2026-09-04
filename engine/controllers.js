@@ -35,6 +35,26 @@ export function controllerFor(state, owner) {
 }
 
 /**
+ * T-043 (ADR-0008): every OTHER owner in this match — `owner`'s full set of opponents under FFA
+ * (this engine has no alliance/team mechanic, so "every other seat" and "every enemy" are the same
+ * set). Replaces engine/aiCommon.js's old otherOwner(owner)'s "there is exactly one enemy" axiom in
+ * every AI DECISION call site (engine/aiIntel.js's sightEnemy, engine/aiMilitary.js's
+ * visibleEnemyCombatUnits/raidTarget/chooseAttackTarget/counterToPlayerArmy, engine/ai.js's
+ * aiContext) — otherOwner() itself is NOT removed, since hud.js/overlays.js still use it for their
+ * own genuinely 2-party "you vs. the foe" scoreboard line, a separate UI concern this task does not
+ * touch. For the shipped 2-seat case this always returns a single-element array, so a caller
+ * widening `e.owner === enemyOwner` to `opponents.includes(e.owner)` is byte-identical — it's only
+ * the CANDIDATE POOL that grows for N>2, and the existing nearest/most-common/highest-value pick
+ * among that pool already generalizes with no new policy needed. Falls back to the original
+ * ["player","ai"] pair when state.owners is unset (a minimal hand-built test fixture), exactly the
+ * defensive style controllerFor above already uses. @param {State} state @param {string} owner
+ * @returns {string[]}
+ */
+export function opponentsOf(state, owner) {
+  return (state.owners || ["player", "ai"]).filter(o => o !== owner);
+}
+
+/**
  * Installs state.ai / state.playerAi as live accessor properties over state.controllers.ai /
  * state.controllers.player — enumerable and configurable (indistinguishable from an ordinary data
  * property to Object.keys/JSON.stringify/spread/for-in), so nothing that reads or writes them the

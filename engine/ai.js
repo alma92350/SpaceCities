@@ -68,7 +68,7 @@
 
 import { UNITS } from "./entities.js";
 import { playerBuildings, playerUnits } from "./state.js";
-import { accrueActionBudget, controllerFor, otherOwner } from "./aiCommon.js";
+import { accrueActionBudget, controllerFor, opponentsOf } from "./aiCommon.js";
 import { assignIdleWorkers } from "./aiWorkers.js";
 import { updateScout, aiMilitary, applyFocusFire, visibleThreatsNearHome } from "./aiMilitary.js";
 import { aiFoundOrSurvive, aiExpand, aiBaseAndTech, aiProduceAndFortify, aiResearch, aiMarketBarter } from "./aiEconomy.js";
@@ -135,7 +135,13 @@ export function runAI(state, dt, owner = "ai") {
 /** @param {State} state @param {string} owner @returns {AiContext} */
 function aiContext(state, owner = "ai") {
   const controller = controllerFor(state, owner);
-  const enemyOwner = otherOwner(owner);
+  // T-043: ctx.enemyOwner stays SINGULAR — its only two readers (aiOffense's Odyssey-only
+  // playerHasPresence check, updateScout's sweep-bias waypoint) are both low-stakes, pre-existing
+  // consumers that never needed N-awareness; every genuine "which target(s)" decision (aiIntel.js's
+  // sightEnemy, the aiMilitary.js targeting functions) resolves its own opponentsOf(state, owner)
+  // directly rather than reading it off ctx. Kept as "the primary opponent" (first in state.owners
+  // order) rather than plumbing an unused ctx.enemyOwners array through for nothing yet reads.
+  const enemyOwner = opponentsOf(state, owner)[0] ?? null;
   const fog = state.fogs[owner];
   const archetype = controller.archetype;
   const arch = field => (state.diplomacy && archetype.odyssey && archetype.odyssey[field] != null)

@@ -33,6 +33,22 @@ const world = () => {
   for (const [id] of [...s.buildings]) s.buildings.delete(id);
   return s;
 };
+// T-043: same as world(), but with a third AI-controlled owner — for the tests pinning that a
+// belief/target read aggregates across every opponent, not just the original "player"/"ai" pair.
+const world3 = () => {
+  const s = createGameState({
+    planetId: "ferros", seed: 1,
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    ],
+    basePositions: { rebels: { x: 900, y: 300 } },
+  });
+  for (const [id] of [...s.units]) s.units.delete(id);
+  for (const [id] of [...s.buildings]) s.buildings.delete(id);
+  return s;
+};
 
 let nextId = 0;
 const addUnit = (s, owner, type, x, y) => {
@@ -113,6 +129,16 @@ test("it never counts its OWN units as the enemy's", () => {
   addBuilding(s, "ai", "turret", 120, 100);
   see(s, "ai", 110, 100);
   assert.deepEqual(sightEnemy(s, "ai"), { mil: 0, eco: 0 });
+});
+
+test("T-043: sightEnemy() aggregates across EVERY opponent, not just one — the old otherOwner() axiom silently dropped a third seat entirely", () => {
+  const s = world3();
+  addUnit(s, "player", "skiff", 100, 100);
+  addUnit(s, "rebels", "skiff", 100, 100);   // a different opponent, same spot — both must count
+  see(s, "ai", 100, 100);
+  const live = sightEnemy(s, "ai");
+  const val = c => Object.values(c || {}).reduce((a, v) => a + v, 0);
+  assert.equal(live.mil, val(UNITS.skiff.cost) * 2, "both opponents' visible skiffs must be counted, not just one");
 });
 
 /* ---------- "seen nothing" vs "seen an empty base" ---------- */
