@@ -195,8 +195,10 @@ export function createAiController(planetId, opts = {}) {
  *   `aiOpts` (T-042, default {}) is forwarded to createAiController for that owner when isAI is
  *   true — the createGameState-level shortcuts (aiApm/aiMicro/aiStrategy/difficulty/aiArchetype)
  *   only ever apply to the DEFAULT pair, exactly like playerFaction/aiFaction already do.
- *   basePositions: a per-owner start-position override, consulted before map.bases — a deliberate
- *   stopgap for owners the 2-keyed map generator has no real position for yet (T-044's own later job).
+ *   basePositions: a per-owner start-position override, consulted before map.bases. T-044's own
+ *   generateRadialMap now gives every owner (2 or N) a real position, so this is no longer a
+ *   stopgap for a gap in the generator — it stays as a genuine override seam (a caller placing a
+ *   seat somewhere the generator wouldn't, e.g. a hand-built test fixture).
  * @returns {State}
  */
 export function createGameState(opts = {}) {
@@ -209,15 +211,6 @@ export function createGameState(opts = {}) {
   // with that sequence either, in any interleaving, reset or not.
   nextEntityId = 1000000;
   const planetId = opts.planetId || "ferros";
-  // The one sanctioned fallback: an UNSEEDED caller (a direct test, or a call
-  // that predates seeding) uses the platform PRNG for map generation only.
-  // Production always passes a seeded rng (see main.js), so this branch never
-  // runs in a real match — the engine-purity guard whitelists the marked line.
-  const map = generateMap(planetId, opts.rng || Math.random, {   // deterministic-exempt: unseeded default rng
-    sizeMult: opts.sizeMult || 1,
-    resourceMult: opts.resourceMult || 1,
-    swapAsym: !!opts.swapAsym,
-  });
 
   // The sides in this world. Today almost always exactly the human "player" and the AI
   // opponent, but the SCAFFOLD is owner-generic: state.owners is the canonical
@@ -232,6 +225,10 @@ export function createGameState(opts = {}) {
   // playerFaction/aiFaction keep meaning exactly what they always did. Once a caller passes its
   // own ownerDefs, those two shortcut opts are simply never consulted (the caller's own entries
   // already carry `faction` per owner) — the more detailed config wins, not both at once.
+  //
+  // Computed BEFORE generateMap (T-044) so the map generator itself can see the real owner
+  // roster — 2 ids dispatches to its own byte-identical mirrored path (just keyed by whatever
+  // those 2 ids are), 3+ to the new radial generator (engine/map.js's own generateRadialMap).
   const ownerDefs = opts.ownerDefs || [
     // Faction is a passive-trait bundle (engine/factions.js). It defaults to
     // "neutral" (no traits) so a bare createGameState — every engine test —
@@ -241,6 +238,18 @@ export function createGameState(opts = {}) {
     { id: "ai", faction: opts.aiFaction || "neutral", isAI: true, color: "#f87171" },
   ];
   const owners = ownerDefs.map(d => d.id);
+
+  // The one sanctioned fallback: an UNSEEDED caller (a direct test, or a call
+  // that predates seeding) uses the platform PRNG for map generation only.
+  // Production always passes a seeded rng (see main.js), so this branch never
+  // runs in a real match — the engine-purity guard whitelists the marked line.
+  const map = generateMap(planetId, opts.rng || Math.random, {   // deterministic-exempt: unseeded default rng
+    sizeMult: opts.sizeMult || 1,
+    resourceMult: opts.resourceMult || 1,
+    swapAsym: !!opts.swapAsym,
+    owners,
+  });
+
   /** @type {Object.<string, Player>} */
   const players = {};
   for (const d of ownerDefs)

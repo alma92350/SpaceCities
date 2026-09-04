@@ -134,10 +134,19 @@ export function sampleTerrain(terrain, x, y) {
  * Deterministically generate a world's map (deposits, bases, terrain) from a seeded rng.
  * @param {string} [planetId]
  * @param {() => number} [rng]
- * @param {{ sizeMult?: number, resourceMult?: number, swapAsym?: boolean }} [opts]
+ * @param {{ sizeMult?: number, resourceMult?: number, swapAsym?: boolean, owners?: string[] }} [opts]
+ *   owners (T-044, default ["player","ai"]): the side ids to build bases for. Exactly 2 ids
+ *   (any names) uses the mirrored path below, keyed by those ids — byte-identical geometry to
+ *   today for the default pair. 3+ ids dispatches to generateRadialMap, a genuinely separate
+ *   generator (see its own header) — never a generalization of this one, so this function and
+ *   every existing seed/replay/determinism fixture stay completely untouched.
  * @returns {GameMap}
  */
 export function generateMap(planetId = "ferros", rng = Math.random, opts = {}) {   // deterministic-exempt: unseeded default rng
+  const owners = opts.owners || ["player", "ai"];
+  if (owners.length !== 2) return generateRadialMap(owners, planetId, rng, opts);
+  const [P, A] = owners;
+
   const planet = PLANETS.find(p => p.id === planetId);
   if (!planet) throw new Error(`Unknown planet: ${planetId}`);
   const worldModifiers = PLANET_MODIFIERS[planetId] || {};
@@ -159,8 +168,8 @@ export function generateMap(planetId = "ferros", rng = Math.random, opts = {}) {
   const amountOf = base => Math.max(1, Math.round(base * (modifiers.nodeAmountMult || 1) * resourceMult));
 
   const bases = {
-    player: { x: width * 0.1, y: height * 0.5 },
-    ai: { x: width * 0.9, y: height * 0.5 },
+    [P]: { x: width * 0.1, y: height * 0.5 },
+    [A]: { x: width * 0.9, y: height * 0.5 },
   };
 
   const nodes = [];
@@ -174,9 +183,9 @@ export function generateMap(planetId = "ferros", rng = Math.random, opts = {}) {
   const homeAmount = amountOf(HOME_ORE_AMOUNT);
   for (const { dx, dy } of HOME_ORE_OFFSETS) {
     nodes.push({ id: `n${nid++}`, com: "ore", amount: homeAmount, max: homeAmount,
-      x: bases.player.x + dx, y: bases.player.y + dy, home: true });
+      x: bases[P].x + dx, y: bases[P].y + dy, home: true });
     nodes.push({ id: `n${nid++}`, com: "ore", amount: homeAmount, max: homeAmount,
-      x: bases.ai.x - dx, y: bases.ai.y + dy, home: true });
+      x: bases[A].x - dx, y: bases[A].y + dy, home: true });
   }
 
   // A near-base cluster on each side, mirrored, sized by the planet's yield.
@@ -204,7 +213,7 @@ export function generateMap(planetId = "ferros", rng = Math.random, opts = {}) {
     // the deposit table alone decides whether a world needs a guaranteed seam,
     // keeping the rng draw sequence and node layout byte-identical.
     const has = nodes.some(n => n.com === com && !n.home &&
-      Math.hypot(n.x - bases.player.x, n.y - bases.player.y) <= nearBase);
+      Math.hypot(n.x - bases[P].x, n.y - bases[P].y) <= nearBase);
     if (has) continue;
     const y = height * (0.5 + GUARANTEE_Y[com]);
     const amount = amountOf(MIN_GUARANTEE[com]);
@@ -276,6 +285,169 @@ export function generateMap(planetId = "ferros", rng = Math.random, opts = {}) {
   // Static terrain field from this world's fixed specs (none ⇒ an all-open
   // grid). Built after nodes, consumes no rng — determinism unaffected.
   const terrain = generateTerrain(width, height, modifiers.terrain || []);
+  return { planet, width, height, bases, nodes, nodesById, terrain, modifiers };
+}
+
+// Fraction of the (scaled) map's own width/height that the radial bases' inscribed ellipse
+// uses for its two semi-axes — scaled to each dimension separately so the ellipse naturally
+// matches the map's own 1.6:1 aspect ratio (§3.3 point 2's "inscribed ellipse, accept mild
+// asymmetry" option) rather than stretching a circle or needing an N-dependent aspect ratio.
+const RADIAL_RX_FRAC = 0.35;
+const RADIAL_RY_FRAC = 0.35;
+
+/**
+ * T-044 (ADR-0008): N-fold rotational-symmetry map for 3+ seats — a SEPARATE generator from
+ * generateMap's own 2-base mirrored path above, never a generalization of it (see this file's
+ * own module header for why: two generators is honest, one that "also does 2" would not
+ * reproduce today's maps). Bases sit on an ellipse inscribed in the map rectangle, evenly
+ * spaced by angle. Every per-base resource stage (home ore, deposit clusters, build-critical
+ * guarantee seams, extraClusters, frontier belt, hidden caches) places its nodes along the
+ * line from that base toward the map centre — the wedge-shaped generalization of the 2-seat
+ * path's own "player column / ai column" — so every base gets the exact same node COUNT
+ * nearby: no seat's start is left unplayable (docs/analysis/01-engine-nplayer-seams.md §3.2's
+ * own bar), by construction.
+ *
+ * Deliberately narrower than the 2-seat path, both explicit design decisions (§3.4's own
+ * "cheap, honest answer for v1"), not oversights:
+ *   - Per-world terrain features and `asym` overrides are dropped entirely for N>=3. True
+ *     N-fold rotation of an arbitrary rectangular terrain stamp is a real geometry problem
+ *     (rotated-rect rasterization) this task doesn't take on; reusing today's LEFT/RIGHT
+ *     specs as-is would silently favor whichever 2 of the N bases happen to land near them —
+ *     exactly the "seats 3..N play the symmetric version" bug §3.4 itself warns against. Every
+ *     N>=3 match plays the plain, symmetric version of every world instead — sideMod's own
+ *     `m.asym && m.asym[owner]` already degrades this way for any owner missing from `asym`;
+ *     dropping the block here just makes that true for every owner, not only the ones beyond
+ *     the original "player"/"ai" pair.
+ *   - Hidden caches are a simple one-per-base ring rather than the 2-seat path's own bespoke
+ *     hand-placed fractional spec table (itself built around exactly two bases) — still real
+ *     bonus resources, just simpler geometry.
+ * @param {string[]} owners @param {string} planetId @param {() => number} rng
+ * @param {{ sizeMult?: number, resourceMult?: number }} opts
+ * @returns {GameMap}
+ */
+function generateRadialMap(owners, planetId, rng, opts) {
+  const planet = PLANETS.find(p => p.id === planetId);
+  if (!planet) throw new Error(`Unknown planet: ${planetId}`);
+  const worldModifiers = PLANET_MODIFIERS[planetId] || {};
+  const modifiers = { ...worldModifiers };
+  delete modifiers.asym;
+  delete modifiers.terrain;
+
+  const sizeMult = opts.sizeMult || 1;
+  const resourceMult = opts.resourceMult || 1;
+  const width = MAP_WIDTH * sizeMult;
+  const height = MAP_HEIGHT * sizeMult;
+  const amountOf = base => Math.max(1, Math.round(base * (modifiers.nodeAmountMult || 1) * resourceMult));
+
+  const n = owners.length;
+  const cx = width / 2, cy = height / 2;
+  const rx = width * RADIAL_RX_FRAC, ry = height * RADIAL_RY_FRAC;
+  /** @type {Object.<string, {x:number,y:number}>} */
+  const bases = {};
+  for (let k = 0; k < n; k++) {
+    const angle = (2 * Math.PI * k) / n;
+    bases[owners[k]] = { x: cx + rx * Math.cos(angle), y: cy + ry * Math.sin(angle) };
+  }
+  const baseList = owners.map(id => bases[id]);
+
+  // A point along the line from `base` toward the map centre, `t` of the way there (0 = on the
+  // base, 1 = at the centre), nudged sideways by up to `jitter` px — the per-base local frame
+  // every resource stage below places nodes in, so the same relative layout rotates cleanly to
+  // whatever angle that base landed at.
+  const along = (base, t, jitter) => {
+    const dx = cx - base.x, dy = cy - base.y;
+    const d = Math.hypot(dx, dy) || 1;
+    const tX = -dy / d, tY = dx / d;   // unit tangential (perpendicular to the inward direction)
+    const side = (rng() - 0.5) * jitter;
+    return { x: base.x + dx * t + tX * side, y: base.y + dy * t + tY * side };
+  };
+
+  const nodes = [];
+  let nid = 0;
+
+  // Home ore doorstep: the SAME fixed absolute offsets/amount/count as the 2-seat path, one
+  // ring per base, rotated into that base's own local frame (inward = toward the centre,
+  // tangential = perpendicular) so every base opens onto an identical head start.
+  const homeAmount = amountOf(HOME_ORE_AMOUNT);
+  for (const base of baseList) {
+    const dx0 = cx - base.x, dy0 = cy - base.y;
+    const d0 = Math.hypot(dx0, dy0) || 1;
+    const inX = dx0 / d0, inY = dy0 / d0, tX = -dy0 / d0, tY = dx0 / d0;
+    for (const { dx, dy } of HOME_ORE_OFFSETS) {
+      nodes.push({ id: `n${nid++}`, com: "ore", amount: homeAmount, max: homeAmount,
+        x: base.x + inX * dx + tX * dy, y: base.y + inY * dx + tY * dy, home: true });
+    }
+  }
+
+  // Deposit clusters: every base gets its own copy of every commodity the planet deposits,
+  // spread along its own line toward the centre — the wedge-based generalization of the
+  // 2-seat path's "player column / ai column".
+  Object.entries(planet.deposits).forEach(([com, yieldMult]) => {
+    const clusters = Math.max(1, Math.round(yieldMult * 1.5));
+    const amount = amountOf(600 * yieldMult);
+    for (let i = 0; i < clusters; i++) {
+      const t = 0.2 + (i / clusters) * 0.35;
+      for (const base of baseList) {
+        const p = along(base, t, width * 0.08);
+        nodes.push({ id: `n${nid++}`, com, amount, max: amount, x: p.x, y: p.y });
+      }
+    }
+  });
+
+  // Build-critical minimums: checked and, if missing, added PER BASE — under N seats every
+  // base needs its own seam, not one mirrored pair.
+  const nearBase = width * NEAR_BASE_FRAC;
+  for (const com of BUILD_CRITICAL) {
+    const amount = amountOf(MIN_GUARANTEE[com]);
+    for (const base of baseList) {
+      const has = nodes.some(node => node.com === com && !node.home &&
+        Math.hypot(node.x - base.x, node.y - base.y) <= nearBase);
+      if (has) continue;
+      const p = along(base, 0.3, width * 0.03);
+      nodes.push({ id: `n${nid++}`, com, amount, max: amount, x: p.x, y: p.y });
+    }
+  }
+
+  // extraClusters (helix's dense belt): same per-base treatment as the deposit table above.
+  Object.entries(modifiers.extraClusters || {}).forEach(([com, extra]) => {
+    const amount = amountOf(600 * (planet.deposits[com] || 1));
+    for (let i = 0; i < extra; i++) {
+      for (const base of baseList) {
+        const p = along(base, 0.45 + i * 0.08, width * 0.05);
+        nodes.push({ id: `n${nid++}`, com, amount, max: amount, x: p.x, y: p.y });
+      }
+    }
+  });
+
+  // Frontier belt (sizeMult >= 2): one full-size cluster per base per size step, partway
+  // between each base and the centre, cycling the world's own commodities — the same
+  // "one more real fight per size tier" idea as the 2-seat path's own belt.
+  if (sizeMult >= 2) {
+    const beltComs = Object.keys(planet.deposits);
+    const beltSteps = sizeMult - 1;
+    for (let i = 0; i < beltSteps; i++) {
+      const com = beltComs[i % beltComs.length];
+      const amount = amountOf(600 * (planet.deposits[com] || 1));
+      for (const base of baseList) {
+        const p = along(base, 0.6 + i * 0.05, width * 0.06);
+        nodes.push({ id: `n${nid++}`, com, amount, max: amount, x: p.x, y: p.y, frontier: true });
+      }
+    }
+  }
+
+  // Hidden caches: one per base, out toward the centre, cycling commodities — a deliberately
+  // simpler v1 than the 2-seat path's own hand-placed spec table (see this function's header).
+  const cacheAmount = amountOf(CACHE_BASE_AMOUNT);
+  const cacheComs = ["crystals", "radioactives", "ore"];
+  owners.forEach((id, k) => {
+    const p = along(bases[id], 0.85, width * 0.05);
+    const com = cacheComs[k % cacheComs.length];
+    nodes.push({ id: `n${nid++}`, com, amount: cacheAmount, max: cacheAmount, x: p.x, y: p.y, hidden: true });
+  });
+
+  resolveNodeOverlaps(nodes, width, height);
+  const nodesById = new Map(nodes.map(nd => [nd.id, nd]));
+  const terrain = generateTerrain(width, height, []);   // no per-world terrain at N>=3 — see header
   return { planet, width, height, bases, nodes, nodesById, terrain, modifiers };
 }
 
