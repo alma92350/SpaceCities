@@ -250,6 +250,9 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // browser tab loads, so unlike net/chatLimiter.js's own past exit there is no future wiring
     // step that would ever make this reachable from index.html.
     "net/mcp.js",
+    // T-049a: server/mcpSeatHandle.js's only real callers are the MCP TOOLS that will use
+    // withSeat (T-051/T-052/T-053) — themselves server-side, same as net/mcp.js just above.
+    "server/mcpSeatHandle.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))
