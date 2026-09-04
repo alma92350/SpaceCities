@@ -18,12 +18,22 @@
    fields it could transcribe wrong. leave_match is wrapped in withSeat so an invalid or already-
    spent handle is rejected the exact same way every future seat-scoped tool (T-052/T-053) will
    reject one.
+
+   T-056 (§6.3, ADR-0007): list_matches also reports agent_apm_cap — the published, fixed actions-
+   -per-minute ceiling EVERY issue_command call is subject to (net/agentApm.js), server-wide, so
+   an agent (or a human deciding whether to join a match an agent might occupy) can see the rule
+   up front rather than discovering it only after being rate-limited. A single top-level field,
+   not repeated per match: it's a server policy, not a per-match setting. Lives here rather than
+   inside server/lobby.js's own publicMatch() — that file is a deliberate zero-import leaf (its
+   own header), and importing net/agentApm.js into it would break that property for a field that
+   isn't really part of a match record at all.
    ============================================================ */
 
 "use strict";
 
 import { publicMatch } from "./lobby.js";
 import { mintSeatHandle, withSeat, rejection } from "./mcpSeatHandle.js";
+import { AGENT_APM } from "../net/agentApm.js";
 
 /** @param {Object} lobby a createLobby() instance (server/lobby.js) */
 export function createLobbyTools(lobby) {
@@ -31,13 +41,13 @@ export function createLobbyTools(lobby) {
     {
       name: "list_matches",
       title: "List open matches",
-      description: "Lists every match currently open for a seat to join — world, size, resource level, match length, which seats are taken, and whether spectators are allowed. Never includes a seat's real token or the match's random seed.",
+      description: "Lists every match currently open for a seat to join — world, size, resource level, match length, which seats are taken, and whether spectators are allowed. Never includes a seat's real token or the match's random seed. Also reports agent_apm_cap, the published actions-per-minute ceiling issue_command is subject to.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       handler: () => {
         const matches = lobby.listOpenMatches().map(publicMatch);
         return {
           content: [{ type: "text", text: matches.length ? `${matches.length} open match(es).` : "No open matches right now." }],
-          structuredContent: { matches },
+          structuredContent: { matches, agent_apm_cap: AGENT_APM },
         };
       },
     },

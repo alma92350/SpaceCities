@@ -20,6 +20,14 @@
    (net/commandShapes.js, net/commandCodec.js's own test suite) — wrapping each variant in its
    own MCP tool would just be that same union spelled out 20 different ways, all converging on
    the identical bridge call underneath.
+
+   T-056 (§6.3, ADR-0007): every issue_command call is now also gated by a published APM ceiling
+   (net/agentApm.js) BEFORE it ever reaches the bridge/worker — safe to apply unconditionally,
+   with no seat/controller-kind check at all, because this tool is the ONLY path that ever reaches
+   this code: a real human's browser client plays over the WebSocket transport and never calls an
+   MCP tool, so this can never rate-limit a human by mistake (see net/agentApm.js's own header for
+   why the gate lives here, transport-side, rather than inside engine State the way the scripted
+   AI's own aiApm mechanism does).
    ============================================================ */
 
 "use strict";
@@ -45,8 +53,14 @@ const COMMAND_SCHEMA = {
  *   looks up a LIVE match's own command bridge by id (tools/serve.js's own liveMatches) — null
  *   for a match that hasn't started yet, the same shape server/mcpObservationTools.js's own
  *   getCache uses for the identical reason (many concurrent matches, each its own worker).
+ * @param {(matchId:string) => {tryConsume:(owner:string,nowMs:number)=>boolean}|null} [getApmGuard]
+ *   looks up a LIVE match's own APM guard by id (net/agentApm.js's createAgentApmGuard, one per
+ *   match, the same routing shape as getBridge/getCache for the identical reason). Defaults to
+ *   "no guard anywhere" (unthrottled) — the same graceful-degradation default
+ *   engine/aiCommon.js's own apm==null already uses — so every caller/test built before T-056
+ *   keeps working unchanged.
  */
-export function createActionTools(lobby, getBridge) {
+export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
   return [
     {
       name: "issue_command",
@@ -55,7 +69,9 @@ export function createActionTools(lobby, getBridge) {
         "Submits a command for the calling seat's own units/buildings — the same wire command " +
         "a human player's client sends, validated by the identical server-side codec (ownership, " +
         "fog, affordability, rate limits). A rejected command reports the same machine-readable " +
-        "reject code a human's own rejected click would get, so you can adjust and retry.",
+        "reject code a human's own rejected click would get, so you can adjust and retry. Subject " +
+        "to a published actions-per-minute ceiling — a burst of calls beyond that budget is " +
+        "rejected the same way, not silently queued.",
       inputSchema: {
         type: "object",
         properties: { seat_handle: { type: "string" }, command: COMMAND_SCHEMA },
@@ -64,6 +80,10 @@ export function createActionTools(lobby, getBridge) {
       handler: withSeat(lobby, async ({ seat, command }) => {
         const bridge = getBridge(seat.matchId);
         if (!bridge) return rejection("match-not-live: this match hasn't started yet");
+        const apmGuard = getApmGuard(seat.matchId);
+        if (apmGuard && !apmGuard.tryConsume(seat.owner, Date.now())) {
+          return rejection("agent-apm-exceeded: action budget exhausted, try again shortly");
+        }
         const result = await bridge.sendCommand(seat.owner, command);
         if (result.ok) {
           return { content: [{ type: "text", text: "Command applied." }], structuredContent: result.result ?? {} };

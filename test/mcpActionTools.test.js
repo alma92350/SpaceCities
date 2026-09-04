@@ -9,6 +9,7 @@ import { mintSeatHandle } from "../server/mcpSeatHandle.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 import { createActionTools } from "../server/mcpActionTools.js";
 import { REJECT } from "../net/commandCodec.js";
+import { createAgentApmGuard } from "../net/agentApm.js";
 
 /* ============================================================
    T-053 (FR-15): this task's own exit criterion is explicit: "an agent commands 20 units in one
@@ -199,4 +200,66 @@ test("an invalid seat_handle is rejected as a tool execution error, never a cras
   const mcp = createMcpServer({ tools: createActionTools(createLobby(), () => null) });
   const { body } = await callTool(mcp, "issue_command", { seat_handle: "garbage", command: { t: "stop", ids: ["u1"] } });
   assert.equal(body.result.isError, true);
+});
+
+/* ============================================================
+   T-056 (§6.3, ADR-0007): the APM ceiling itself is proven in full in test/agentApm.test.js — this
+   file's own job is only that issue_command actually CONSULTS a configured guard before ever
+   reaching the bridge, and correctly stays unthrottled when none is configured (the default this
+   file's every OTHER test above already exercises implicitly by omitting the third argument
+   entirely). createAgentApmGuard(60) gives a tiny, fast-to-exhaust budget (cap=4) so a test can
+   drain it in a handful of calls without waiting on real wall-clock time.
+   ============================================================ */
+
+test("issue_command is rejected once the seat's own APM budget is exhausted, never reaching the bridge", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = mintSeatHandle(match.id, 0, lobby.joinMatch(match.id, 0).token);
+  let bridgeCalls = 0;
+  const fakeBridge = { sendCommand: async () => { bridgeCalls++; return { ok: true }; } };
+  const apmGuard = createAgentApmGuard(60);   // cap = 4
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge, () => apmGuard) });
+
+  for (let i = 0; i < 4; i++) {
+    const { body } = await callTool(mcp, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
+    assert.equal(body.result.isError, undefined, `call ${i} should still be within budget`);
+  }
+  const { body } = await callTool(mcp, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /agent-apm-exceeded/);
+  assert.equal(bridgeCalls, 4, "the 5th, rejected call must never reach the bridge at all");
+});
+
+test("issue_command stays fully unthrottled when the match has no configured APM guard (the default)", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = mintSeatHandle(match.id, 0, lobby.joinMatch(match.id, 0).token);
+  let bridgeCalls = 0;
+  const fakeBridge = { sendCommand: async () => { bridgeCalls++; return { ok: true }; } };
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge, () => null) });
+
+  for (let i = 0; i < 20; i++) {
+    const { body } = await callTool(mcp, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
+    assert.equal(body.result.isError, undefined);
+  }
+  assert.equal(bridgeCalls, 20);
+});
+
+test("multi-match routing: a seat in match A never drains match B's own APM budget", async () => {
+  const lobby = createLobby();
+  const matchA = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const matchB = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seatA = mintSeatHandle(matchA.id, 0, lobby.joinMatch(matchA.id, 0).token);
+  const fakeBridge = { sendCommand: async () => ({ ok: true }) };
+  const guardA = createAgentApmGuard(60);
+  const guardB = createAgentApmGuard(60);
+  const mcp = createMcpServer({
+    tools: createActionTools(lobby, () => fakeBridge, matchId => (matchId === matchA.id ? guardA : guardB)),
+  });
+
+  for (let i = 0; i < 4; i++) await callTool(mcp, "issue_command", { seat_handle: seatA, command: { t: "stop", ids: ["u1"] } });
+  const { body } = await callTool(mcp, "issue_command", { seat_handle: seatA, command: { t: "stop", ids: ["u1"] } });
+  assert.equal(body.result.isError, true, "match A's own seat is correctly out of budget");
+  assert.equal(guardB.tryConsume("player", Date.now()), true, "match B's own guard is untouched, still has its full budget");
+  void matchB;
 });

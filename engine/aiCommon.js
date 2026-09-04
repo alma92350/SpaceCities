@@ -19,7 +19,9 @@ import { issueBuild } from "./commands.js";
 import { findPlacement } from "./colliders.js";
 import { controllerFor, opponentsOf } from "./controllers.js";
 
-const APM_BURST_FRAC = 1 / 15;   // a busy AI can bank at most ~4 seconds' worth of unspent actions
+// Exported (T-056) so net/agentApm.js's own MCP-agent budget can mirror this exact same burst
+// allowance rather than a separately-authored, driftable copy of the number.
+export const APM_BURST_FRAC = 1 / 15;   // a busy AI can bank at most ~4 seconds' worth of unspent actions
 
 /* ---------- owner resolution (Tier 1 self-play) ---------- */
 

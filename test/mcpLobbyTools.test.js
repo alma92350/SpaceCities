@@ -4,6 +4,7 @@ import { createLobby } from "../server/lobby.js";
 import { createMcpServer, PROTOCOL_VERSION } from "../net/mcp.js";
 import { resolveSeatHandle } from "../server/mcpSeatHandle.js";
 import { createLobbyTools } from "../server/mcpLobbyTools.js";
+import { AGENT_APM } from "../net/agentApm.js";
 
 /* ============================================================
    T-051 (FR-13): the first REAL MCP tools — list_matches/join_match/leave_match — closing the
@@ -48,6 +49,12 @@ test("list_matches reports every open match's PUBLIC shape — never a seat's re
   assert.equal(listed.id, match.id);
   assert.deepEqual(listed.seats, [{ kind: "open", taken: true }, { kind: "open", taken: false }]);
   assert.equal(JSON.stringify(listed).includes(match.seats[0].token), false, "a seat's real token must never appear in the public listing");
+});
+
+test("list_matches reports the published, fixed agent_apm_cap (T-056) — a server policy, not per-match data", async () => {
+  const mcp = mcpFor(createLobby());
+  const { body } = await callTool(mcp, "list_matches", {});
+  assert.equal(body.result.structuredContent.agent_apm_cap, AGENT_APM);
 });
 
 test("list_matches never lists a match that has already started", async () => {

@@ -268,6 +268,10 @@ test("every shipped browser module is reachable from index.html's entry point", 
     "server/mcpEventTools.js",
     // T-055: server/mcpResources.js — same class again.
     "server/mcpResources.js",
+    // T-056: net/agentApm.js — same class again (a net/ file, like net/mcp.js above, but only
+    // ever reached from tools/serve.js/server/mcpActionTools.js/server/mcpLobbyTools.js, never
+    // from any browser-side import chain).
+    "net/agentApm.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

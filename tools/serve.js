@@ -84,6 +84,7 @@ import { createActionTools } from "../server/mcpActionTools.js";
 import { createEventTools } from "../server/mcpEventTools.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 import { createGameResources } from "../server/mcpResources.js";
+import { AGENT_APM, createAgentApmGuard } from "../net/agentApm.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -246,7 +247,7 @@ export async function createAppServer() {
     tools: [
       ...createLobbyTools(lobby),
       ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
-      ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null),
+      ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null, matchId => liveMatches.get(matchId)?.apmGuard ?? null),
       ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
     ],
     // T-055: unit stats/build costs/counter triangle/tech tree — fully static, computed once at
@@ -304,7 +305,12 @@ export async function createAppServer() {
     // so its own seq counter and pending-reply map stay live for the worker's whole lifetime.
     const projCache = attachProjectionCache(worker);
     const cmdBridge = attachCommandBridge(worker);
-    liveMatches.set(match.id, { worker, wsMatch, projCache, cmdBridge });
+    // T-056: one APM guard per match, independent of the worker/engine entirely (net/agentApm.js's
+    // own header explains why it can't live in state.controllers the way the scripted AI's own
+    // budget does) — created here, once per match, so it persists across every issue_command call
+    // for this match's whole lifetime, the same lifecycle projCache/cmdBridge already have.
+    const apmGuard = createAgentApmGuard();
+    liveMatches.set(match.id, { worker, wsMatch, projCache, cmdBridge, apmGuard });
   }
 
   // T-035 (FR-4): "all seats filled" — every seat is either not "open" kind (an "ai"/"agent" seat
@@ -356,7 +362,10 @@ export async function createAppServer() {
   }
 
   function handleListMatches(req, res) {
-    respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch) });
+    // T-056: agent_apm_cap is a fixed server policy (net/agentApm.js), not per-match data — reported
+    // once here, the same as server/mcpLobbyTools.js's own list_matches tool, so a human deciding
+    // whether to join a match an agent might occupy can see the published rule up front.
+    respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch), agent_apm_cap: AGENT_APM });
   }
 
   async function handleJoinMatch(req, res, matchId) {
