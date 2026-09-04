@@ -293,6 +293,8 @@ export function createGameState(opts = {}) {
     over: false,
     winner: null,
     winReason: null,   // set by engine/victory.js finish() — why the match ended, once it does
+    eliminated: [],    // T-046: owners no longer standing (engine/victory.js checkWinCondition/surrender)
+    surrendered: [],   // T-046: the subset of eliminated who quit voluntarily
     seed: opts.seed ?? null,   // the match seed, if one was supplied — reproduces this whole game
     // The generation inputs, kept so a save can regenerate the (deterministic)
     // map from the seed instead of serialising the whole terrain/node table.

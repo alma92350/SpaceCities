@@ -324,6 +324,12 @@
  * @property {boolean} over
  * @property {string|null} winner
  * @property {string|null} [winReason]  why the match ended — "elimination" | "mutual-wipe-score" | "timeout-score" (engine/victory.js finish); unset for an Odyssey-sandbox finish (checkEndlessLoss/checkEndlessWin), which has no clock/score tiebreak to explain
+ * @property {string[]} [eliminated]   T-046: every owner no longer standing (lost its last Command
+ *   Center, or surrendered), monotonic — engine/victory.js checkWinCondition/surrender. Optional
+ *   here (lazily initialized by both) so a hand-built minimal test state never needs to set it.
+ * @property {string[]} [surrendered]  T-046: the subset of `eliminated` who quit voluntarily —
+ *   kept separate so a genuine same-tick mutual wipe can still resolve by score (the 2-seat
+ *   game's own existing behavior) while a surrendered seat can never win that tiebreak
  * @property {number|null} seed
  * @property {string} planetId
  * @property {number} sizeMult

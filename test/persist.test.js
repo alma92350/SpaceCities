@@ -5,6 +5,7 @@ import { mulberry32 } from "../engine/rng.js";
 import { tick } from "../engine/sim.js";
 import { issuePatrol } from "../engine/commands.js";
 import { serializeGame, deserializeGame, serializeGalaxy, deserializeGalaxy, SAVE_VERSION, GALAXY_SAVE_VERSION } from "../engine/persist.js";
+import { surrender } from "../engine/victory.js";
 import { createGalaxy, stepGalaxy } from "../engine/galaxy.js";
 import { sideMod, PLANET_MODIFIERS } from "../engine/map.js";
 
@@ -484,4 +485,38 @@ test("T-045: state.ai / state.playerAi (the live T-042 aliases) still resolve co
   assert.ok(loaded.ai, "state.ai must still resolve through the live alias into controllers.ai");
   assert.ok(loaded.playerAi, "state.playerAi must still resolve through the live alias into controllers.player");
   assert.equal(loaded.playerAi.strategy, "aggressive");
+});
+
+test("T-046: state.eliminated / state.surrendered round-trip through save/load — a reload can't resurrect a surrendered seat", () => {
+  const state = createGameState({
+    planetId: "ferros", seed: 14,
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    ],
+  });
+  surrender(state, "rebels");
+  assert.deepEqual(state.eliminated, ["rebels"]);
+  assert.deepEqual(state.surrendered, ["rebels"]);
+
+  const loaded = deserializeGame(serializeGame(state));
+
+  assert.deepEqual(loaded.eliminated, ["rebels"], "an eliminated seat must not silently un-eliminate on reload");
+  assert.deepEqual(loaded.surrendered, ["rebels"], "a surrendered seat must not silently un-surrender on reload");
+  // The rebels' own Command Center still physically exists (surrender doesn't destroy anything) —
+  // this is exactly the case a reload COULD get wrong if it only re-derived elimination from the
+  // board instead of trusting the persisted record.
+  assert.ok([...loaded.buildings.values()].some(b => b.owner === "rebels" && b.type === "command"),
+    "fixture sanity: rebels' base is untouched by surrender, so re-deriving from the board alone would wrongly un-surrender it");
+});
+
+test("T-046: an old save with no eliminated/surrendered fields at all loads as empty arrays, not a crash", () => {
+  const state = createGameState({ planetId: "ferros", seed: 15 });
+  const save = serializeGame(state);
+  delete save.eliminated;
+  delete save.surrendered;
+  const loaded = deserializeGame(save);
+  assert.deepEqual(loaded.eliminated, []);
+  assert.deepEqual(loaded.surrendered, []);
 });

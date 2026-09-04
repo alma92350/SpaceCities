@@ -578,10 +578,12 @@ function serPlanet(state) {
     // additive: why the match ended (engine/victory.js finish) — default null, same as an
     // in-progress or pre-this-feature save; no SAVE_VERSION bump per CONTRIBUTING.
     winReason: state.winReason ?? null,
-    // One entry per side, in state.owners order — for the player-vs-ai pair this
-    // serialises as { player, ai }, byte-identical to the old literal. The save
-    // shape stays two-keyed (fog/fogAI below likewise): a save FORMAT built for N
-    // sides is separate, deferred work.
+    // T-046: additive, same reasoning as winReason — an old save without these simply has nobody
+    // eliminated/surrendered yet, which is exactly what an empty array already means at runtime.
+    eliminated: [...(state.eliminated || [])],
+    surrendered: [...(state.surrendered || [])],
+    // One entry per side, in state.owners order (T-045: genuinely N-keyed on both the save and
+    // load sides now, not just the mirrored player/ai pair).
     players: Object.fromEntries((state.owners || Object.keys(state.players)).map(id => [id, serPlayer(state.players[id])])),
     units: [...state.units.values()].map(sanitizeUnitForExternal),
     buildings: [...state.buildings.values()].map(sanitizeBuildingForExternal),
@@ -764,6 +766,11 @@ function rehydratePlanet(P) {
     nextEntityId: 0,   // placeholder — overwritten just below, once units/buildings exist to scan (T-016)
     over: P.over, winner: P.winner,
     winReason: P.winReason ?? null,   // additive — why the match ended (engine/victory.js finish); null before/absent
+    // T-046: additive, same posture as winReason above — filtered to real owners only, so a
+    // tampered/stale save can't inject a fake id that later trips up victory.js's own owner-keyed
+    // checks (Array.includes against a bogus id is harmless, but there's no reason to carry one).
+    eliminated: Array.isArray(P.eliminated) ? P.eliminated.filter(o => owners.includes(o)) : [],
+    surrendered: Array.isArray(P.surrendered) ? P.surrendered.filter(o => owners.includes(o)) : [],
     seed: P.seed, planetId: P.planetId, sizeMult, resourceMult, swapAsym, matchTimeLimit, popCap,
     endless: !!P.endless,
     map,

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGameState, makeBuilding, makeUnit } from "../engine/state.js";
-import { checkWinCondition, playerScore, scoreBreakdown, DEFAULT_MATCH_TIME_LIMIT } from "../engine/victory.js";
+import { checkWinCondition, playerScore, scoreBreakdown, surrender, DEFAULT_MATCH_TIME_LIMIT } from "../engine/victory.js";
 import { UNITS, BUILDINGS } from "../engine/entities.js";
 
 function commandCenterOf(state, owner) {
@@ -206,4 +206,137 @@ test("scoreBreakdown of a side with nothing banked, fielded, or built is all zer
   const bd = scoreBreakdown(state, "player");
 
   assert.deepEqual(bd, { bank: 0, army: 0, structures: 0, total: 0 });
+});
+
+/* ============================================================
+   T-046 (ADR-0008): elimination events, surrender, and last-seat-standing victory at N.
+
+   FR-6 itself ("last Command Center standing... generalized to N seats as last-seat-standing")
+   was already true of checkWinCondition before this task — standing.length===1 already picks
+   that side, for any N, and T-041's own "4-seat AI-only match reaches a winner" test already
+   proved it end-to-end. What's NEW here: a seat dropping out mid-match (3+ seats, one loses its
+   last Command Center) must not end the match outright the way it does at N=2 — it must fire a
+   one-time "eliminated" event and let the match CONTINUE among whoever's left, and a player must
+   be able to voluntarily concede (surrender) without needing to lose a Command Center at all.
+   state.eliminated tracks every owner no longer standing (either reason), monotonically —
+   skirmish has no way to found a NEW Command Center once your last one is gone (that is
+   Odyssey's own colony-ship mechanic, not this file's concern), so "no longer standing" is a
+   one-way transition, same as the 2-seat game already assumed. state.surrendered is the subset
+   who quit voluntarily — kept separate so scoreLeader can still let a genuinely mutual, same-tick
+   wipe resolve by score (the existing 2-seat behavior, byte-identical below) while a surrendered
+   seat can never win that tiebreak just because everyone else eventually died too.
+   ============================================================ */
+
+function fourOwnerState(seed = 1) {
+  return createGameState({
+    planetId: "ferros", seed, rng: () => 0.5,
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+      { id: "raiders", faction: "neutral", isAI: true, color: "#a78bfa" },
+    ],
+  });
+}
+
+test("T-046: a seat losing its last Command Center in a 3+ seat match is eliminated, not game-ending", () => {
+  const state = fourOwnerState();
+  state.buildings.delete(commandCenterOf(state, "rebels").id);
+
+  checkWinCondition(state);
+
+  assert.equal(state.over, false, "three other seats are still standing — the match continues");
+  assert.deepEqual(state.eliminated, ["rebels"]);
+  const ev = state.events.filter(e => e.type === "eliminated");
+  assert.deepEqual(ev, [{ type: "eliminated", owner: "rebels", reason: "defeat" }]);
+});
+
+test("T-046: the elimination event fires exactly once, not on every subsequent tick", () => {
+  const state = fourOwnerState();
+  state.buildings.delete(commandCenterOf(state, "rebels").id);
+
+  checkWinCondition(state);
+  checkWinCondition(state);
+  checkWinCondition(state);
+
+  const ev = state.events.filter(e => e.type === "eliminated" && e.owner === "rebels");
+  assert.equal(ev.length, 1, "an already-eliminated seat must not re-fire the event every tick");
+});
+
+test("T-046: last-seat-standing still wins outright at N — the same rule FR-6 already generalizes", () => {
+  const state = fourOwnerState();
+  for (const id of ["ai", "rebels", "raiders"]) state.buildings.delete(commandCenterOf(state, id).id);
+
+  checkWinCondition(state);
+
+  assert.equal(state.over, true);
+  assert.equal(state.winner, "player");
+  assert.equal(state.winReason, "elimination");
+  assert.deepEqual(state.eliminated.sort(), ["ai", "raiders", "rebels"]);
+});
+
+test("T-046: surrender() eliminates a seat immediately, with real Command Centers/units still on the board", () => {
+  const state = fourOwnerState();
+  assert.ok(commandCenterOf(state, "rebels"), "fixture sanity: rebels still has a real base");
+
+  surrender(state, "rebels");
+
+  assert.deepEqual(state.eliminated, ["rebels"]);
+  assert.deepEqual(state.surrendered, ["rebels"]);
+  assert.deepEqual(state.events.filter(e => e.type === "eliminated"),
+    [{ type: "eliminated", owner: "rebels", reason: "surrender" }]);
+  assert.equal(state.over, false, "surrendering doesn't end the match by itself — checkWinCondition still decides that");
+
+  checkWinCondition(state);
+  assert.equal(state.over, false, "three seats remain after one surrender — the match keeps going");
+});
+
+test("T-046: surrender() is idempotent — surrendering twice doesn't re-fire the event or duplicate the record", () => {
+  const state = fourOwnerState();
+  surrender(state, "rebels");
+  surrender(state, "rebels");
+  assert.deepEqual(state.eliminated, ["rebels"]);
+  assert.equal(state.events.filter(e => e.type === "eliminated").length, 1);
+});
+
+test("T-046: surrender() on the game's last standing seat lets checkWinCondition finish it on the next check", () => {
+  const state = createGameState({ planetId: "ferros" });
+  surrender(state, "player");
+  checkWinCondition(state);
+  assert.equal(state.over, true);
+  assert.equal(state.winner, "ai");
+  assert.equal(state.winReason, "elimination");
+});
+
+test("T-046: a surrendered seat can never win the mutual-wipe score tiebreak, even with the highest score", () => {
+  const state = fourOwnerState();
+  // rebels surrenders early, but is left sitting on a big banked stockpile — a real save/score
+  // trap if surrender didn't disqualify it from the tiebreak.
+  state.players.rebels.resources = { ore: 5000, crystals: 5000, radioactives: 5000 };
+  surrender(state, "rebels");
+  assert.ok(playerScore(state, "rebels") > playerScore(state, "player"), "fixture sanity: rebels would win on raw score alone");
+
+  // player, ai, and raiders all lose their last Command Center on the same tick — a genuine
+  // mutual wipe among whoever was still actually playing.
+  for (const id of ["player", "ai", "raiders"]) state.buildings.delete(commandCenterOf(state, id).id);
+  checkWinCondition(state);
+
+  assert.equal(state.over, true);
+  assert.notEqual(state.winner, "rebels", "a surrendered seat must never win a score tiebreak it already forfeited");
+  assert.ok(["player", "ai", "raiders"].includes(state.winner), "the winner must come from the seats that were actually still contesting the match");
+});
+
+test("T-046: the classic 2-seat mutual-wipe-by-score behavior is untouched (byte-identical regression guard)", () => {
+  const state = createGameState({ planetId: "ferros", rng: () => 0.5 });
+  state.units.clear();
+  state.buildings.clear();
+  state.players.player.resources = { ore: 0, crystals: 0, radioactives: 0 };
+  state.players.ai.resources = { ore: 0, crystals: 0, radioactives: 0 };
+  for (let i = 0; i < 5; i++) { const u = makeUnit("skiff", "ai", 100 + i, 100); state.units.set(u.id, u); }
+
+  checkWinCondition(state);
+
+  assert.equal(state.over, true);
+  assert.equal(state.winner, "ai", "with nobody surrendered, a genuine mutual wipe still resolves by score exactly as before");
+  assert.equal(state.winReason, "mutual-wipe-score");
 });
