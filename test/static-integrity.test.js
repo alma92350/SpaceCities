@@ -256,6 +256,10 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // T-051: server/mcpLobbyTools.js's only real caller is tools/serve.js's own mcpServer
     // construction — same class as net/mcp.js/server/mcpSeatHandle.js just above.
     "server/mcpLobbyTools.js",
+    // T-052: server/mcpObservationTools.js/server/mcpObservationCache.js — same class again,
+    // both only ever reached from tools/serve.js's own mcpServer/spawnWorkerFor wiring.
+    "server/mcpObservationTools.js",
+    "server/mcpObservationCache.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

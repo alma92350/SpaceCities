@@ -85,3 +85,12 @@ export function withSeat(lobby, handler) {
     return handler({ ...args, seat: resolved });
   };
 }
+
+// T-051/T-052/T-053: the one shape every tool's own business-rule rejection uses — a TOOL
+// EXECUTION error (isError:true, HTTP 200, never a JSON-RPC protocol error), carrying a short
+// machine-readable code in the text so a model can read e.g. "seat-taken" or "no-such-match" and
+// decide what to try next, rather than a generic failure it can only retry blindly. Shared here
+// (not duplicated per tool file) the moment a SECOND file needed the identical shape.
+export function rejection(code) {
+  return { content: [{ type: "text", text: `Could not complete: ${code}` }], isError: true };
+}

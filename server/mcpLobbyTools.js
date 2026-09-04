@@ -23,14 +23,7 @@
 "use strict";
 
 import { publicMatch } from "./lobby.js";
-import { mintSeatHandle, withSeat } from "./mcpSeatHandle.js";
-
-// A tool execution error (isError:true) carrying the lobby's own rejection code in the text — a
-// model can read "seat-taken"/"already-started"/"no-such-match" and decide what to try next
-// (list_matches again, a different seat, a different match) far better than a generic failure.
-function rejection(code) {
-  return { content: [{ type: "text", text: `Could not complete: ${code}` }], isError: true };
-}
+import { mintSeatHandle, withSeat, rejection } from "./mcpSeatHandle.js";
 
 /** @param {Object} lobby a createLobby() instance (server/lobby.js) */
 export function createLobbyTools(lobby) {

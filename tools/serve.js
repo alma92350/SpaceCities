@@ -78,6 +78,8 @@ import { createLobby, OWNER_IDS, publicMatch } from "../server/lobby.js";
 import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
 import { createMcpServer } from "../net/mcp.js";
 import { createLobbyTools } from "../server/mcpLobbyTools.js";
+import { createObservationTools } from "../server/mcpObservationTools.js";
+import { attachProjectionCache } from "../server/mcpObservationCache.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -222,12 +224,23 @@ function readRawBody(req) {
 export async function createAppServer() {
   const dataDir = process.env.DATA_DIR || null;   // production only — same gate dataProbeResult/__bench already use above
   const lobby = dataDir ? restoreLobby(dataDir) : createLobby();
-  // T-051: the real lobby tools (list_matches/join_match/leave_match), closing over this SAME
-  // `lobby` the HTTP handlers below already share — an MCP agent and a browser client see and
-  // mutate the identical lobby state, never two independent copies. T-052/T-053 append the real
-  // observation/action tools here once they exist, closing over `liveMatches` the same way.
-  const mcpServer = createMcpServer({ serverInfo: { name: "SpaceCities", version: "1.1.0" }, tools: createLobbyTools(lobby) });
-  const liveMatches = new Map();   // matchId -> {worker, wsMatch} — only matches THIS boot actually spawned a worker for
+  // matchId -> {worker, wsMatch, projCache} — only matches THIS boot actually spawned a worker
+  // for. Declared BEFORE mcpServer below so the observation tools' own getCache can close over
+  // this SAME map by reference — matches start (and get an entry here) well after boot, so the
+  // tools need the live, growing Map itself, never a snapshot taken at construction time.
+  const liveMatches = new Map();
+  // T-051/T-052: the real lobby tools (list_matches/join_match/leave_match) and observation tools
+  // (get_situation/list_entities/get_map_overview/get_tech_options), closing over this SAME
+  // `lobby`/`liveMatches` the HTTP handlers below already share — an MCP agent and a browser
+  // client see and mutate the identical lobby/match state, never two independent copies. T-053
+  // appends the real action tools here once they exist, the same way.
+  const mcpServer = createMcpServer({
+    serverInfo: { name: "SpaceCities", version: "1.1.0" },
+    tools: [
+      ...createLobbyTools(lobby),
+      ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    ],
+  });
 
   // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by
   // this match's own id (server/matchWorker.js's workerData.matchId override, T-034) so the lobby's
@@ -270,7 +283,13 @@ export async function createAppServer() {
       // defaults to enabled.
       spectatorsEnabled: match.config.spectatorsEnabled !== false,
     });
-    liveMatches.set(match.id, { worker, wsMatch });
+    // T-052: an independent listener on the SAME worker `attachWsMatchWorker` already listens
+    // to — Node's EventEmitter supports any number of "message" listeners with no interference
+    // between them, so this never competes with or changes that relay. Remembers only the
+    // LATEST per-seat projection so an MCP observation tool can read it on demand, without ever
+    // needing a live WebSocket connection of its own.
+    const projCache = attachProjectionCache(worker);
+    liveMatches.set(match.id, { worker, wsMatch, projCache });
   }
 
   // T-035 (FR-4): "all seats filled" — every seat is either not "open" kind (an "ai"/"agent" seat
