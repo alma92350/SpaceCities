@@ -156,6 +156,40 @@ test("T-017: without state, an \"ai\" squad still gets the flat AI spread — le
   assert.equal(units[0].order.offsetX, undefined, "no leader/follower formation without state — byte-identical to before this fix");
 });
 
+test("T-048: with state passed, a REAL AI-controlled 3rd-seat (\"rebels\") squad gets the flat AI spread, not a human formation", () => {
+  // dispatchFormation's own local isHumanControlled(state, owner) — commands.js can't import the
+  // real one from aiCommon.js (an import cycle), so it hand-rolls its own — used to be a bare
+  // `owner === "ai" ? state.ai : owner === "player" ? state.playerAi : null` ternary: for any 3rd+
+  // owner that expression always falls through to `null`, so `controller == null` was always TRUE
+  // regardless of whether that seat is actually AI-driven. A human seat 3 happened to read
+  // "correctly" by accident (still true); an AI-FILLED seat 3, like this one, did not — its real,
+  // live AI controller was invisible to this check, so its squads incorrectly got the human
+  // leader/follower formation treatment instead of the flat per-unit AI spread.
+  const state = createGameState({
+    planetId: "ferros",
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    ],
+  });
+  assert.ok(state.controllers.rebels, "fixture sanity: rebels is really AI-controlled, not a null/human seat");
+
+  const units = [
+    { id: "L", type: "skiff", x: 0, y: 0, owner: "rebels", order: null },
+    { id: "F1", type: "breacher", x: 0, y: 0, owner: "rebels", order: null },
+  ];
+  issueMove(units, 1000, 0, false, { shape: "grid" }, state);
+
+  // The LEADER always gets a plain xy order either way (see the units.length===1 branch and the
+  // multi-unit leaderOrder both above) — offsetX only ever appears on a FOLLOWER's order, and only
+  // via the human leader/follower branch (dispatchFormation's own "follow-leader" order below), so
+  // it's the follower, not the leader, that actually distinguishes the two branches — exactly what
+  // the precedent "T-017: without state, an 'ai' squad still gets the flat AI spread" test above
+  // checks too.
+  assert.equal(units[1].order.offsetX, undefined, "an AI-controlled 3rd seat must get the flat spread, exactly like AI-controlled \"ai\" does");
+});
+
 test("issueAttack sends every unit at the same explicit target id (focus fire, no spreading)", () => {
   const units = dummyUnits(3);
   issueAttack(units, "target-1");
