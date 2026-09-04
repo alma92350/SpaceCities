@@ -315,33 +315,29 @@ test("T-043: chooseAttackTarget() picks the nearest seen Command Center across E
 });
 
 test("T-043: chooseAttackTarget()'s hunting fallback degrades safely when an opponent has no known start yet", () => {
-  // Nothing placed, nothing seen. From "ai"'s side, opponentsOf gives ["player","rebels"], but
-  // state.map.bases is still 2-keyed pre-T-044 (basePositions is a seeding-time-only stopgap — see
-  // engine/state.js — it never writes into map.bases), so "rebels" has no real entry there at all.
-  // The fallback must skip it, not crash on `undefined.x`, and fall back on the one it does know.
-  const s = world3();
-  assert.equal(s.map.bases.rebels, undefined, "fixture sanity: T-044 hasn't landed a real N-position map generator yet");
+  // Built by SPLICING a third owner onto an otherwise-plain 2-owner state — the same convention
+  // test/ownerScaffold.test.js's own pre-existing "rebels" tests use — rather than via ownerDefs:
+  // T-044 landed a real radial map generator that now gives every ownerDefs-supplied owner a
+  // genuine base, so "an opponent with no known start" can no longer be reached that way.
+  // Splicing keeps state.map.bases at its original 2-key shape untouched, reproducing the
+  // scenario this guard exists for. Nothing placed, nothing seen.
+  const s = createGameState({ planetId: "ferros" });
+  s.owners.push("rebels");
+  assert.equal(s.map.bases.rebels, undefined, "fixture sanity: a spliced-on owner has no map.bases entry of its own");
   const target = chooseAttackTarget(s, null, "ai");
   assert.deepEqual(target, { x: s.map.bases.player.x, y: s.map.bases.player.y },
     "with only one opponent's start actually known, the fallback must use it rather than throw");
 });
 
-test("T-043: updateScout() doesn't crash when its primary opponent has no known base position yet (pre-T-044)", () => {
-  // ownerDefs order matters here: opponentsOf keeps state.owners' own relative order, and
-  // ctx.enemyOwner (engine/ai.js's aiContext) is that list's FIRST entry — so listing "rebels"
-  // before "player" makes it "ai"'s primary opponent, and map.bases (still 2-keyed pre-T-044,
-  // engine/state.js's own basePositions never writes back into it) has no entry for it at all.
-  const s = createGameState({
-    planetId: "ferros",
-    ownerDefs: [
-      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
-      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
-      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
-    ],
-    basePositions: { rebels: { x: 900, y: 300 } },
-  });
+test("T-043: updateScout() doesn't crash when its primary opponent has no known base position yet", () => {
+  // Same splice as above (state.map.bases must stay 2-keyed — T-044's real generator would
+  // otherwise give a THIRD ownerDefs-supplied owner a genuine base). Reordering state.owners
+  // puts "rebels" before "player" so opponentsOf(s,"ai")[0] (ai.js's aiContext) — "ai"'s PRIMARY
+  // opponent — resolves to it, and state.map.bases never gets an entry for it.
+  const s = createGameState({ planetId: "ferros" });
+  s.owners = ["rebels", "player", "ai"];
   assert.deepEqual(opponentsOf(s, "ai"), ["rebels", "player"], "fixture sanity: rebels must be ai's PRIMARY (first) opponent here");
-  assert.equal(s.map.bases.rebels, undefined, "fixture sanity: rebels has no real map.bases entry yet (pre-T-044)");
+  assert.equal(s.map.bases.rebels, undefined, "fixture sanity: rebels has no real map.bases entry");
 
   const army = [];
   for (let i = 0; i < 5; i++) {
