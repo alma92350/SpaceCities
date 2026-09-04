@@ -266,6 +266,8 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // T-054: server/mcpEventTools.js — same class again, only ever reached from tools/serve.js's
     // own mcpServer wiring.
     "server/mcpEventTools.js",
+    // T-055: server/mcpResources.js — same class again.
+    "server/mcpResources.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

@@ -83,6 +83,7 @@ import { attachProjectionCache } from "../server/mcpObservationCache.js";
 import { createActionTools } from "../server/mcpActionTools.js";
 import { createEventTools } from "../server/mcpEventTools.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
+import { createGameResources } from "../server/mcpResources.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -248,6 +249,9 @@ export async function createAppServer() {
       ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null),
       ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
     ],
+    // T-055: unit stats/build costs/counter triangle/tech tree — fully static, computed once at
+    // boot (createGameResources takes no lobby/match dependency at all, unlike every tool above).
+    resources: createGameResources(),
   });
 
   // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by

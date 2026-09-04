@@ -121,6 +121,94 @@ test("tools/list paginates when the registry is larger than one page", async () 
   assert.equal(page3.body.result.nextCursor, undefined, "the last page carries no further cursor");
 });
 
+/* ============================================================
+   T-055 (FR-16): resources/list + resources/read, verified against the SAME live spec fetch this
+   task's own research demanded (modelcontextprotocol.io/specification/2026-07-28/server/resources)
+   rather than assumed from an earlier MCP shape or from tools/list's own neighboring pattern. Two
+   real, spec-mandated differences from tools/call this file must get right: (1) a resource is
+   addressed by `uri`, not `name` — T-049's own NAME_HEADER_METHODS already anticipated this
+   ("resources/read... even though this file's own tool registry never serves them" — see its own
+   comment) and req()'s own helper above already mirrors params.uri onto Mcp-Name for exactly this
+   reason; (2) "resource not found" is a REAL JSON-RPC protocol error (code -32602, Invalid Params,
+   with `data:{uri}`) per the spec's own "Error Handling" section ("Servers MUST NOT return an
+   empty contents array for a non-existent resource... ambiguous") — NOT an isError:true tool
+   -execution-error result the way an unknown tool name or a rejected tool call is.
+   ============================================================ */
+
+function readmeResource() {
+  return { uri: "game://readme", name: "readme", title: "Readme", description: "A tiny static resource", mimeType: "text/plain", text: "hello" };
+}
+
+test("server/discover omits the resources capability entirely when no resources are registered — unchanged from T-049", async () => {
+  const mcp = createMcpServer({ serverInfo: { name: "S", version: "1" } });
+  const { body } = await mcp.handleRequest(req({ method: "server/discover" }));
+  assert.deepEqual(body.result.capabilities, { tools: {} });
+});
+
+test("server/discover declares the resources capability once at least one resource is registered", async () => {
+  const mcp = createMcpServer({ serverInfo: { name: "S", version: "1" }, resources: [readmeResource()] });
+  const { body } = await mcp.handleRequest(req({ method: "server/discover" }));
+  assert.deepEqual(body.result.capabilities, { tools: {}, resources: {} });
+});
+
+test("resources/list returns an empty list for a server with no registered resources", async () => {
+  const mcp = createMcpServer();
+  const { body } = await mcp.handleRequest(req({ method: "resources/list" }));
+  assert.equal(body.result.resultType, "complete");
+  assert.deepEqual(body.result.resources, []);
+  assert.equal(body.result.nextCursor, undefined);
+});
+
+test("resources/list returns every registered resource's metadata, WITHOUT its content", async () => {
+  const mcp = createMcpServer({ resources: [readmeResource()] });
+  const { body } = await mcp.handleRequest(req({ method: "resources/list" }));
+  assert.deepEqual(body.result.resources, [
+    { uri: "game://readme", name: "readme", title: "Readme", description: "A tiny static resource", mimeType: "text/plain" },
+  ]);
+  assert.equal(body.result.resources[0].text, undefined, "resources/list is metadata only — resources/read is where content comes back");
+});
+
+test("resources/list paginates exactly like tools/list, same cursor mechanism", async () => {
+  const resources = Array.from({ length: 5 }, (_, i) => ({ uri: `game://r${i}`, name: `r${i}`, mimeType: "text/plain", text: "x" }));
+  const mcp = createMcpServer({ resources, pageSize: 2 });
+
+  const page1 = await mcp.handleRequest(req({ method: "resources/list" }));
+  assert.deepEqual(page1.body.result.resources.map(r => r.uri), ["game://r0", "game://r1"]);
+  assert.ok(page1.body.result.nextCursor);
+
+  const page2 = await mcp.handleRequest(req({ method: "resources/list", params: { cursor: page1.body.result.nextCursor } }));
+  assert.deepEqual(page2.body.result.resources.map(r => r.uri), ["game://r2", "game://r3"]);
+
+  const page3 = await mcp.handleRequest(req({ method: "resources/list", params: { cursor: page2.body.result.nextCursor } }));
+  assert.deepEqual(page3.body.result.resources.map(r => r.uri), ["game://r4"]);
+  assert.equal(page3.body.result.nextCursor, undefined);
+});
+
+test("resources/read returns the matching resource's own content, keyed by uri (not name)", async () => {
+  const mcp = createMcpServer({ resources: [readmeResource()] });
+  const { status, body } = await mcp.handleRequest(req({ method: "resources/read", params: { uri: "game://readme" } }));
+  assert.equal(status, 200);
+  assert.equal(body.result.resultType, "complete");
+  assert.deepEqual(body.result.contents, [{ uri: "game://readme", mimeType: "text/plain", text: "hello" }]);
+});
+
+test("resources/read on an unknown uri is a REAL JSON-RPC error (-32602), never an isError:true result and never an empty contents array", async () => {
+  const mcp = createMcpServer({ resources: [readmeResource()] });
+  const { status, body } = await mcp.handleRequest(req({ method: "resources/read", params: { uri: "game://nonexistent" } }));
+  assert.equal(status, 400);
+  assert.equal(body.result, undefined);
+  assert.equal(body.error.code, ERROR_CODES.INVALID_PARAMS);
+  assert.deepEqual(body.error.data, { uri: "game://nonexistent" });
+});
+
+test("resources/read's own Mcp-Name header must match params.uri, the same NAME_HEADER_METHODS path tools/call already goes through", async () => {
+  const mcp = createMcpServer({ resources: [readmeResource()] });
+  const r = req({ method: "resources/read", params: { uri: "game://readme" }, headers: { "mcp-name": "game://some-other-uri" } });
+  const { status, body } = await mcp.handleRequest(r);
+  assert.equal(status, 400);
+  assert.equal(body.error.code, ERROR_CODES.HEADER_MISMATCH);
+});
+
 test("tools/call invokes the matching tool's handler and wraps its result", async () => {
   const mcp = createMcpServer({ tools: [echoTool()] });
   const { status, body } = await mcp.handleRequest(req({ method: "tools/call", params: { name: "echo", arguments: { text: "hi" } } }));

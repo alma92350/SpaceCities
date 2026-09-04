@@ -27,14 +27,29 @@
    tools/call dispatch against a caller-supplied tool registry. It ships
    with NO game-specific tools of its own; T-051 (lobby tools), T-052
    (observation tools), and T-053 (action tools) register the real ones via
-   this same `tools` registry. Sampling/elicitation (MRTR), resources,
-   prompts, and subscriptions/listen are out of this task's scope — nothing
-   in Phase 6's own tool set needs a server-initiated round-trip back into
-   the agent's own LLM, and T-054's own "wait_for_event" row asks for a
-   single bounded-timeout response, not a long-lived SSE stream, so this
-   file never needs to emit one: every response here is a single JSON
-   object, which is fully spec-compliant (the spec lets a server choose
+   this same `tools` registry. Sampling/elicitation (MRTR), prompts, and
+   subscriptions/listen are out of this task's scope — nothing in Phase 6's
+   own tool set needs a server-initiated round-trip back into the agent's
+   own LLM, and T-054's own "wait_for_event" row asks for a single
+   bounded-timeout response, not a long-lived SSE stream, so this file
+   never needs to emit one: every response here is a single JSON object,
+   which is fully spec-compliant (the spec lets a server choose
    `application/json` for every request; nothing requires SSE ever be used).
+
+   T-055 (FR-16) added resources/list + resources/read (re-fetched and
+   verified against the live spec's own server/resources page before
+   writing a line of it, same discipline as T-049's own transport work) —
+   a second, PARALLEL registry alongside `tools`, since a resource is a
+   fundamentally different kind of thing: addressed by `uri` rather than
+   `name`, with no `handler` to invoke (this server's own resources are
+   fully static, precomputed content, never a function call), and "not
+   found" is a REAL JSON-RPC protocol error (-32602) rather than an
+   isError:true tool-execution result — the spec is explicit an empty
+   `contents` array must never stand in for "no such resource." Resource
+   templates, list-changed notifications, and subscriptions are still out
+   of scope: nothing this port exposes is parameterized or ever changes
+   after boot (unit stats, the counter triangle, build costs, the tech
+   tree — all fixed at the code level, not per-match data).
    ============================================================ */
 
 "use strict";
@@ -80,16 +95,21 @@ const decodeCursor = c => { const n = Number(Buffer.from(c, "base64").toString("
 /**
  * @param {Object} opts
  * @param {Array<{name:string, title?:string, description:string, inputSchema:Object, outputSchema?:Object, handler:(args:Object)=>(Object|Promise<Object>)}>} [opts.tools]
+ * @param {Array<{uri:string, name:string, title?:string, description?:string, mimeType?:string, text:string}>} [opts.resources]
+ *   fully static resources — this server never needs a per-read handler because none of what T-055
+ *   exposes (unit stats, the counter triangle, build costs, the tech tree) is per-match or
+ *   per-caller data; every resource's own `text` is fixed content computed once by the caller.
  * @param {{name:string, version:string}} [opts.serverInfo]
  * @param {string} [opts.instructions]
  * @param {string[]|null} [opts.allowedOrigins] a null/omitted allowlist accepts every Origin — the
  *   right default for a publicly-reachable server with no single "home" origin to protect (the
  *   DNS-rebinding attack Origin validation exists for targets a LOCALLY-bound server); set this to
  *   lock the endpoint down to specific known front ends once one exists.
- * @param {number} [opts.pageSize] tools/list page size, default generous since Phase 6's own tool
- *   count is small — configurable so the pagination MECHANISM itself is testable at a small size.
+ * @param {number} [opts.pageSize] tools/list AND resources/list page size, default generous since
+ *   Phase 6's own tool/resource counts are small — configurable so the pagination MECHANISM itself
+ *   is testable at a small size.
  */
-export function createMcpServer({ tools = [], serverInfo, instructions, allowedOrigins = null, pageSize = 50 } = {}) {
+export function createMcpServer({ tools = [], resources = [], serverInfo, instructions, allowedOrigins = null, pageSize = 50 } = {}) {
   const toolsByName = new Map(tools.map(t => [t.name, t]));
   const toolList = tools.map(({ name, title, description, inputSchema, outputSchema }) => {
     const def = { name, description, inputSchema };
@@ -98,11 +118,28 @@ export function createMcpServer({ tools = [], serverInfo, instructions, allowedO
     return def;
   });
 
+  const resourcesByUri = new Map(resources.map(r => [r.uri, r]));
+  // resources/list is metadata ONLY (spec's own example: no `text` on a listed entry) — the
+  // content itself is exactly what resources/read is for.
+  const resourceList = resources.map(({ uri, name, title, description, mimeType }) => {
+    const def = { uri, name };
+    if (title !== undefined) def.title = title;
+    if (description !== undefined) def.description = description;
+    if (mimeType !== undefined) def.mimeType = mimeType;
+    return def;
+  });
+
   async function dispatch(method, params, id) {
     if (method === "server/discover") {
+      const capabilities = { tools: {} };
+      // Only declared once something is actually registered — a server constructed with no
+      // resources genuinely doesn't support the capability yet, and this keeps every pre-existing
+      // caller (every tool-only server built before T-055) getting the exact same capabilities
+      // shape it always has.
+      if (resources.length > 0) capabilities.resources = {};
       return resultResponse(id, "complete", {
         supportedVersions: [PROTOCOL_VERSION],
-        capabilities: { tools: {} },
+        capabilities,
         ...(instructions !== undefined ? { instructions } : {}),
       }, serverInfo);
     }
@@ -114,6 +151,26 @@ export function createMcpServer({ tools = [], serverInfo, instructions, allowedO
       const payload = { tools: page };
       if (nextCursor !== undefined) payload.nextCursor = nextCursor;
       return resultResponse(id, "complete", payload, serverInfo);
+    }
+
+    if (method === "resources/list") {
+      const start = typeof params.cursor === "string" ? decodeCursor(params.cursor) : 0;
+      const page = resourceList.slice(start, start + pageSize);
+      const nextCursor = start + pageSize < resourceList.length ? encodeCursor(start + pageSize) : undefined;
+      const payload = { resources: page };
+      if (nextCursor !== undefined) payload.nextCursor = nextCursor;
+      return resultResponse(id, "complete", payload, serverInfo);
+    }
+
+    if (method === "resources/read") {
+      const resource = resourcesByUri.get(params.uri);
+      // Spec's own "Error Handling" section: a missing resource is a REAL JSON-RPC error
+      // (-32602), never an empty `contents` array — that would be ambiguous with "this resource
+      // exists but has no content," which none of this server's own resources ever are.
+      if (!resource) return errorResponse(400, id, ERROR_CODES.INVALID_PARAMS, "Resource not found", { uri: params.uri });
+      const content = { uri: resource.uri, text: resource.text };
+      if (resource.mimeType !== undefined) content.mimeType = resource.mimeType;
+      return resultResponse(id, "complete", { contents: [content] }, serverInfo);
     }
 
     if (method === "tools/call") {

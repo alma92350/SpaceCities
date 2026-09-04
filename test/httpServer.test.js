@@ -119,7 +119,11 @@ test("T-049: POST /mcp speaks real Streamable HTTP + JSON-RPC 2.0 (protocol revi
     const json = JSON.parse(res.body);
     assert.equal(json.result.resultType, "complete");
     assert.deepEqual(json.result.supportedVersions, [PROTOCOL_VERSION]);
-    assert.deepEqual(json.result.capabilities, { tools: {} });
+    // T-055: the real createAppServer() now registers real static resources (unit stats, the
+    // counter triangle, build costs, the tech tree), so its own server/discover capabilities
+    // genuinely include resources:{} now — see net/mcp.test.js for the capability-declaration
+    // mechanism itself (only ever declared once something is actually registered).
+    assert.deepEqual(json.result.capabilities, { tools: {}, resources: {} });
     assert.deepEqual(json.result._meta["io.modelcontextprotocol/serverInfo"], { name: "SpaceCities", version: "1.1.0" });
   });
 });
