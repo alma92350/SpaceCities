@@ -410,6 +410,51 @@ test("GET /api/matches exposes spectatorsEnabled in the public listing, so a cli
   });
 });
 
+/* ============================================================
+   T-059 (FR-22): GET /api/results — a match's own final outcome, recorded once its worker
+   reports over:true, independent of the raw engine snapshot (which stops the instant a match
+   ends — server/matchWorker.js's own header). matchTimeLimit gives a REAL, fast, deterministic
+   way to end a match in a test without inventing a special test-only trigger: engine/victory.js's
+   own checkWinCondition ends it via "timeout-score" the moment state.time reaches the limit,
+   exactly the same path a real long match eventually hits on its own.
+   ============================================================ */
+
+test("GET /api/results starts empty, before any match has ever ended", async () => {
+  await withApp(async (app, port) => {
+    const res = await get(port, "/api/results");
+    assert.equal(res.status, 200);
+    assert.deepEqual(JSON.parse(res.body).results, []);
+  });
+});
+
+test("a real match ending via matchTimeLimit is recorded and reported by GET /api/results", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", {
+      planetId: "ferros", seatKinds: ["open", "ai"], matchTimeLimit: 0.2,
+    });
+    assert.equal(created.json.started, true, "fixture sanity: an [open, ai] match starts immediately");
+
+    const result = await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 10000;
+      const poll = async () => {
+        const listed = JSON.parse((await get(port, "/api/results")).body).results;
+        const found = listed.find(r => r.matchId === created.json.matchId);
+        if (found) { resolve(found); return; }
+        if (Date.now() > deadline) { reject(new Error("match never appeared in /api/results")); return; }
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+
+    assert.equal(result.winReason, "timeout-score");
+    assert.deepEqual(result.owners, ["player", "ai"]);
+    assert.ok(result.owners.includes(result.winner), "the recorded winner must be one of this match's own real owners");
+    assert.ok(result.time >= 0.2, "the match must have actually run at least matchTimeLimit's own worth of sim time");
+    assert.ok(Number.isFinite(result.tick) && result.tick > 0);
+    assert.ok(Number.isFinite(result.endedAt) && result.endedAt <= Date.now());
+  });
+});
+
 test("createAppServer().close() stops every live match's worker and ws attachment, without touching the http.Server itself", async () => {
   const app = await createAppServer();
   const port = await listen(app.server);

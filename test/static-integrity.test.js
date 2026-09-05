@@ -234,6 +234,9 @@ test("every shipped browser module is reachable from index.html's entry point", 
     "net/wsServerTransport.js",
     "net/wsWorkerTransport.js", "server/matchWorker.js", "server/matchSnapshot.js",
     "server/lobby.js", "server/lobbySnapshot.js",
+    // T-059: server/matchResults.js — same class again, only ever reached from tools/serve.js's
+    // own spawnWorkerFor/handleListResults wiring.
+    "server/matchResults.js",
     // T-039: net/abuseGuard.js's only real caller is net/wsWorkerTransport.js itself (the general
     // per-connection rate gate conn.onmessage runs on every inbound message) — it inherits THAT
     // file's own invisible-edge status rather than carrying a reason of its own, the same class as

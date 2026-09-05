@@ -76,6 +76,7 @@ import { runBenchSuite } from "./bench.js";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
 import { createLobby, OWNER_IDS, publicMatch } from "../server/lobby.js";
 import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
+import { createMatchResultsStore } from "../server/matchResults.js";
 import { createMcpServer } from "../net/mcp.js";
 import { createLobbyTools } from "../server/mcpLobbyTools.js";
 import { createObservationTools } from "../server/mcpObservationTools.js";
@@ -229,6 +230,10 @@ function readRawBody(req) {
 export async function createAppServer() {
   const dataDir = process.env.DATA_DIR || null;   // production only — same gate dataProbeResult/__bench already use above
   const lobby = dataDir ? restoreLobby(dataDir) : createLobby();
+  // T-059 (FR-22): the piece T-029a's own live-match snapshot deliberately doesn't cover — a
+  // finished match's own outcome, recorded once and kept even after its worker exits and its
+  // liveMatches entry is gone. Restored here at boot the same way the lobby itself is.
+  const resultsStore = createMatchResultsStore(dataDir);
   // matchId -> {worker, wsMatch, projCache} — only matches THIS boot actually spawned a worker
   // for. Declared BEFORE mcpServer below so the observation tools' own getCache can close over
   // this SAME map by reference — matches start (and get an entry here) well after boot, so the
@@ -310,6 +315,21 @@ export async function createAppServer() {
     // budget does) — created here, once per match, so it persists across every issue_command call
     // for this match's whole lifetime, the same lifecycle projCache/cmdBridge already have.
     const apmGuard = createAgentApmGuard();
+    // T-059: a THIRD independent listener on the same worker — the match's own final tick pushes
+    // one {type:"state", proj:{over:true, ...}} per owner PLUS one for the spectator, so this
+    // fires several times for the same match end; resultsStore.record() is itself idempotent per
+    // matchId (server/matchResults.js's own contract), so no separate "have I seen this end
+    // already" bookkeeping belongs here.
+    worker.on("message", msg => {
+      if (msg?.type !== "state" || !msg.proj?.over) return;
+      // Only fields projectFor's own wire-safe output actually carries (engine/projection.js) —
+      // this listener never sees raw match.state at all, by the same design that keeps every
+      // other main-thread consumer (T-052's own observation cache included) off of it.
+      resultsStore.record({
+        matchId: match.id, owners: msg.proj.owners, winner: msg.proj.winner, winReason: msg.proj.winReason,
+        tick: msg.proj.tick, time: msg.proj.time, endedAt: Date.now(),
+      });
+    });
     liveMatches.set(match.id, { worker, wsMatch, projCache, cmdBridge, apmGuard });
   }
 
@@ -368,6 +388,13 @@ export async function createAppServer() {
     respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch), agent_apm_cap: AGENT_APM });
   }
 
+  // T-059: every match this boot's own workers have seen finish, oldest first — a match that
+  // ended in an EARLIER boot (recorded to disk, then this process restarted) is included exactly
+  // the same way, since resultsStore itself was restored from the same file at construction.
+  function handleListResults(req, res) {
+    respondJson(res, 200, { results: resultsStore.list() });
+  }
+
   async function handleJoinMatch(req, res, matchId) {
     const body = await readJsonBody(req);
     if (body === null) { respondJson(res, 400, { error: "bad-json" }); return; }
@@ -421,6 +448,7 @@ export async function createAppServer() {
     if (url.pathname === "/mcp") { handleMcp(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "POST") { handleCreateMatch(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res); return; }
+    if (url.pathname === "/api/results" && req.method === "GET") { handleListResults(req, res); return; }
     const joinMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/join$/.exec(url.pathname);
     if (joinMatch) { handleJoinMatch(req, res, decodeURIComponent(joinMatch[1])); return; }
     const startMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/start$/.exec(url.pathname);
