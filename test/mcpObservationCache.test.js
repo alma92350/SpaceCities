@@ -61,20 +61,18 @@ test("non-state messages (commandResult, ready, etc.) are ignored, not mistaken 
 });
 
 /* ============================================================
-   T-054 (FR-17): waitForEvent — the SAME cache, a second capability. state.events is never
-   drained server-side (confirmed by reading matchWorker.js/session.js/loop.js/sim.js directly —
-   only the single-player client, boot.js, ever does `state.events.length = 0`), so a live match's
-   full event history accumulates for its whole lifetime; engine/projection.js's own per-seat
-   filter (`e.owner === seat || isVisibleAt(fog, e.x, e.y)`) is re-applied fresh against that
-   growing history EVERY tick using THIS tick's fog, which is real-time ("recomputed fresh every
-   tick", fog.js's own header) rather than permanent discovery — so a seat's own filtered
-   proj.events can both grow AND shrink tick to tick as units move in and out of sight. That rules
-   out any array-length/index cursor as unsafe (indices don't name a stable element). What IS safe:
-   a fixed snapshot of the events visible AT THE MOMENT waitForEvent was called (the "baseline"),
-   compared by VALUE (JSON) against every later push for that seat until something appears that
-   was not in that baseline, or the timeout elapses. No invented event ids, no assumption the
-   history only grows — the wait only ever asks "is there something in view now that was not in
-   view when I called," which is exactly the fog-of-war-correct meaning of "new to this seat."
+   T-054 (FR-17): waitForEvent — the SAME cache, a second capability. server/matchWorker.js's own
+   pushState() drains `state.events` every tick (right after building every seat's projection), so
+   proj.events here is genuinely just that tick's own fresh events, not a growing whole-match
+   history — an earlier version of this file's own header documented the opposite as deliberate,
+   which turned out to double as a live-match bug (the same undrained history also replayed every
+   past attack's tracer/sound forever for a real WS-relayed human client; see matchWorker.js's own
+   pushState() comment). None of that changes what's safe here: a fixed snapshot of the events
+   visible AT THE MOMENT waitForEvent was called (the "baseline"), compared by VALUE (JSON) against
+   every later push for that seat until something appears that was not in that baseline, or the
+   timeout elapses — this is what correctly aggregates "new since the call" across however many
+   ticks land before the wait resolves, with no invented event ids and no assumption about whether
+   any single tick's own proj.events repeats something already seen.
    ============================================================ */
 
 test("waitForEvent resolves once a genuinely new event appears for that seat, carrying only the new one(s)", async () => {

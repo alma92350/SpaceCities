@@ -296,6 +296,21 @@ function pushState() {
   // — this worker has no idea whether any spectator is actually connected (that bookkeeping is
   // entirely net/wsWorkerTransport.js's own job, one hop further out), so it doesn't try to know.
   parentPort.postMessage({ type: "state", seat: SPECTATOR_SEAT, proj: projectForSpectator(match.state) });
+  // Bugfix: drain now that every seat's (and the spectator's) own fog-filtered proj.events has
+  // already captured this tick's events by value above — mirrors boot.js's single-player
+  // `state.events.length = 0`. Without this, state.events grew for a live match's ENTIRE
+  // lifetime (server/mcpObservationCache.js's own header used to document this as deliberate, for
+  // wait_for_event's fog-correct baseline diffing), which broke engine/projectionDelta.js's own
+  // assumption that a projection's `events` field is "already this tick's new events only": every
+  // WS-relayed human client re-received the match's FULL event history on every single tick and
+  // replayed it in full (boot.js's processFrameEvents draining its own copy every frame didn't
+  // help — the very next network push repopulated it), so any attack's tracer/sound/death-flash
+  // kept re-firing forever, worst on a fast-firing unit. Draining here doesn't regress
+  // wait_for_event: its baseline-vs-later-pushes diff (mcpObservationCache.js) only needs
+  // "genuinely new since the call", which holds whether a tick's proj.events is the whole history
+  // or (as now) just that tick's own — it only ever aggregates across however many pushes land
+  // between the call and the resolve.
+  match.state.events.length = 0;
 }
 
 // A finished match has no more state to advance and no one left who should keep paying its

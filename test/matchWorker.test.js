@@ -593,6 +593,46 @@ test("T-059a: a second surrender for an already-eliminated seat is a harmless no
   } finally { await worker.terminate(); }
 });
 
+/* ---------- bugfix: pushState() must drain state.events every tick ---------- */
+// Reported live, by a human playing a real match against an MCP agent: a fast-firing unit's attack
+// tracer never disappeared. Root cause (see pushState()'s own comment above): state.events used to
+// accumulate for a live match's WHOLE lifetime (deliberately, for wait_for_event's own fog-correct
+// baseline diffing — server/mcpObservationCache.js), and engine/projection.js builds a seat's
+// proj.events fresh from that growing history every tick. engine/projectionDelta.js's computeDelta
+// assumes a projection's `events` field is ALREADY "just this tick's new ones" and always sends it
+// in full — true for the single-player client (boot.js drains its own state.events every frame),
+// false for a live match, so a real WS-relayed client kept re-receiving (and re-playing, via
+// boot.js's own processFrameEvents -> effects.js addTracer/addDeathFlash/sound) its ENTIRE event
+// history on every single incoming tick, forever. A 3-seat match here (not the 2-seat matches this
+// file otherwise uses) so surrendering ONE seat leaves 2 others standing — the match itself must
+// keep ticking (and pushing state) past the surrender, which is exactly what observing "the very
+// next tick's push" needs.
+test("bugfix: an event must not still be in the state push for the NEXT tick — state.events is drained every pushState, not just once at the end of the match", async () => {
+  const worker = new Worker(WORKER_FILE, {
+    workerData: {
+      createGameStateOpts: {
+        planetId: "ferros", seed: SEED,
+        ownerDefs: [
+          { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+          { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+          { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+        ],
+      },
+    },
+  });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "player" });
+    const hasSurrenderEvent = proj => (proj.events || []).some(e => e.type === "eliminated" && e.owner === "player" && e.reason === "surrender");
+
+    const pushA = await waitFor(worker, m => m.type === "state" && m.seat === "player" && hasSurrenderEvent(m.proj), 3000);
+    assert.equal(pushA.proj.over, false, "3 seats, only 1 surrendered — 2 remain standing, so the match itself must not be over yet (the case this test actually needs: ticking continues)");
+
+    const pushB = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick > pushA.proj.tick, 3000);
+    assert.equal(hasSurrenderEvent(pushB.proj), false, "the surrender event must not still be present on a LATER tick's own push — an undrained state.events would keep resending it forever, which is exactly the live tracer/sound bug this test guards against");
+  } finally { await worker.terminate(); }
+});
+
 /* ============================================================
    T-057 (§6.3, ADR-0007): clockPolicy:"deliberation" — the sim advances in FIXED batches, gated
    on every REQUIRED (non-scripted-AI) seat calling {type:"endTurn", seat}, with a real wall-clock

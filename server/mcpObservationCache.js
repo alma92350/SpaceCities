@@ -10,20 +10,20 @@
 
    T-054 (FR-17): waitForEvent is a second capability on the SAME per-tick stream, for the SAME
    reason wait_for_event needs it — reacting to something happening beats polling get_situation in
-   a loop. `state.events` is never drained server-side (only the single-player client, boot.js,
-   ever does `state.events.length = 0`), so it accumulates for a match's whole lifetime, and
-   engine/projection.js's own per-seat filter re-applies fresh against that growing history EVERY
-   tick using THAT tick's real-time fog (fog.js: "visible... recomputed fresh every tick", unlike
-   the permanent `explored` flag) — so a seat's own filtered proj.events can grow OR shrink tick to
-   tick as units move in and out of sight. That rules out any array-length/index cursor as unsafe
-   (an index doesn't name a stable element across ticks). What's safe: snapshot the events visible
-   AT THE MOMENT waitForEvent is called (the "baseline", by VALUE — a Set of JSON strings, cheap
-   for the small per-match event lists this game actually produces) and compare every later push
-   for that seat against THAT FIXED baseline — never a moving one — until something appears that
-   was not in it, or the timeout elapses. No invented event ids, no assumption the history only
-   grows: the wait only ever asks "is there something in view now that was not in view when I
-   called," which is exactly the fog-of-war-correct meaning of "new to this seat," and a fixed
-   baseline means an event that scrolls out of fog and back in UNCHANGED never falsely re-fires.
+   a loop. server/matchWorker.js's own pushState() drains `state.events` right after building every
+   seat's (and the spectator's) projection each tick, so proj.events here is genuinely just that
+   tick's own fresh events — NOT a growing whole-match history (an earlier version of this file
+   deliberately kept the history growing forever for this waiter's own baseline-diff to lean on;
+   that turned out to double as a live-match bug, since the SAME undrained state.events also fed
+   every WS-relayed human client, replaying every past attack's tracer/sound on every single tick
+   forever — see matchWorker.js's own pushState() comment). This waiter's baseline-vs-later-pushes
+   diff still works exactly as before regardless: snapshot the events visible AT THE MOMENT
+   waitForEvent is called (the "baseline", by VALUE — a Set of JSON strings, cheap for the small
+   per-match event lists this game actually produces) and compare every later push for that seat
+   against THAT FIXED baseline until something appears that was not in it, or the timeout elapses —
+   this is what correctly aggregates "new since the call" across however many ticks land before the
+   wait resolves, whether or not any single tick's own proj.events also happens to repeat something
+   already seen.
    ============================================================ */
 
 "use strict";
