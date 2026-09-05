@@ -697,3 +697,186 @@ test("T-057's own exit criterion: a seeded deliberation match driven by a fixed 
   const outcomeB = await driveScriptedMatch();
   assert.equal(outcomeA, outcomeB);
 });
+
+/* ============================================================
+   T-061 (Ops): structured operational logging (server/log.js) wired into this file's own four
+   real sites — desync, disconnect/reconnect/AI-takeover, match-ended, and tick-overrun. logEvent
+   itself is exhaustively covered in isolation by test/log.test.js; everything below only proves
+   the WIRING: the right event, with the right fields, at the right moment, exactly once.
+
+   Each worker below is spawned with {stdout:true} (a real Node Worker option — see the Node docs
+   for worker_threads) so console.log calls made INSIDE the worker thread arrive at the PARENT as
+   a real byte stream on worker.stdout instead of being piped straight through to this test
+   process's own process.stdout — the only way to actually observe them from here, since a worker
+   thread has its own separate global `console` that this test's own console.log monkey-patching
+   (test/log.test.js's own captureLog) could never reach. That stream is a genuinely separate
+   channel from the postMessage one every other test in this file already waits on, so after
+   awaiting a postMessage-based signal that a code path definitely ran, every test below still
+   waits a short, fixed settle time before reading `lines` — the same "real wait, not just one
+   instant" posture this file's own T-035/T-036 tests already use for a different async boundary.
+   ============================================================ */
+
+function spawnWorkerWithStdout(workerData) {
+  const worker = new Worker(WORKER_FILE, { workerData, stdout: true });
+  const lines = [];
+  let buf = "";
+  worker.stdout.on("data", chunk => {
+    buf += chunk.toString("utf8");
+    let idx;
+    while ((idx = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line) lines.push(JSON.parse(line));
+    }
+  });
+  return { worker, lines };
+}
+
+test("T-061: a desync report logs a structured 'desync' event alongside the existing desyncDetected reply", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED } });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    worker.postMessage({ type: "fingerprint", seat: "player", tick: stateMsg.proj.tick, fp: "obviously-not-a-real-fingerprint" });
+    await waitFor(worker, m => m.type === "desyncDetected");
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const events = lines.filter(e => e.type === "desync");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].matchId, ready.matchId);
+    assert.equal(events[0].seat, "player");
+    assert.equal(events[0].tick, stateMsg.proj.tick);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: seatDisconnected and the resulting aiTakeover each log a structured event carrying the match's own id", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false }, graceMs: 150 });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    const grew = await watchForBuildingGrowth(worker, "ai", 4000);
+    assert.equal(grew, true, "fixture sanity: the AI really did take over");
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const disconnected = lines.filter(e => e.type === "seatDisconnected");
+    const takeover = lines.filter(e => e.type === "aiTakeover");
+    assert.equal(disconnected.length, 1);
+    assert.equal(disconnected[0].seat, "ai");
+    assert.equal(disconnected[0].matchId, ready.matchId);
+    assert.equal(takeover.length, 1);
+    assert.equal(takeover[0].seat, "ai");
+    assert.equal(takeover[0].matchId, ready.matchId);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: reconnecting after a real AI takeover logs seatReconnected", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false }, graceMs: 150 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    const grew = await watchForBuildingGrowth(worker, "ai", 4000);
+    assert.equal(grew, true, "fixture sanity: the AI really did take over first");
+
+    worker.postMessage({ type: "seatConnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const reconnected = lines.filter(e => e.type === "seatReconnected");
+    assert.equal(reconnected.length, 1);
+    assert.equal(reconnected[0].seat, "ai");
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: seatConnected for a seat that was never away logs nothing — a first join is not a reconnect", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED } });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatConnected", seat: "player" });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(lines.filter(e => e.type === "seatReconnected").length, 0);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: a reconnect that cancels a pending grace timer BEFORE any takeover still logs seatReconnected — it really was away", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false }, graceMs: 300 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 100));   // well inside the 300ms grace window
+    worker.postMessage({ type: "seatConnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    assert.equal(lines.filter(e => e.type === "aiTakeover").length, 0, "fixture sanity: reconnected before the grace period ever fired");
+    assert.equal(lines.filter(e => e.type === "seatReconnected").length, 1);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: a match ending logs exactly one structured matchEnded event, with the final tick/winner/winReason", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spacecities-matchworker-log-over-test-"));
+  try {
+    const seed = 271828;
+    const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
+    const match = createMatch(state);
+    const aiCC = [...match.state.buildings.values()].find(b => b.owner === "ai" && b.type === "command");
+    match.state.buildings.delete(aiCC.id);   // last Command Center gone -> ends on the very next tick
+    await writeSnapshot(dir, "match-about-to-end-for-logging", match.state);
+
+    const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed }, dataDir: dir });
+    try {
+      const overMsg = await waitFor(worker, m => m.type === "state" && m.proj.over === true);
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Exactly one, despite the same final tick posting one "state" message PER SEAT PLUS the
+      // spectator (this file's own pushState) — stopMatchTimers (where matchEnded logs) only ever
+      // runs once, the same "no later tick" guarantee T-035's own test above already established.
+      const ended = lines.filter(e => e.type === "matchEnded");
+      assert.equal(ended.length, 1);
+      assert.equal(ended[0].winner, "player");
+      assert.equal(ended[0].tick, overMsg.proj.tick);
+      assert.equal(typeof ended[0].matchId, "string");
+      assert.equal(typeof ended[0].time, "number");
+    } finally { await worker.terminate(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("T-061 (NFR-2): an unreachably small tick budget makes every tick log a tickOverrun — proves the comparison actually fires, not just exists", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED }, tickBudgetMs: 0 });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick >= 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const overruns = lines.filter(e => e.type === "tickOverrun");
+    assert.ok(overruns.length >= 1, "a real tick always takes measurably more than 0ms, so a 0ms budget must be exceeded every time");
+    assert.equal(overruns[0].matchId, ready.matchId);
+    assert.equal(typeof overruns[0].tick, "number");
+    assert.equal(typeof overruns[0].elapsedMs, "number");
+  } finally { await worker.terminate(); }
+});
+
+test("T-061 (NFR-2): a generous tick budget never logs a tickOverrun — the guard is a real comparison, not an unconditional log", async () => {
+  // 100 real SECONDS, not milliseconds — no actual tick could ever exceed this regardless of
+  // machine speed/contention, so this stays deterministic rather than racing real wall-clock load
+  // the way asserting against the real ~25ms production budget under full-suite contention would.
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED }, tickBudgetMs: 100000 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick >= 3);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(lines.filter(e => e.type === "tickOverrun").length, 0);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: deliberation mode's own batched ticks never log a tickOverrun — NFR-2's per-tick budget deliberately does not apply there", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({
+    createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false },
+    clockPolicy: "deliberation", deliberationTicksPerStep: 5, watchdogMs: 60000,
+  });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    await waitFor(worker, m => m.type === "endTurnResult");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(lines.filter(e => e.type === "tickOverrun").length, 0);
+  } finally { await worker.terminate(); }
+});

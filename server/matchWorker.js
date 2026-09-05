@@ -66,8 +66,8 @@
                                                     client-side) — compared against this worker's own
                                                     CURRENT match.state (the only place that state
                                                     lives); a mismatch posts {type:"desyncDetected",
-                                                    seat, tick} back AND logs it (console.error) —
-                                                    see the branch below for why comparing against
+                                                    seat, tick} back AND logs it (T-061's structured
+                                                    logEvent) — see the branch below for why comparing against
                                                     "current", not a historical checkpoint at msg.tick,
                                                     is a deliberate v1 simplification
      worker -> parent (continued)
@@ -141,6 +141,7 @@ import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/proje
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
 import { readSnapshot, writeSnapshot } from "./matchSnapshot.js";
 import { seatFingerprint } from "../net/fingerprint.js";
+import { logEvent } from "./log.js";
 
 const { seed } = workerData.createGameStateOpts;
 const dataDir = workerData.dataDir || null;
@@ -216,19 +217,28 @@ parentPort.on("message", msg => {
   }
   if (msg.type === "seatDisconnected") {
     if (graceTimers.has(msg.seat)) return;   // already counting down — a second close for the same seat is not a second grace period
+    logEvent("seatDisconnected", { matchId, seat: msg.seat });
     graceTimers.set(msg.seat, setTimeout(() => {
       graceTimers.delete(msg.seat);
       const slot = aiSlotFor(msg.seat);
-      if (!match.state[slot]) match.state[slot] = createAiController(match.state.planetId, {});
+      if (!match.state[slot]) {
+        match.state[slot] = createAiController(match.state.planetId, {});
+        logEvent("aiTakeover", { matchId, seat: msg.seat });
+      }
     }, GRACE_MS));
     return;
   }
   if (msg.type === "seatConnected") {
     const timer = graceTimers.get(msg.seat);
+    // A genuine reconnect (mid-grace, or after AI had already taken over) is worth an operational
+    // log line; seatConnected ALSO fires for a seat's very first join (this file's own header),
+    // which is not a reconnect at all and would just be noise here.
+    const wasAway = !!timer || !!match.state[aiSlotFor(msg.seat)];
     if (timer) { clearTimeout(timer); graceTimers.delete(msg.seat); }
     // Hands control back unconditionally — a harmless no-op if the grace period never actually
     // fired (already null), the real point if it did.
     match.state[aiSlotFor(msg.seat)] = null;
+    if (wasAway) logEvent("seatReconnected", { matchId, seat: msg.seat });
     return;
   }
   if (msg.type === "fingerprint") {
@@ -238,13 +248,13 @@ parentPort.on("message", msg => {
     // lives only here). Under real network latency a client's own report always reflects a tick
     // slightly behind whatever this worker is at by the time it arrives, so an occasional benign
     // mismatch from tick drift alone is possible — acceptable for what this is: an operations
-    // signal a human reviews (console.error below), never an enforcement action (no disconnect, no
-    // correction), so a rare false positive costs a look at a log line, not a wrongly-punished
-    // player. A genuine, sustained divergence (the actual target) reproduces on every report, tick
-    // drift or not.
+    // signal a human reviews (logEvent below — one structured JSON line, T-061), never an
+    // enforcement action (no disconnect, no correction), so a rare false positive costs a look at
+    // a log line, not a wrongly-punished player. A genuine, sustained divergence (the actual
+    // target) reproduces on every report, tick drift or not.
     const expected = seatFingerprint(match.state, msg.seat);
     if (expected !== msg.fp) {
-      console.error(`desync detected: match ${matchId} seat ${msg.seat} tick ${msg.tick} — client fingerprint does not match server state`);
+      logEvent("desync", { matchId, seat: msg.seat, tick: msg.tick });
       parentPort.postMessage({ type: "desyncDetected", seat: msg.seat, tick: msg.tick });
     }
     return;
@@ -280,6 +290,10 @@ function pushState() {
 // deliberation path has no dataDir/graceTimers in practice per this file's own header, but a
 // stray one left running costs nothing to also stop here).
 function stopMatchTimers(tickTimer) {
+  // Only ever called once match.state.over is true (both call sites below gate on it first) — safe
+  // to log the match's own final outcome unconditionally right here, the one place both clock
+  // policies' end-of-match paths already converge.
+  logEvent("matchEnded", { matchId, tick: match.state.tick, time: match.state.time, winner: match.state.winner, winReason: match.state.winReason ?? null });
   if (tickTimer) clearInterval(tickTimer);
   if (snapshotTimer) clearInterval(snapshotTimer);
   if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
@@ -287,13 +301,23 @@ function stopMatchTimers(tickTimer) {
   graceTimers.clear();
 }
 
+// NFR-2: < 25ms of server-side work per tick (a 4-seat Gigantic-map late game, HF free-tier CPU) —
+// workerData-overridable the same way graceMs/watchdogMs/deliberationTicksPerStep already are, so
+// a test can force (or rule out) an overrun deterministically instead of depending on real machine
+// speed. Deliberately not wired into deliberation mode below — it advances a whole batch of ticks
+// silently and by design answers to no wall-clock-per-tick budget at all (this file's own header).
+const TICK_BUDGET_MS = Number.isFinite(workerData.tickBudgetMs) ? workerData.tickBudgetMs : 25;
+
 if (clockPolicy === "realtime") {
   // T-035 (FR-6): a final push still goes out WITH `over: true` (so every connected client's own
   // showGameOver fires — see boot.js's render loop, which already reads game.state.over
   // generically, T-030's own seam), but nothing ticks or pushes again after.
   const tickTimer = setInterval(() => {
+    const t0 = performance.now();
     stepOnce();
     pushState();
+    const elapsedMs = performance.now() - t0;
+    if (elapsedMs > TICK_BUDGET_MS) logEvent("tickOverrun", { matchId, tick: match.state.tick, elapsedMs: Math.round(elapsedMs * 100) / 100 });
     if (match.state.over) stopMatchTimers(tickTimer);
   }, TICK_MS);
 } else {
