@@ -1125,6 +1125,8 @@ body.paused::after {
   padding: 20px 24px;
   max-width: 540px;
   width: 90%;
+  max-height: 85vh;
+  overflow-y: auto;
   cursor: default;
   box-shadow: 0 12px 44px rgba(0, 0, 0, 0.55);
 }
