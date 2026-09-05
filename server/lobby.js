@@ -76,8 +76,13 @@ export function createLobby() {
     return match;
   }
 
+  // T-057: a deliberation-clockPolicy match is never listed — the one piece of this file's own
+  // defense-in-depth against "never in a lobby with a human" (ADR-0007's own safety property);
+  // the real guarantee is that no network-reachable path ever CREATES one with anything but the
+  // default (realtime) clockPolicy in the first place (see tools/serve.js's own create-match
+  // handler), but a browsing human should never even SEE one exists, belt and braces.
   function listOpenMatches() {
-    return [...matches.values()].filter(m => m.status === "open");
+    return [...matches.values()].filter(m => m.status === "open" && (m.config.clockPolicy ?? "realtime") === "realtime");
   }
 
   /** @returns {Object|null} */

@@ -262,3 +262,31 @@ test("leaveSeat refuses an unclaimed seat and an unknown match, without throwing
   assert.equal(lobby.leaveSeat(match.id, 0, "anything").code, "no-such-seat");
   assert.equal(lobby.leaveSeat("not-a-real-id", 0, "anything").ok, false);
 });
+
+/* ============================================================
+   T-057 (§6.3, ADR-0007): clockPolicy is stored the same opaque way seatKinds/planetId already
+   are — this file has no idea what "deliberation" MEANS, only that it's part of a match's own
+   config. The real safety property ("never in a lobby with a human") is NOT enforced here at
+   all, deliberately: it's enforced by tools/serve.js's own HTTP create-match handler never
+   reading a clockPolicy field out of a request body in the first place, so the only way any
+   match ever gets one is a direct, in-process createMatch() call from trusted server code (a
+   benchmark/eval harness), never a network request. listOpenMatches excluding a non-realtime
+   match is the one piece of defense-in-depth that DOES belong here, since it's this file's own
+   list a browsing human could otherwise stumble across.
+   ============================================================ */
+
+test("createMatch stores an explicit clockPolicy verbatim, and omits it (undefined) when not given — the default is realtime by ABSENCE, not a stored string", () => {
+  const lobby = createLobby();
+  const deliberation = lobby.createMatch(baseConfig({ clockPolicy: "deliberation" }));
+  assert.equal(deliberation.config.clockPolicy, "deliberation");
+  const ordinary = lobby.createMatch(baseConfig());
+  assert.equal(ordinary.config.clockPolicy, undefined);
+});
+
+test("listOpenMatches excludes a deliberation-clockPolicy match — never discoverable by a human browsing the lobby", () => {
+  const lobby = createLobby();
+  const ordinary = lobby.createMatch(baseConfig());
+  lobby.createMatch(baseConfig({ clockPolicy: "deliberation" }));
+  const listed = lobby.listOpenMatches();
+  assert.deepEqual(listed.map(m => m.id), [ordinary.id]);
+});

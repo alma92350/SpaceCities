@@ -176,6 +176,18 @@ test("POST /api/matches (default seatKinds, both open) creates a match, auto-joi
   });
 });
 
+test("T-057 (ADR-0007): POST /api/matches can never set clockPolicy — a client-supplied clockPolicy in the request body is silently ignored, never forwarded to the lobby", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", clockPolicy: "deliberation" });
+    assert.equal(created.status, 201);
+    const match = app.lobby.getMatch(created.json.matchId);
+    assert.equal(match.config.clockPolicy, undefined, "the ONLY network-reachable match-creation path must never be able to set a non-realtime clockPolicy — that would break ADR-0007's own \"never in a lobby with a human\" safety property");
+    // Also publicly listed — confirming it's a genuinely ordinary (realtime) match, not just that
+    // the field was dropped.
+    assert.ok(app.lobby.listOpenMatches().some(m => m.id === created.json.matchId));
+  });
+});
+
 test("POST /api/matches with seatKinds:['open','ai'] auto-starts immediately — no second human to wait for (T-035, FR-4's own \"all seats filled\" clause: an ai-kind seat counts as already filled)", async () => {
   await withApp(async (app, port) => {
     const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });

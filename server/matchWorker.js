@@ -97,6 +97,25 @@
    dials): an abandoned seat gets a plain default-opts controller — solid and unexceptional, matching
    FR-5's own "falls to AI control" without inventing a preference nothing upstream ever expressed.
 
+   T-057 (§6.3, ADR-0007): workerData.clockPolicy === "deliberation" replaces the real-time
+   setInterval tick loop below with a GATED one — the sim advances in fixed batches
+   (deliberationTicksPerStep, default 20 = 1 sim second) only once every seat NOT under scripted-AI
+   control (engine/controllers.js's controllerFor(state, owner) === null — the same "human/agent
+   seat" test T-034a/T-042 already established) has posted {type:"endTurn", seat}, so a bench/eval
+   harness gets fully reproducible outcomes (no wall-clock model latency can ever leak into how far
+   the sim advanced). A watchdog (watchdogMs, default 20000) force-advances a round that never
+   completes — a stalled/crashed agent's own missing seat is simply treated as a pass for that
+   round, never a hang. Both are workerData-overridable the same way graceMs already is, so tests
+   use tiny values instead of real production ones. Every branch below is a NEW, additive code path
+   behind this explicit opt-in — every caller that omits clockPolicy (every one before this task)
+   keeps the exact real-time setInterval loop, byte-for-byte unchanged.
+
+   Deliberately never wired to graceTimers/snapshotTimer/fingerprint handling: a deliberation match
+   is never reachable through any human-facing surface at all (server/lobby.js's own
+   listOpenMatches excludes it, and tools/serve.js's HTTP create-match handler never forwards a
+   caller-supplied clockPolicy) — nothing ever opens a real WebSocket to one, so
+   seatDisconnected/seatConnected/fingerprint messages simply never arrive for it in practice.
+
    SNAPSHOT/RESTORE (T-029a, ADR-0012, FR-22, server/matchSnapshot.js). `workerData.dataDir`, when
    given, is where this match's own state (and matchId, T-029b) gets snapshotted so an UNEXPECTED
    restart (a crash, not a graceful one — see matchSnapshot.js's own header for why that's the
@@ -116,6 +135,7 @@ import { parentPort, workerData } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { createGameState, createAiController } from "../engine/state.js";
 import { runAI } from "../engine/ai.js";
+import { controllerFor } from "../engine/controllers.js";
 import { mulberry32 } from "../engine/rng.js";
 import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
@@ -153,6 +173,15 @@ const snapshotTimer = dataDir ? setInterval(() => writeSnapshot(dataDir, matchId
 const GRACE_MS = Number.isFinite(workerData.graceMs) ? workerData.graceMs : 20000;
 const graceTimers = new Map();   // seat -> real setTimeout handle, only while counting down
 
+// T-057: deliberation mode's own tuning, both workerData-overridable (tests use tiny values) —
+// see this file's own header. clockPolicy defaults to "realtime" for anything other than the
+// literal opt-in string, so a typo/unexpected value never silently disables the ordinary loop.
+const clockPolicy = workerData.clockPolicy === "deliberation" ? "deliberation" : "realtime";
+const DELIBERATION_TICKS_PER_STEP = Number.isFinite(workerData.deliberationTicksPerStep) ? workerData.deliberationTicksPerStep : 20;
+const WATCHDOG_MS = Number.isFinite(workerData.watchdogMs) ? workerData.watchdogMs : 20000;
+let readySeats = new Set();
+let watchdogTimer = null;
+
 // Owner "ai" already has state.ai (engine/sim.js's own built-in, unconditional runAI call); owner
 // "player" needs its own state.playerAi (this file's own tick loop below drives it explicitly,
 // since the engine never does) — see this file's own header for why the two aren't symmetric.
@@ -173,6 +202,16 @@ parentPort.on("message", msg => {
       const seq = msg.envelope && Number.isInteger(msg.envelope.seq) ? msg.envelope.seq : null;
       if (seq !== null) parentPort.postMessage({ type: "commandResult", seat: msg.seat, seq, result: { ok: false, code: admitted.code } });
     }
+    return;
+  }
+  if (msg.type === "endTurn") {
+    // Only a REQUIRED seat's own call counts — a scripted-AI-controlled owner never sends this
+    // message at all (it has no MCP tool call driving it), so this guard is defense-in-depth
+    // against a malformed/stray message, not something a real caller would ever hit.
+    if (clockPolicy !== "deliberation" || controllerFor(match.state, msg.seat)) return;
+    readySeats.add(msg.seat);
+    const required = match.state.owners.filter(o => !controllerFor(match.state, o));
+    if (required.every(o => readySeats.has(o))) advanceDeliberationRound();
     return;
   }
   if (msg.type === "seatDisconnected") {
@@ -214,32 +253,76 @@ parentPort.on("message", msg => {
 
 parentPort.postMessage({ type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId });
 
-// T-035 (FR-6): a final push still goes out WITH `over: true` (so every connected client's own
-// showGameOver fires — see boot.js's render loop, which already reads game.state.over generically,
-// T-030's own seam), but nothing ticks or pushes again after — a finished match has no more state
-// to advance and no one left who should keep paying its CPU/bandwidth cost. The periodic snapshot
-// stops too: an ended match's own last snapshot before this point is all a restart could ever need
-// to recover (there's nothing further to lose).
-const tickTimer = setInterval(() => {
-  // T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only
-  // ever auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this
-  // file to do for "player" what the engine already does for "ai" on its own. Same ordering
-  // server/session.js's own aiSeats loop already established (AI decisions before the sim step
-  // that acts on them, so both AI-driven owners get applied at the same relative tick position).
+// T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only ever
+// auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this file to do
+// for "player" what the engine already does for "ai" on its own. Same ordering server/session.js's
+// own aiSeats loop already established (AI decisions before the sim step that acts on them, so both
+// AI-driven owners get applied at the same relative tick position). Shared verbatim by both clock
+// policies below — advancing the sim by exactly one tick is the same operation either way; only
+// WHEN it happens, and whether every intermediate tick gets its own state push, differs.
+function stepOnce() {
   if (match.state.playerAi) runAI(match.state, TICK_DT, "player");
   stepMatch(match, TICK_DT);
+}
+
+function pushState() {
   for (const seat of match.state.owners) {
     parentPort.postMessage({ type: "state", seat, proj: projectFor(match.state, seat) });
   }
-  // T-037 (FR-7): posted unconditionally, every tick, exactly like each real seat's own push above
+  // T-037 (FR-7): posted unconditionally, every push, exactly like each real seat's own push above
   // — this worker has no idea whether any spectator is actually connected (that bookkeeping is
   // entirely net/wsWorkerTransport.js's own job, one hop further out), so it doesn't try to know.
   parentPort.postMessage({ type: "state", seat: SPECTATOR_SEAT, proj: projectForSpectator(match.state) });
-  if (match.state.over) {
-    clearInterval(tickTimer);
-    if (snapshotTimer) clearInterval(snapshotTimer);
-    // No seat is coming back to reclaim anything from a finished match.
-    for (const timer of graceTimers.values()) clearTimeout(timer);
-    graceTimers.clear();
-  }
-}, TICK_MS);
+}
+
+// A finished match has no more state to advance and no one left who should keep paying its
+// CPU/bandwidth cost — shared end-of-match cleanup for both clock policies (T-057's own
+// deliberation path has no dataDir/graceTimers in practice per this file's own header, but a
+// stray one left running costs nothing to also stop here).
+function stopMatchTimers(tickTimer) {
+  if (tickTimer) clearInterval(tickTimer);
+  if (snapshotTimer) clearInterval(snapshotTimer);
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  for (const timer of graceTimers.values()) clearTimeout(timer);
+  graceTimers.clear();
+}
+
+if (clockPolicy === "realtime") {
+  // T-035 (FR-6): a final push still goes out WITH `over: true` (so every connected client's own
+  // showGameOver fires — see boot.js's render loop, which already reads game.state.over
+  // generically, T-030's own seam), but nothing ticks or pushes again after.
+  const tickTimer = setInterval(() => {
+    stepOnce();
+    pushState();
+    if (match.state.over) stopMatchTimers(tickTimer);
+  }, TICK_MS);
+} else {
+  // T-057: one push for the starting tick=0 state — an agent needs to see what it's starting with
+  // to decide its own first turn — then no interval at all: the first ROUND advances only once
+  // every required seat has posted its own endTurn (the message handler above) or this initial
+  // watchdog fires first, whichever happens first. advanceDeliberationRound re-arms the next
+  // round's own watchdog itself.
+  pushState();
+  armDeliberationWatchdog();
+}
+
+function armDeliberationWatchdog() {
+  watchdogTimer = setTimeout(advanceDeliberationRound, WATCHDOG_MS);
+}
+
+// T-057 (§6.3, ADR-0007): a whole round — up to DELIBERATION_TICKS_PER_STEP ticks, advanced
+// SILENTLY (no per-tick state push; an eval harness never asked to see N-1 throwaway intermediate
+// frames) — then ONE state push reflecting the round's own final tick. endTurnResult is posted
+// BEFORE that push, deliberately: it's the signal a caller's own sequential "await the result, THEN
+// await the resulting state" awaits in that order (test/matchWorker.test.js's own T-057 cases), and
+// since each postMessage is delivered as its own turn on the receiving side, sending the smaller,
+// order-defining message first is what makes that chaining reliable rather than racy.
+function advanceDeliberationRound() {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  readySeats = new Set();
+  for (let i = 0; i < DELIBERATION_TICKS_PER_STEP && !match.state.over; i++) stepOnce();
+  parentPort.postMessage({ type: "endTurnResult", tick: match.state.tick });
+  pushState();
+  if (match.state.over) { stopMatchTimers(null); return; }
+  armDeliberationWatchdog();
+}

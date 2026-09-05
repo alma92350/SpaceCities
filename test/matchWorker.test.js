@@ -538,3 +538,162 @@ test("T-040: a desync report for one seat never fires for the other seat's own c
     assert.equal(sawDesync, false);
   } finally { await worker.terminate(); }
 });
+
+/* ============================================================
+   T-057 (§6.3, ADR-0007): clockPolicy:"deliberation" — the sim advances in FIXED batches, gated
+   on every REQUIRED (non-scripted-AI) seat calling {type:"endTurn", seat}, with a real wall-clock
+   watchdog so a stalled seat can never hang the match. Every existing test ABOVE this section
+   proves the DEFAULT (workerData.clockPolicy omitted or "realtime") is completely untouched — this
+   whole feature is gated behind an explicit opt-in, never a change to the existing code path.
+   deliberationTicksPerStep/watchdogMs are workerData-overridable the same way graceMs already is,
+   so a test can use a tiny batch/timeout instead of the real 20-tick/20-second production values.
+   ============================================================ */
+
+function spawnDeliberationWorker({ seed = SEED, aiEnabled = false, deliberationTicksPerStep = 3, watchdogMs = 60000 } = {}) {
+  return new Worker(WORKER_FILE, {
+    workerData: {
+      createGameStateOpts: { planetId: "ferros", seed, aiEnabled },
+      clockPolicy: "deliberation", deliberationTicksPerStep, watchdogMs,
+    },
+  });
+}
+
+test("deliberation mode never ticks on its own — no new state arrives without an endTurn, unlike realtime's own free-running interval", async () => {
+  const worker = spawnDeliberationWorker();
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    void ready;
+    let sawTickAdvance = false;
+    worker.on("message", m => { if (m.type === "state" && m.seat === "player" && m.proj.tick > 0) sawTickAdvance = true; });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(sawTickAdvance, false, "with nobody having called endTurn yet, the sim must not have advanced past tick 0");
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode advances exactly deliberationTicksPerStep ticks once every required seat calls endTurn, then resolves endTurnResult", async () => {
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep: 5 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    // Only ONE of the two required seats so far — must not have advanced yet.
+    await new Promise(resolve => setTimeout(resolve, 150));
+    let advancedEarly = false;
+    worker.on("message", m => { if (m.type === "endTurnResult") advancedEarly = true; });
+    assert.equal(advancedEarly, false, "must still be waiting on seat ai's own endTurn");
+
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    const result = await waitFor(worker, m => m.type === "endTurnResult");
+    assert.equal(result.tick, 5);
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick === 5);
+    assert.equal(stateMsg.proj.tick, 5);
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode only requires seats NOT under scripted-AI control — a scripted-AI seat's own turn is never waited on", async () => {
+  // aiEnabled left at its default (true) — seat "ai" is scripted-AI-controlled, so only "player"'s
+  // own endTurn should be needed to advance a round.
+  const worker = spawnDeliberationWorker({ aiEnabled: true, deliberationTicksPerStep: 4 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    const result = await waitFor(worker, m => m.type === "endTurnResult");
+    assert.equal(result.tick, 4);
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode's watchdog force-advances a round when a required seat never calls endTurn", async () => {
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep: 2, watchdogMs: 150 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });   // "ai" (human/agent here) never calls its own
+    const result = await waitFor(worker, m => m.type === "endTurnResult", 3000);
+    assert.equal(result.tick, 2, "the watchdog must force the round through at exactly the same batch size, not skip ticks");
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode supports multiple consecutive rounds — readiness genuinely resets each time, not stuck permanently \"ready\"", async () => {
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep: 2, watchdogMs: 60000 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    const r1 = await waitFor(worker, m => m.type === "endTurnResult");
+    assert.equal(r1.tick, 2);
+
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    const r2 = await waitFor(worker, m => m.type === "endTurnResult" && m.tick === 4);
+    assert.equal(r2.tick, 4);
+  } finally { await worker.terminate(); }
+});
+
+test("a command issued before endTurn is admitted immediately and takes effect once the round actually steps — the real codec, unchanged by clock policy", async () => {
+  // admit() schedules an ACCEPTED envelope for state.tick + INPUT_DELAY_TICKS (net/commandLoop.js's
+  // own same-tick-batch fairness window, reused UNCHANGED here — deliberation mode adds no second
+  // command path); stepMatch only actually applies it (and only THEN posts commandResult, via
+  // emitAck) once state.tick reaches that applyTick — which, in this mode, only happens as part of
+  // a round's own batched ticks. A batch size AT OR BELOW INPUT_DELAY_TICKS would leave the command
+  // still pending at the end of this one round (the due-check runs BEFORE each tick, never once
+  // exactly AT the final tick a small batch stops on) — so this test deliberately uses a batch
+  // comfortably larger than INPUT_DELAY_TICKS to prove the command is caught WITHIN a single round.
+  const deliberationTicksPerStep = INPUT_DELAY_TICKS + 2;
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const unit = stateMsg.proj.units.find(u => u.owner === "player");
+    const target = { x: unit.x + 300, y: unit.y };
+    const envelope = encode({ t: "move", ids: [unit.id], x: target.x, y: target.y }, 1, null);
+    worker.postMessage({ type: "command", seat: "player", envelope });
+
+    // Nothing advances the sim until BOTH required seats end their turn — an ACCEPTED envelope's
+    // own commandResult only arrives once stepMatch actually processes it (emitAck), so it cannot
+    // arrive before this round runs at all, unlike realtime mode's own continuously-ticking loop.
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+
+    await waitFor(worker, m => m.type === "commandResult" && m.seq === 1);
+    const after = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick === deliberationTicksPerStep);
+    const moved = after.proj.units.find(u => u.id === unit.id);
+    assert.equal(moved.order.type, "move");
+    assert.equal(moved.order.x, target.x);
+  } finally { await worker.terminate(); }
+});
+
+test("T-057's own exit criterion: a seeded deliberation match driven by a fixed scripted sequence of endTurn/commands replays to the exact same outcome every time", async () => {
+  const SHARED_SEED = 77777;
+  const BATCH = INPUT_DELAY_TICKS + 2;   // comfortably above the input-delay window — see the test above for why
+
+  // Stands in for "a scripted agent": a fixed, deterministic sequence of commands/endTurn calls,
+  // not wall-clock-timed thinking — exactly what a benchmark harness replays across runs.
+  async function driveScriptedMatch() {
+    const worker = spawnDeliberationWorker({ seed: SHARED_SEED, deliberationTicksPerStep: BATCH });
+    try {
+      await waitFor(worker, m => m.type === "ready");
+      const first = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+      const unit = first.proj.units.find(u => u.owner === "player");
+
+      worker.postMessage({ type: "command", seat: "player", envelope: encode({ t: "move", ids: [unit.id], x: unit.x + 250, y: unit.y }, 1) });
+      worker.postMessage({ type: "endTurn", seat: "player" });
+      worker.postMessage({ type: "endTurn", seat: "ai" });
+      await waitFor(worker, m => m.type === "endTurnResult" && m.tick === BATCH);
+
+      // A second round, so the script exercises "readiness genuinely resets" too, not just one shot.
+      worker.postMessage({ type: "endTurn", seat: "player" });
+      worker.postMessage({ type: "endTurn", seat: "ai" });
+      const final = await waitFor(worker, m => m.type === "endTurnResult" && m.tick === BATCH * 2);
+      const finalState = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick === final.tick);
+      // Stringifying the whole per-seat projection is a strictly MORE demanding equality check
+      // than comparing a handful of fields — matches this file's own "exit criterion (identically)"
+      // determinism test above for realtime mode, applied here to the batched/gated clock instead.
+      return JSON.stringify(finalState.proj);
+    } finally { await worker.terminate(); }
+  }
+
+  // Sequential, deliberately not concurrent — proves determinism in isolation from wall-clock
+  // scheduling, the same reasoning this file's own realtime-mode determinism test above already
+  // documents.
+  const outcomeA = await driveScriptedMatch();
+  const outcomeB = await driveScriptedMatch();
+  assert.equal(outcomeA, outcomeB);
+});
