@@ -60,9 +60,9 @@ async function callTool(mcp, name, args) {
   });
 }
 
-test("createActionTools registers issue_command", () => {
+test("createActionTools registers issue_command and surrender", () => {
   const tools = createActionTools(createLobby(), () => null);
-  assert.deepEqual(tools.map(t => t.name), ["issue_command"]);
+  assert.deepEqual(tools.map(t => t.name), ["issue_command", "surrender"]);
 });
 
 test("REAL end to end: issue_command moves the seat's own units, applied by the real codec inside a real worker", async () => {
@@ -172,6 +172,65 @@ test("issue_command on a match id with no live bridge at all is a clear tool exe
   const { body } = await callTool(mcp, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
   assert.equal(body.result.isError, true);
   assert.match(body.result.content[0].text, /match-not-live/);
+});
+
+/* ---------- T-059a (FR-8): a real seat can surrender through an MCP tool ---------- */
+// engine/victory.js's own surrender() semantics (idempotent, N-seat standing, score-tiebreak
+// exclusion) are already exhaustively covered by test/victory.test.js; this only has to prove the
+// tool call actually reaches a real worker and the match genuinely resolves as a result — the same
+// division of labor issue_command's own tests above already hold themselves to.
+
+test("REAL end to end: surrender ends the calling seat's own participation, resolved on the match's very next tick", async () => {
+  const { lobby, worker, seatHandle0 } = await spawnLiveMatch();
+  try {
+    await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const mcp = createMcpServer({ tools: createActionTools(lobby, matchId => attachCommandBridge(worker)) });
+
+    const { body } = await callTool(mcp, "surrender", { seat_handle: seatHandle0 });
+    assert.equal(body.result.isError, undefined, JSON.stringify(body.result));
+
+    // Not instant (this tool's own description says so): the match resolves on its NEXT tick, via
+    // the worker's own ordinary "state" push every client already listens to — never a bespoke
+    // reply this tool call itself has to wait on.
+    const overMsg = await waitFor(worker, m => m.type === "state" && m.seat === "ai" && m.proj.over === true, 3000);
+    assert.equal(overMsg.proj.winner, "ai", "the seat that surrendered (player, seat 0) must not be the winner");
+    assert.equal(overMsg.proj.winReason, "elimination");
+  } finally {
+    await worker.terminate();
+  }
+});
+
+test("surrender on a match id with no live bridge at all is a clear tool execution error, not a crash", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = mintSeatHandle(match.id, 0, lobby.joinMatch(match.id, 0).token);
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => null) });
+
+  const { body } = await callTool(mcp, "surrender", { seat_handle });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /match-not-live/);
+});
+
+test("multi-match routing: a seat_handle for match A can never surrender match B's own seat", async () => {
+  const lobby = createLobby();
+  const matchA = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const matchB = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seatA = mintSeatHandle(matchA.id, 0, lobby.joinMatch(matchA.id, 0).token);
+
+  let bridgeBCalled = false;
+  const fakeBridgeA = { surrender: () => {} };
+  const fakeBridgeB = { surrender: () => { bridgeBCalled = true; } };
+  const mcp = createMcpServer({
+    tools: createActionTools(lobby, matchId => {
+      if (matchId === matchA.id) return fakeBridgeA;
+      if (matchId === matchB.id) return fakeBridgeB;
+      return null;
+    }),
+  });
+
+  await callTool(mcp, "surrender", { seat_handle: seatA });
+  assert.equal(bridgeBCalled, false, "a seat_handle scoped to match A must never reach match B's own bridge");
+  void matchB;
 });
 
 test("multi-match routing: a seat in match A can never reach match B's own bridge", async () => {

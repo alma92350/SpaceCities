@@ -16,7 +16,10 @@ import { encode } from "../net/commandEnvelope.js";
 
 /**
  * @param {import("node:worker_threads").Worker} worker
- * @returns {{sendCommand: (seat: string, cmd: Object) => Promise<{ok:boolean, code?:string, result?:Object}>}}
+ * @returns {{
+ *   sendCommand: (seat: string, cmd: Object) => Promise<{ok:boolean, code?:string, result?:Object}>,
+ *   surrender: (seat: string) => void,
+ * }}
  */
 export function attachCommandBridge(worker) {
   let nextSeq = 1;
@@ -44,5 +47,13 @@ export function attachCommandBridge(worker) {
     });
   }
 
-  return { sendCommand };
+  // T-059a (FR-8): fire-and-forget — unlike sendCommand, nothing here correlates a reply, because
+  // server/matchWorker.js's own "surrender" handler sends none back (engine/victory.js's own
+  // surrender() doesn't end the match immediately; the caller's next get_situation/wait_for_event
+  // call is what actually observes the outcome, on the match's own very next tick).
+  function surrender(seat) {
+    worker.postMessage({ type: "surrender", seat });
+  }
+
+  return { sendCommand, surrender };
 }

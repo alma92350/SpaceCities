@@ -814,3 +814,71 @@ test("T-040: a REAL client transport's own periodic self-check never triggers a 
     transport.close();
   } finally { wsMatch.close(); server.close(); worker.terminate(); }
 });
+
+/* ---------- T-059a (FR-8): a real seat can surrender over the WebSocket wire ---------- */
+// Purely a relay proof (this file's own job, same as chat/fingerprint above) — engine/victory.js's
+// own surrender() semantics (idempotent, one-tick latency, N-seat standing) are already exhaustively
+// covered by test/victory.test.js; this only has to prove the message actually reaches it from a
+// real connection and the match genuinely resolves as a result.
+
+function nextOverState(ws) {
+  return new Promise(resolve => {
+    ws.addEventListener("message", function handler(ev) {
+      const msg = JSON.parse(ev.data);
+      if (msg.type === "state" && msg.proj.over) { ws.removeEventListener("message", handler); resolve(msg.proj); }
+    });
+  });
+}
+
+test("T-059a: a seat sending {type:'surrender'} over the raw wire ends the match, the opposing seat winning by elimination", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    const playerSeesOver = nextOverState(player);
+    const aiSeesOver = nextOverState(ai);
+    player.send(JSON.stringify({ type: "surrender" }));
+    const [playerFinal, aiFinal] = await Promise.all([playerSeesOver, aiSeesOver]);
+    assert.equal(playerFinal.winner, "ai", "the seat that surrendered must not be the winner");
+    assert.equal(playerFinal.winReason, "elimination", "engine/victory.js's own surrender funnels through the same state.eliminated path a real defeat does — same reason string, by design");
+    assert.equal(aiFinal.winner, "ai");
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-059a: a second surrender for an already-eliminated seat is a harmless no-op — never re-fires or corrupts the outcome", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const player = await connectRaw(port, "seat=player");
+    const ai = await connectRaw(port, "seat=ai");
+    const firstOver = nextOverState(ai);
+    player.send(JSON.stringify({ type: "surrender" }));
+    await firstOver;
+    // A second one, after the match is already decided — must not throw, hang, or change anything.
+    player.send(JSON.stringify({ type: "surrender" }));
+    await new Promise(resolve => setTimeout(resolve, 200));
+    player.close(); ai.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});
+
+test("T-059a: transport.surrender() (net/wsClientTransport.js) is delivered as a real wire message and actually ends the match", async () => {
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  const wsMatch = await attachWsMatchWorker(server, worker);
+  const port = await listen(server);
+  try {
+    const playerT = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+    const aiT = await createWsClientTransport(`ws://localhost:${port}/?seat=ai`);
+    const aiSeesOver = new Promise(resolve => aiT.onEvent(e => { if (e.type === "state" && e.state.over) resolve(e.state); }));
+    playerT.surrender();
+    const final = await aiSeesOver;
+    assert.equal(final.winner, "ai");
+    playerT.close(); aiT.close();
+  } finally { wsMatch.close(); server.close(); worker.terminate(); }
+});

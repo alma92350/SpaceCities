@@ -91,5 +91,32 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
         return { content: [{ type: "text", text: `Command rejected: ${result.code}` }], isError: true, structuredContent: { code: result.code } };
       }),
     },
+    {
+      // T-059a (FR-8): the real network trigger for engine/victory.js's own surrender() — a
+      // seat-level concession, never a WireCommand (no ids, no ownership/fog/affordability to
+      // check, no INPUT_DELAY_TICKS scheduling — none of issue_command's own codec applies to
+      // "I am ending my own participation"), so this is its own tool rather than a new `t` on
+      // COMMAND_SCHEMA's union.
+      name: "surrender",
+      title: "Surrender the match",
+      description:
+        "Voluntarily ends the calling seat's own participation in a live match — the same " +
+        "concession a human player's in-match surrender action performs. Irreversible: once sent, " +
+        "this seat is eliminated and cannot rejoin this match. Not instant: engine/victory.js's " +
+        "own surrender only marks the seat eliminated, so the match's own over/winner/winReason " +
+        "resolve on the very next tick, not this call — check get_situation or wait_for_event " +
+        "afterward to see the outcome. Before a match has started, use leave_match instead.",
+      inputSchema: {
+        type: "object",
+        properties: { seat_handle: { type: "string" } },
+        required: ["seat_handle"],
+      },
+      handler: withSeat(lobby, ({ seat }) => {
+        const bridge = getBridge(seat.matchId);
+        if (!bridge) return rejection("match-not-live: this match hasn't started yet — leave_match instead");
+        bridge.surrender(seat.owner);
+        return { content: [{ type: "text", text: "Surrendered. Your participation in this match has ended." }] };
+      }),
+    },
   ];
 }

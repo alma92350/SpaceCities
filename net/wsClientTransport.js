@@ -370,6 +370,14 @@ export function createWsClientTransport(url, opts = {}) {
           if (closed || ws.readyState !== WebSocket.OPEN) return;
           ws.send(JSON.stringify({ type: "chat", text }));
         },
+        // T-059a (FR-8): fire-and-forget, exactly sendChat's own posture — no seq/ack, since
+        // surrender isn't part of the deterministic command/reply flow either; the match itself
+        // resolves one regular tick later via the ordinary "state" push this transport already
+        // emits. A surrender attempt while disconnected is silently dropped, same as sendChat.
+        surrender() {
+          if (closed || ws.readyState !== WebSocket.OPEN) return;
+          ws.send(JSON.stringify({ type: "surrender" }));
+        },
         onEvent(handler) {
           handlers.add(handler);
         },

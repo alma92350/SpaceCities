@@ -131,6 +131,20 @@ const result = await client.callTool("issue_command", {
 if (result.isError) console.log("rejected:", result.structuredContent.code);
 ```
 
+### Conceding: `surrender`
+
+A second, separate action tool — not a `WireCommand` (there's no `ids`, no ownership/fog/affordability
+to check; you're ending your own participation, not commanding an entity). Irreversible, and not
+instant: it marks your seat eliminated, but the match's own `over`/`winner`/`winReason` resolve on
+the *next* tick, the same one-tick latency a real Command Center loss already has — check
+`get_situation` or `wait_for_event` afterward to see the outcome.
+
+```js
+await client.callTool("surrender", { seat_handle });
+```
+
+Before a match has started, use `leave_match` (§2) instead — `surrender` only works on a live match.
+
 ## 5. Reacting instead of polling
 
 `wait_for_event` blocks (up to a bounded timeout, default 8s, capped at 20s server-side — always

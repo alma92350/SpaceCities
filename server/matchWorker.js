@@ -136,6 +136,7 @@ import { randomUUID } from "node:crypto";
 import { createGameState, createAiController } from "../engine/state.js";
 import { runAI } from "../engine/ai.js";
 import { controllerFor } from "../engine/controllers.js";
+import { surrender } from "../engine/victory.js";
 import { mulberry32 } from "../engine/rng.js";
 import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
@@ -203,6 +204,18 @@ parentPort.on("message", msg => {
       const seq = msg.envelope && Number.isInteger(msg.envelope.seq) ? msg.envelope.seq : null;
       if (seq !== null) parentPort.postMessage({ type: "commandResult", seat: msg.seat, seq, result: { ok: false, code: admitted.code } });
     }
+    return;
+  }
+  if (msg.type === "surrender") {
+    // T-059a (FR-8): the real network trigger single-player already has (boot.js/overlays.js/
+    // starmap.js all call this exact same engine/victory.js function) and multiplayer never did.
+    // Nothing else needs to happen here: engine/victory.js's own surrender() doesn't end the match
+    // immediately, only marks this seat eliminated — the very next regular tick's own stepMatch ->
+    // checkWinCondition resolves state.over/winner/winReason from that, the identical one-tick
+    // latency every other elimination (a lost Command Center, T-046) already has. Same
+    // defense-in-depth guard endTurn already uses above: a scripted-AI-controlled seat has no real
+    // connection (WebSocket or MCP seat handle) to ever send this from.
+    if (!controllerFor(match.state, msg.seat)) surrender(match.state, msg.seat);
     return;
   }
   if (msg.type === "endTurn") {

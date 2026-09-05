@@ -539,6 +539,60 @@ test("T-040: a desync report for one seat never fires for the other seat's own c
   } finally { await worker.terminate(); }
 });
 
+/* ---------- T-059a (FR-8): a real network trigger for engine/victory.js's own surrender() ---------- */
+// A low-level protocol test, same posture as T-036/T-040 above: no lobby, no WS, no MCP — those are
+// net/wsWorkerTransport.js's and server/mcpActionTools.js's own jobs (their own tests cover that
+// layer). This file only has to prove the worker's own reaction to {type:"surrender", seat} is
+// correct — surrender()'s own semantics (idempotent, N-seat standing, score-tiebreak exclusion) are
+// already exhaustively covered by test/victory.test.js and are not re-tested here.
+
+test("T-059a: {type:'surrender', seat} ends the match on the next tick, the OTHER seat winning by elimination", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "player" });
+    const overMsg = await waitFor(worker, m => m.type === "state" && m.seat === "ai" && m.proj.over === true, 3000);
+    assert.equal(overMsg.proj.winner, "ai", "the seat that surrendered must not be the winner");
+    assert.equal(overMsg.proj.winReason, "elimination", "surrender funnels through the same state.eliminated path a real defeat does — same reason string, by design (engine/victory.js)");
+  } finally { await worker.terminate(); }
+});
+
+test("T-059a: surrendering the seat driven by the built-in scripted AI is ignored — defense-in-depth against a malformed/stray message, mirroring endTurn's own identical guard", async () => {
+  // aiEnabled left at its default (true): seat "ai" is scripted-AI-controlled here, so a
+  // surrender claiming to be from it must never apply — no real connection could ever send this.
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "ai" });
+    // A real wait, not just "no over:true in one instant" — proving it was IGNORED needs to
+    // observe an absence over real time, several TICK_MS worth, the same pattern this file's own
+    // T-035/T-036 tests already establish for a negative result.
+    let sawOver = false;
+    const onMsg = m => { if (m.type === "state" && m.proj.over) sawOver = true; };
+    worker.on("message", onMsg);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    worker.off("message", onMsg);
+    assert.equal(sawOver, false, "a scripted-AI seat has no real connection to surrender from — the match must keep going");
+  } finally { await worker.terminate(); }
+});
+
+test("T-059a: a second surrender for an already-eliminated seat is a harmless no-op", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "player" });
+    await waitFor(worker, m => m.type === "state" && m.proj.over === true, 3000);
+    // Must not throw, hang, or post anything further that a listener could mistake for a NEW result.
+    worker.postMessage({ type: "surrender", seat: "player" });
+    let sawSecondCommandResult = false;
+    const onMsg = m => { if (m.type === "commandResult") sawSecondCommandResult = true; };
+    worker.on("message", onMsg);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    worker.off("message", onMsg);
+    assert.equal(sawSecondCommandResult, false);
+  } finally { await worker.terminate(); }
+});
+
 /* ============================================================
    T-057 (§6.3, ADR-0007): clockPolicy:"deliberation" — the sim advances in FIXED batches, gated
    on every REQUIRED (non-scripted-AI) seat calling {type:"endTurn", seat}, with a real wall-clock

@@ -83,7 +83,7 @@ export function createLobbyTools(lobby) {
     {
       name: "leave_match",
       title: "Leave a match before it starts",
-      description: "Voluntarily gives up a seat joined via join_match, freeing it for someone else — only while the match is still open. Once a match has started, use the in-match surrender action instead (not this tool).",
+      description: "Voluntarily gives up a seat joined via join_match, freeing it for someone else — only while the match is still open. Once a match has started, use the surrender tool instead (not this one).",
       inputSchema: {
         type: "object",
         properties: { seat_handle: { type: "string", description: "The seat_handle join_match returned" } },
