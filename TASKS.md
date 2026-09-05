@@ -18,7 +18,7 @@ Update this file in the same commit as the work it describes.
 | **3** | Two humans play a full match over the network | 13 | 13 | ✅ Done — NFR-3 met at natural match scale; stress-scale gap deliberately deferred to T-062 |
 | **4** | Multiplayer is pleasant: lobby, seats, reconnect | 10 | 9 | 🟡 In progress — every active task done; T-034b deliberately deferred (FR-22), tracked, non-blocking. **Merged to `main` through T-040's own feature commit** — corrected 2026-09-04: `git log origin/main` (checked directly before attempting Phase 5's own merge, not re-trusted from this document) shows `origin/main`'s HEAD is T-040's feature commit itself, not the later "T-040: close out" commit — so this row's "Merged to `main`" was true in substance but imprecise; Phase 5 (T-041–T-048) is a separate, still-unmerged PR |
 | **5** | 4-seat free-for-all with AI fill | 9 | 8 | 🟡 In progress — every active task done; T-048a deliberately deferred (ADR-0008), tracked, non-blocking |
-| **6** | An agent plays a human to a finish over MCP | 13 | 11 | 🟡 In progress — T-049b (ADR-0008) and T-057a (ADR-0007) deliberately deferred, tracked, non-blocking |
+| **6** | An agent plays a human to a finish over MCP | 13 | 11 | 🟡 In progress — every active task done; T-049b (ADR-0008) and T-057a (ADR-0007) deliberately deferred, tracked, non-blocking |
 | **7** | Hardened, measured, launched | 7 | 0 | ⚪ Not started |
 | | | **81** | **62** | |
 
