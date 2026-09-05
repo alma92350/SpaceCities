@@ -78,8 +78,26 @@ function shareLink(matchId) {
 // bootState time (T-034's own boot.js fix explains why this file, not that one, owns applying
 // pushes: nothing ticks locally for a live network transport, so nothing else ever touches
 // game.state again after boot without this).
-function applyLiveState(live, fresh) {
-  for (const key of Object.keys(fresh)) live[key] = fresh[key];
+//
+// `selection` is deliberately EXCLUDED from this copy — a real bug, found by actually playing a
+// live match rather than by any test: `selection` is UI-only (engine/projection.js's own header:
+// "it moves to the client session, the server never reads or sends it"), and reassembleProjection
+// correctly always returns `selection: []` for exactly that reason. But this function used to copy
+// EVERY key from `fresh` onto `live`, including that placeholder — so the instant a player clicked
+// a unit (input.js's own `state.selection = [...]`), the very next tick's state push (arriving
+// several times a second) stomped it back to empty, making every click un-selectable in practice.
+// Preserving `live.selection` verbatim isn't quite enough on its own, though: single-player's own
+// removeEntity (engine/state.js) also drops a destroyed entity's id from `state.selection` the
+// instant it's removed — a cleanup this network path never gets, since the sim it would be
+// reacting to runs server-side only. Re-deriving that same filter here (against the FRESH
+// units/buildings this push just delivered) is what keeps a selection that outlives its own unit
+// from silently accumulating dead ids forever.
+export function applyLiveState(live, fresh) {
+  for (const key of Object.keys(fresh)) {
+    if (key === "selection") continue;
+    live[key] = fresh[key];
+  }
+  live.selection = live.selection.filter(id => live.units.has(id) || live.buildings.has(id));
 }
 
 // Connects over a real WebSocket as the given seat and hands off into the running match, exactly
