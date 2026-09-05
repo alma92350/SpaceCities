@@ -79,10 +79,11 @@ test("a result persists to disk and survives a fresh store instance — the actu
   await withTmpDir(async dir => {
     assert.equal(existsSync(matchResultsPath(dir)), false, "fixture sanity: nothing written yet");
     const before = createMatchResultsStore(dir);
-    before.record(sampleResult("m1"));
-    // record() is fire-and-forget async I/O (matching writeLobbySnapshot's own contract) — give it
-    // a tick to actually land before the "restart".
-    await new Promise(resolve => setImmediate(resolve));
+    // record() returns its own write Promise precisely so a caller that genuinely needs the write
+    // to have landed (this test, proving a real restart) can await it — a fixed setImmediate/tick
+    // guess is exactly the kind of timing assumption that only holds under light load and breaks
+    // under the full suite's own real disk-I/O contention, which is genuinely what surfaced this.
+    await before.record(sampleResult("m1"));
     assert.ok(existsSync(matchResultsPath(dir)));
 
     const after = createMatchResultsStore(dir);

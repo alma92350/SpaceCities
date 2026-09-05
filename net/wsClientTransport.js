@@ -41,9 +41,9 @@
    the constantly-exercised one") — this file doesn't try to tell a network blip apart from the
    server process itself restarting after a crash or deploy; either way the socket just closes, and
    either way the right response is the same: retry the same URL after a short fixed delay,
-   indefinitely, until it succeeds. (A max-retry cutoff or backoff schedule is deliberately NOT
-   built here — T-060, Phase 4, is the named future task for that kind of sleep/wake UX polish; this
-   file's own job is the MECHANISM, not the retry policy.)
+   indefinitely, until it succeeds. No max-retry cutoff or backoff schedule here — this remains the
+   MECHANISM, not the policy; T-060's own backoff (below) is deliberately a SEPARATE, opt-in
+   concern scoped to the FIRST handshake only, never this always-on post-success reconnect.
 
    The reconnect's own welcome message carries the match's matchId (net/wsServerTransport.js,
    server/matchWorker.js) — compared against whatever this file saw on the PREVIOUS welcome to tell
@@ -97,6 +97,21 @@
    just-reassembled state, the one slice a client can independently and correctly compute (its own
    units/buildings/resources are never fog-filtered). Fully automatic — no caller/UI action needed,
    an operations self-check running in the background for the life of the connection.
+
+   initialConnectRetry (T-060, ADR-0010; opt-in object, omitted = unchanged pre-T-060 behavior — a
+   failure before the first welcome still rejects immediately): {maxAttempts=20, baseDelayMs=1000,
+   maxDelayMs=10000, onRetry?(attempt, delayMs)}. A failed FIRST attempt (refused, closed early, or
+   connectTimeoutMs's own timeout — all three now route through the same decision) is retried with
+   exponential backoff (baseDelayMs, doubling, capped at maxDelayMs) instead of rejecting outright,
+   up to maxAttempts — real patience for a cold-starting/sleeping host (ADR-0010's own "the first
+   visitor after 48h idle meets a 503") rather than a raw error on the very first, likely-premature
+   attempt. onRetry fires before each scheduled retry so a caller can render a friendly loading
+   state (lobbyScreen.js's own joinLive) — there is no Transport object yet to emit an event
+   through at this point, unlike every other event this file reports. Exhausting every attempt
+   still ends in the exact same rejection a caller got before this option existed; a genuinely dead
+   server is a genuinely dead server no amount of patience fixes. Never applies to T-029b's own
+   always-on post-success reconnect above — a transport that already worked once needs no bound at
+   all on getting a live server back (that mechanism's own header already explains why).
    ============================================================ */
 
 "use strict";
@@ -122,7 +137,12 @@ import { seatFingerprint } from "./fingerprint.js";
  *   refused, closed before welcome, malformed welcome payload)
  */
 export function createWsClientTransport(url, opts = {}) {
-  const { reconnectDelayMs = 1500, connectTimeoutMs, fingerprintIntervalTicks = 100 } = opts;
+  const { reconnectDelayMs = 1500, connectTimeoutMs, fingerprintIntervalTicks = 100, initialConnectRetry } = opts;
+  // T-060: defaults only ever matter once a caller opts in at all (initialConnectRetry truthy) —
+  // omitting the option entirely preserves the exact pre-T-060 behavior below (immediate rejection).
+  const initialRetryMaxAttempts = initialConnectRetry?.maxAttempts ?? 20;
+  const initialRetryBaseDelayMs = initialConnectRetry?.baseDelayMs ?? 1000;
+  const initialRetryMaxDelayMs = initialConnectRetry?.maxDelayMs ?? 10000;
   return new Promise((resolve, reject) => {
     let ws = null;
     let seq = 0;
@@ -130,6 +150,7 @@ export function createWsClientTransport(url, opts = {}) {
     let settled = false;     // has the OUTER promise resolved/rejected yet (the very first handshake)?
     let announcedDisconnected = false;   // avoid re-emitting "disconnected" on every failed retry
     let reconnectTimer = null;
+    let initialAttempt = 0;   // T-060: how many FIRST-handshake attempts have already failed
     const pendingBySeq = new Map();   // seq -> resolve(CommandResult)
     const handlers = new Set();
     let map = null;
@@ -158,6 +179,23 @@ export function createWsClientTransport(url, opts = {}) {
       reconnectTimer = setTimeout(connect, reconnectDelayMs);
     }
 
+    // T-060 (ADR-0010: "the first visitor after 48h idle meets a 503... the client needs a
+    // friendly loading state and WebSocket retry with backoff"): a failure BEFORE the first
+    // welcome, with initialConnectRetry opted in, gets exponential backoff (baseDelayMs, doubling,
+    // capped at maxDelayMs) up to maxAttempts — a cold-starting host gets real time to wake up
+    // instead of this promise rejecting on the very first (likely premature) attempt. Exhausting
+    // every attempt still ends in the SAME real rejection callers got before this task existed.
+    // Shared by both the "error" and "close" listeners below (whichever reaches it first for a
+    // given attempt) via each connect() call's own initialFailureHandled guard, so one failed
+    // attempt can never schedule two competing retries.
+    function retryOrFailInitial(err) {
+      if (!initialConnectRetry || initialAttempt >= initialRetryMaxAttempts) { fail(err); return; }
+      initialAttempt++;
+      const delayMs = Math.min(initialRetryBaseDelayMs * 2 ** (initialAttempt - 1), initialRetryMaxDelayMs);
+      initialConnectRetry.onRetry?.(initialAttempt, delayMs);
+      reconnectTimer = setTimeout(connect, delayMs);
+    }
+
     function connect() {
       reconnectTimer = null;
       const myWs = new WebSocket(url);
@@ -166,27 +204,38 @@ export function createWsClientTransport(url, opts = {}) {
       let connectTimedOut = false;          // WE aborted this attempt on purpose — the "close" handler
                                              // below must treat that as "the first attempt failed",
                                              // never as a post-success disconnect worth reconnecting from
+      let initialFailureHandled = false;    // T-060: "error" and "close" both fire for one failed
+                                             // attempt — only the first to arrive decides retry-vs-fail
 
       // Bounded initial-connect patience (see this file's own header) — only ever armed for the
       // very FIRST attempt (settled is still false at that point); a later reconnect leaves it
       // unset, preserving T-029b's own deliberately-unbounded retry cadence untouched.
       const connectTimeoutTimer = (connectTimeoutMs && !settled) ? setTimeout(() => {
         connectTimedOut = true;
-        // fail() BEFORE close(): closing a still-CONNECTING WebSocket synchronously fires ITS OWN
-        // "error" event as part of aborting the handshake — reaching the "error" listener below
-        // before this callback would otherwise get back to its own fail() call. fail()'s guard is
-        // idempotent (whichever call reaches it first wins), so calling it here first is what makes
-        // the caller actually see THIS timeout's own message, not a generic "connection failed" one.
-        fail(new Error(`WebSocket connection timed out after ${connectTimeoutMs}ms`));
+        // retryOrFailInitial() BEFORE close(): closing a still-CONNECTING WebSocket synchronously
+        // fires ITS OWN "error" event as part of aborting the handshake — reaching the "error"
+        // listener below before this callback would otherwise get back to its own decision.
+        // connectTimedOut is already true by the time that happens, so that listener's own guard
+        // skips it — whichever call reaches retryOrFailInitial/fail first is what makes the caller
+        // see THIS timeout's own message, not a generic "connection failed" one. A slow-to-answer
+        // attempt is exactly as worth retrying (with initialConnectRetry opted in) as an outright
+        // refused one — both are "this attempt didn't work," not necessarily "the host is gone."
+        initialFailureHandled = true;
+        retryOrFailInitial(new Error(`WebSocket connection timed out after ${connectTimeoutMs}ms`));
         myWs.close();
       }, connectTimeoutMs) : null;
 
       myWs.addEventListener("error", () => {
         if (connectTimeoutTimer) clearTimeout(connectTimeoutTimer);
-        // Only the very first connection attempt ever gets an outer-promise rejection out of this —
-        // once the transport is live (settled), a reconnect attempt's own error is just a precursor
-        // to its "close" event below, which is where the actual retry decision happens.
-        if (!settled) fail(new Error("WebSocket connection failed"));
+        // Only the very first connection attempt ever gets an outer-promise rejection (or a T-060
+        // retry) out of this — once the transport is live (settled), a reconnect attempt's own
+        // error is just a precursor to its "close" event below, which is where T-029b's own retry
+        // decision happens (a DIFFERENT mechanism from initialConnectRetry above — see this file's
+        // own header).
+        if (!settled && !initialFailureHandled && !connectTimedOut) {
+          initialFailureHandled = true;
+          retryOrFailInitial(new Error("WebSocket connection failed"));
+        }
       });
 
       myWs.addEventListener("close", () => {
@@ -200,12 +249,16 @@ export function createWsClientTransport(url, opts = {}) {
         pendingBySeq.clear();
 
         if (closed) return;   // the CALLER closed this on purpose — never reconnect
-        // connectTimedOut's own fail() call above already settled (rejected) the outer promise —
-        // this later, asynchronous "close" (from the myWs.close() that same callback issued) must
-        // not be mistaken for "the transport was live and just dropped", or it would schedule an
-        // orphaned reconnect loop nothing ever awaits or can cancel.
+        // connectTimedOut's own retryOrFailInitial()/fail() call above already settled this
+        // attempt's own outcome (a scheduled retry, or a rejected outer promise) — this later,
+        // asynchronous "close" (from the myWs.close() that same callback issued) must not be
+        // mistaken for "the transport was live and just dropped", or it would schedule a SECOND,
+        // competing retry/reconnect nothing asked for.
         if (connectTimedOut) return;
-        if (!settled) { fail(new Error("WebSocket closed before the welcome handshake completed")); return; }
+        if (!settled) {
+          if (!initialFailureHandled) { initialFailureHandled = true; retryOrFailInitial(new Error("WebSocket closed before the welcome handshake completed")); }
+          return;
+        }
 
         // T-029b: an unexpected close after the transport was already live — retry, whatever the
         // cause (see this file's own header for why that distinction doesn't matter here).

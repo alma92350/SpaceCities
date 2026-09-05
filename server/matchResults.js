@@ -68,10 +68,16 @@ export function createMatchResultsStore(dataDir) {
   // owner PLUS one for the spectator, all reflecting the identical over:true outcome — the caller
   // (tools/serve.js) is expected to call record() on every one of them rather than track its own
   // "have I already seen this match end" bookkeeping.
+  //
+  // Returns the write's own Promise (or undefined when there's nothing to persist) — matching
+  // writeLobbySnapshot's own contract exactly: fire-and-forget-safe for every real caller (which
+  // never awaits it, the same as tools/serve.js's own worker-message listener), but AWAITABLE by
+  // one that genuinely needs to know the write has landed, such as a test proving a restart
+  // actually recovers it.
   function record(result) {
-    if (has(result.matchId)) return;
+    if (has(result.matchId)) return undefined;
     results.push(result);
-    if (dataDir) persistToDisk(dataDir, results);
+    return dataDir ? persistToDisk(dataDir, results) : undefined;
   }
 
   function list() {

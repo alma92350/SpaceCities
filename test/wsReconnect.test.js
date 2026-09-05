@@ -243,3 +243,100 @@ test("connectTimeoutMs only bounds the FIRST connection attempt — a later auto
     transport.close();
   } finally { stopTicking(); await closeServer(server); }
 });
+
+/* ---------- initialConnectRetry (T-060, ADR-0010): patience for a cold-starting/sleeping host ----------
+   Opt-in, scoped ONLY to the very first handshake — completely separate from T-029b's own
+   always-on, always-unbounded post-success reconnect above. Reserves a real free port (listen on
+   0, record it, close it) rather than hardcoding a number, then deliberately leaves NOTHING
+   listening there for the first phase of each test — a real, deterministic "connection refused,"
+   the same failure shape a sleeping HF Space's own edge would present before the container wakes. */
+
+// A real free TCP port, momentarily reserved then released — nothing is listening on it until
+// a test explicitly starts something there, unlike every other fixture in this file which starts
+// its server immediately.
+async function reserveFreePort() {
+  const probe = createTcpServer();
+  const port = await new Promise(resolve => probe.listen(0, () => resolve(probe.address().port)));
+  await new Promise(resolve => probe.close(resolve));
+  return port;
+}
+
+test("initialConnectRetry: a refused first attempt succeeds once a real server comes up during the retry window", async () => {
+  const port = await reserveFreePort();
+  const attempts = [];
+  const connectPromise = createWsClientTransport(`ws://localhost:${port}/?seat=player`, {
+    initialConnectRetry: { baseDelayMs: 20, maxDelayMs: 50, onRetry: (attempt, delayMs) => attempts.push({ attempt, delayMs }) },
+  });
+
+  // Give the client at least one real refused attempt before the server ever exists.
+  await new Promise(resolve => setTimeout(resolve, 30));
+  assert.ok(attempts.length >= 1, "fixture sanity: at least one retry must have been scheduled against nothing listening yet");
+
+  const match = makeMatch(2001);
+  const server = createServer();
+  const wsMatch = attachWsMatch(server, match);
+  await new Promise(resolve => server.listen(port, resolve));
+  const stopTicking = startTicking(match, wsMatch);
+  try {
+    const transport = await connectPromise;
+    const state = await waitForEvent(transport, e => e.type === "state");
+    assert.ok(state.state, "the transport must genuinely resolve once the host actually comes up");
+    transport.close();
+  } finally { stopTicking(); await closeServer(server); }
+});
+
+test("initialConnectRetry: exhausting maxAttempts against a host that never comes up still rejects with the real underlying error", async () => {
+  const port = await reserveFreePort();
+  const attempts = [];
+  await assert.rejects(
+    createWsClientTransport(`ws://localhost:${port}/?seat=player`, {
+      initialConnectRetry: { maxAttempts: 3, baseDelayMs: 5, maxDelayMs: 10, onRetry: (attempt, delayMs) => attempts.push({ attempt, delayMs }) },
+    }),
+    /WebSocket connection failed/,
+  );
+  assert.equal(attempts.length, 3, "exactly maxAttempts retries must have been scheduled, no more and no fewer");
+});
+
+test("initialConnectRetry: backoff actually grows between attempts, capped at maxDelayMs — never a flat retry cadence", async () => {
+  const port = await reserveFreePort();
+  const attempts = [];
+  await assert.rejects(createWsClientTransport(`ws://localhost:${port}/?seat=player`, {
+    initialConnectRetry: { maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 30, onRetry: (attempt, delayMs) => attempts.push(delayMs) },
+  }));
+  assert.deepEqual(attempts, [10, 20, 30, 30, 30], "10, 20, then capped at 30 for every attempt after — real exponential backoff, not a fixed delay");
+});
+
+test("without initialConnectRetry, a first-attempt failure still rejects immediately — the exact pre-T-060 behavior, unchanged for every existing caller", async () => {
+  const port = await reserveFreePort();
+  const startedAt = Date.now();
+  await assert.rejects(createWsClientTransport(`ws://localhost:${port}/?seat=player`), /WebSocket connection failed/);
+  assert.ok(Date.now() - startedAt < 1000, "omitting the option must never introduce a delay that wasn't there before T-060");
+});
+
+test("initialConnectRetry: a stalled first handshake (connectTimeoutMs) is retried too, not treated as an immediate final failure", async () => {
+  // The exact same TCP-accepts-but-never-responds fixture the connectTimeoutMs tests above use —
+  // a host that's merely SLOW to answer is exactly as worth retrying as one refusing outright.
+  const stallServer = createTcpServer(() => { /* accept, then never respond */ });
+  const port = await new Promise(resolve => { stallServer.listen(0, () => resolve(stallServer.address().port)); });
+  const attempts = [];
+  try {
+    const connectPromise = createWsClientTransport(`ws://localhost:${port}/?seat=player`, {
+      connectTimeoutMs: 50,
+      initialConnectRetry: { baseDelayMs: 20, maxDelayMs: 20, onRetry: (attempt, delayMs) => attempts.push({ attempt, delayMs }) },
+    });
+    await new Promise(resolve => setTimeout(resolve, 150));
+    assert.ok(attempts.length >= 1, "a connectTimeoutMs timeout must be retried, not just abandoned to the caller as a final rejection");
+
+    await stallServer.close();
+    const match = makeMatch(2002);
+    const server = createServer();
+    const wsMatch = attachWsMatch(server, match);
+    await new Promise(resolve => server.listen(port, resolve));
+    const stopTicking = startTicking(match, wsMatch);
+    try {
+      const transport = await connectPromise;
+      await waitForEvent(transport, e => e.type === "state");
+      transport.close();
+    } finally { stopTicking(); await closeServer(server); }
+  } finally { try { stallServer.close(); } catch { /* already closed above */ } }
+});
