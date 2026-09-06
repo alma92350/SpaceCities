@@ -10,8 +10,17 @@ change that breaks one fails `npm test` rather than shipping.
 ```
 node --version      # must be >= 20
 npm start           # serve the game at http://localhost:8080  (zero-dep static server)
-npm test            # run the full suite (node --test)
+npm test            # the suite you run on every change (node --test) — ~50s
+npm run test:slow   # the long bench guards (test/slow/) — ~4 minutes
 ```
+
+`npm test` is the inner loop and is meant to stay fast. `npm run test:slow` holds the 72
+`tools/ailab.js` guards that drive real matches; they used to sit in `npm test` and made it take
+five minutes, most of it an AI-tuning sweep that almost no commit can affect. They are **not
+optional and never skipped** — CI runs both on every push and pull request, and
+`test/suite-integrity.test.js` fails if the slow half loses its script, its CI job, or its files.
+Run `npm run test:slow` before anything that touches `tools/ailab.js`, `tools/genome.js`, or AI
+tuning, and before cutting a release.
 
 There is nothing to install — no `npm install`, no bundler, no transpiler.
 
@@ -122,7 +131,14 @@ writing the implementation:
    determinism, save versioning).
 4. Run the whole suite (`npm test`) and `npm run typecheck` — a new feature can surface a
    now-outdated assumption in an older test; update that test's assertion to the new, intended
-   contract rather than deleting coverage.
+   contract rather than deleting coverage. Add `npm run test:slow` when the change is anywhere
+   near the AI bench.
+
+A note on **where** a new test goes: `npm test` globs `test/*.test.js` and `npm run test:slow`
+globs `test/slow/*.test.js`, so a file in any other directory under `test/` is run by neither.
+That is the one way to add a test file that looks green because nothing executes it, so
+`test/suite-integrity.test.js` asserts the two globs stay disjoint and exhaustive. A test belongs
+in `test/slow/` only if it genuinely needs to drive real matches; the default is the fast half.
 
 ## Commits
 
@@ -134,7 +150,7 @@ writing the implementation:
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   ```
 
-## Protecting the default branch (one-time repo setup — not yet done)
+## Protecting the default branch (one-time repo setup — ready to apply)
 
 Everything above is enforced by tests, and the tests run in CI on every push and pull request. But
 nothing stops a red build being merged anyway, and that is not hypothetical: `npm run typecheck`
@@ -142,28 +158,34 @@ failed on every commit from 2026-08-05 to 2026-08-08 in the upstream repo this o
 and two PRs there both merged straight through it. A gate nobody is required to pass is a gate that
 eventually gets walked past.
 
-**Not yet applied here, deliberately.** This repository doesn't have a `main` branch yet — its only
-branch, `claude/spacecities-multiplayer-rts-port-hp9195`, is also its default branch, and
-development is still direct-push rather than PR-based (see `TASKS.md` T-005). Turning on **Block
-force pushes** or **Require a pull request before merging** against the *only* branch that exists
-would lock out the very push-based workflow the port is using to land Phase 0. Apply this once a
-real `main` exists and day-to-day work moves onto PRs — the required-checks list below stays
-correct as written for whichever branch that ends up being; only `Target branch` needs updating.
+**The precondition this was waiting on is now met.** The paragraph here used to say "not yet
+applied, deliberately", because the repository had no `main` branch — its only branch was
+`claude/spacecities-multiplayer-rts-port-hp9195`, and protecting the *only* branch that exists
+would have locked out the direct-push workflow the port was using to land Phase 0. `main` exists
+now and is the default branch, so that reason is gone and the ruleset below should go on.
+
+Everything in it is still correct as written; only the check LIST has grown, by the slow-test job
+(see below). Until somebody applies it, this whole section is a description of a gate rather than
+a gate — which is exactly the failure mode it was written about.
 
 This is a repository setting, so it cannot live in a file here. It takes about two minutes:
 
 **Settings → Branches → Add branch ruleset** (or *Add rule* on the classic UI)
 
-- Target branch: `main` (or whichever branch this applies to, once it exists)
-- ☑ **Require status checks to pass before merging**, and add all three by name — **confirmed
-  present and correctly named in `.github/workflows/test.yml` as of this port** (2026-08-31):
+- Target branch: `main`
+- ☑ **Require status checks to pass before merging**, and add all four by name — **confirmed
+  present and correctly named in `.github/workflows/test.yml`**:
   - `tests (node 20)`
   - `tests (node 22)`
   - `browser smoke test`
+  - `slow tests (ailab sweeps)`
 
-  All three must be listed. The matrix produces one check per Node version, and requiring only one
+  All four must be listed. The matrix produces one check per Node version, and requiring only one
   lets a version-specific regression through — which is the whole reason the matrix exists. The
   smoke job is the only check that can see a page which parses cleanly and then throws on load.
+  And the slow job is where the 72 long-running bench guards live since they were split out of
+  `npm test` — they are not optional, they are just off the inner loop, so leaving them out of
+  this list is the one way that split could turn into a silent deletion of 72 tests.
 - ☑ **Require branches to be up to date before merging** — so a check that passed against a stale
   base cannot count for a merge onto a newer one.
 - ☑ **Block force pushes**
@@ -179,8 +201,9 @@ checks silently stop matching and the gate goes quiet — so change the two toge
 
 When cutting a release:
 
-1. `npm test` is green (determinism + purity + static-integrity included), and `npm run typecheck`
-   reports no errors on the `// @ts-check`ed files.
+1. `npm test` is green (determinism + purity + static-integrity included), `npm run test:slow` is
+   green (the bench guards — a release is exactly when the slow half is worth the four minutes),
+   and `npm run typecheck` reports no errors on the `// @ts-check`ed files.
 2. `npm run smoke` is green — boots the real page in real Chromium, starts a match and clicks
    things, failing on any uncaught error (`tools/smoke.js`; CI runs it as the *browser smoke test*
    job). It is shallow on purpose. Still worth ten minutes by hand for anything the script does not
