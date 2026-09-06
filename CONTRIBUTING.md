@@ -112,6 +112,15 @@ factory constructs must be declared on its `@typedef`.
 This is what catches the silent-`undefined`-field class of bug — a mistyped or renamed field is a
 check-time error, not a wrong result the same-seed determinism test can't see.
 
+`npm run typecheck` also carries the closest thing this repo has to a linter, and deliberately the
+only one: **`noUnusedLocals`**. It needs no dependency and no new command — it is a compiler flag on
+a compiler CI already runs. A real linter (ESLint, Prettier) is NOT used here and that is a
+decision, not an omission: both would mean a dependency and a config to maintain, and a formatter
+run over 40,000 lines of deliberately hand-shaped code — this codebase's comment layout carries
+argument and history — would produce an enormous diff that destroys exactly what makes it readable.
+The house style is enforced by review and by matching the surrounding code, as the Style section
+says.
+
 ```
 npm run typecheck        # runs `tsc -p jsconfig.json` — needs a TypeScript compiler available
                          # (global `tsc`, or `npx -y typescript` / a local install). Editors with
