@@ -340,3 +340,81 @@ test("initialConnectRetry: a stalled first handshake (connectTimeoutMs) is retri
     } finally { stopTicking(); await closeServer(server); }
   } finally { try { stallServer.close(); } catch { /* already closed above */ } }
 });
+
+/* ----------
+   A connect that never succeeded must not reconnect. THE BUG:
+
+   `settled` was one flag doing two jobs. fail() sets it to mean "the outer promise has been
+   rejected"; the welcome handler sets it to mean "the transport went live". The "close" listener
+   read it as the second — so if a failed first attempt's "error" event arrived BEFORE its "close"
+   event, close saw settled === true, concluded "the transport was live and just dropped", and
+   scheduled a reconnect. Forever, every reconnectDelayMs, with no way at all to stop it: the
+   promise rejected, so the caller never received a transport, so there is no close() to call.
+   Measured against a real server before the fix: one refused connect, then an upgrade attempt
+   every 1.5s for as long as the process lived.
+
+   IT IS A RACE, which is why it read as a mystery for so long. In the other ordering — close
+   first — the `!settled` branch handles the failure and returns, and nothing is scheduled. So the
+   same code either leaked a runaway timer or did not, depending on which of two events a failed
+   socket delivered first, and that ordering differs between Node versions and with timing. It
+   presented as four test files that hung on Node 24 but not on Node 22, and it was neither Node
+   24's fault nor a leak.
+
+   `node --test` hid it on top of that: the runner force-exits a worker once its file's tests
+   finish, so a runaway timer was invisible under `npm test` while the identical code hung forever
+   when the same file was run directly.
+
+   None of that is a test-only concern. Every ordinary way a first connect fails — a stale share
+   link, a match that has ended, a seat token that no longer matches, a Space still waking up —
+   could leave the page silently hammering the server until the tab was closed.
+
+   These tests drive BOTH orderings explicitly through a stub socket, because the defect is about
+   event order and a real socket does not let you choose one. The invariant is the same either
+   way: a connect that never went live never reconnects.
+   ---------- */
+
+// The narrowest possible stand-in for the global WebSocket: it records every instance constructed
+// (that count IS "did it try to reconnect") and fires nothing on its own, so each test decides
+// exactly what the failed attempt delivers and in which order.
+class StubSocket {
+  static made = [];
+  constructor(url) {
+    this.url = url;
+    this.listeners = {};
+    StubSocket.made.push(this);
+  }
+  addEventListener(type, fn) { (this.listeners[type] ||= []).push(fn); }
+  fire(type, ev = {}) { for (const fn of this.listeners[type] || []) fn(ev); }
+  close() {}
+  send() {}
+}
+
+async function rejectedConnectWith(order) {
+  const realWebSocket = globalThis.WebSocket;
+  StubSocket.made = [];
+  globalThis.WebSocket = StubSocket;
+  try {
+    const promise = createWsClientTransport("ws://stub.invalid/?seat=nobody", { reconnectDelayMs: 20 });
+    const attempt = StubSocket.made[0];
+    assert.ok(attempt, "the transport should have constructed a socket");
+    for (const ev of order) attempt.fire(ev);
+    await assert.rejects(promise, "a failed first attempt must reject the caller's promise");
+    // Several reconnectDelayMs windows: a scheduled reconnect would have constructed by now.
+    await new Promise(r => setTimeout(r, 150));
+    return StubSocket.made.length;
+  } finally { globalThis.WebSocket = realWebSocket; }
+}
+
+test("a rejected first connect never reconnects — 'error' before 'close' (the ordering that leaked)", async () => {
+  const attempts = await rejectedConnectWith(["error", "close"]);
+  assert.equal(attempts, 1, `a rejected connect retried ${attempts - 1} time(s) nobody asked for`);
+});
+
+test("a rejected first connect never reconnects — 'close' before 'error' (the ordering that happened to be safe)", async () => {
+  const attempts = await rejectedConnectWith(["close", "error"]);
+  assert.equal(attempts, 1, `a rejected connect retried ${attempts - 1} time(s) nobody asked for`);
+});
+
+// A LIVE transport must still reconnect after a real drop — that is T-029b's whole point, and the
+// reason the fix splits the flag rather than removing the reconnect. The tests above this block
+// already cover it against a real server and a real destroyed socket; nothing here weakens them.

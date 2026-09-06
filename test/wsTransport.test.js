@@ -376,5 +376,10 @@ test("attachWsMatch(...).close() stops accepting new upgrades and closes every l
     // timeout to observe that "nothing answers" state, which isn't worth the wall-clock cost here.
     // The one thing this test actually needs is idempotence, which the assertion below proves.
     assert.doesNotThrow(() => wsMatch.close(), "closing the ws match attachment twice must be harmless");
+    // The client is deliberately still live here, and a live transport that loses its connection
+    // retries forever by design (T-029b) — so this test has to hand it back, or it leaves a
+    // reconnect timer running for the rest of the process's life. `node --test` force-exits a
+    // worker when its file finishes and so hid that; running this file directly did not.
+    transport.close();
   } finally { stopTicking(); server.close(); }
 });
