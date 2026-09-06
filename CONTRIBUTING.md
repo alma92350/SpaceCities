@@ -150,7 +150,7 @@ in `test/slow/` only if it genuinely needs to drive real matches; the default is
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   ```
 
-## Protecting the default branch (one-time repo setup — ready to apply)
+## Protecting the default branch
 
 Everything above is enforced by tests, and the tests run in CI on every push and pull request. But
 nothing stops a red build being merged anyway, and that is not hypothetical: `npm run typecheck`
@@ -158,44 +158,71 @@ failed on every commit from 2026-08-05 to 2026-08-08 in the upstream repo this o
 and two PRs there both merged straight through it. A gate nobody is required to pass is a gate that
 eventually gets walked past.
 
-**The precondition this was waiting on is now met.** The paragraph here used to say "not yet
-applied, deliberately", because the repository had no `main` branch — its only branch was
-`claude/spacecities-multiplayer-rts-port-hp9195`, and protecting the *only* branch that exists
-would have locked out the direct-push workflow the port was using to land Phase 0. `main` exists
-now and is the default branch, so that reason is gone and the ruleset below should go on.
+It went quiet in a way worth recording, because it was not the way this section predicted. On
+2026-09-02 the repository's Actions allowance ran out (2,000/2,000 on a private repo's free tier)
+and every run from then on failed in 2-5 seconds having never started a runner. No workflow was
+broken and no test was failing; the gate simply stopped existing, and the red X it left on each
+commit looked enough like an ordinary failure that four commits merged behind it. A gate nobody is
+required to pass is one thing. A gate that silently stops running is worse, because it still
+reports something.
 
-Everything in it is still correct as written; only the check LIST has grown, by the slow-test job
-(see below). Until somebody applies it, this whole section is a description of a gate rather than
-a gate — which is exactly the failure mode it was written about.
+**This is now applied.** The repository is public (Actions minutes are unlimited and free for
+public repositories, which also removes the failure above permanently) and the ruleset below is
+active. It is a repository setting, so it cannot live in a file here — this section is the record
+of what was configured, and the place to update if it ever changes.
 
-This is a repository setting, so it cannot live in a file here. It takes about two minutes:
+**Settings → Rules → Rulesets → New branch ruleset**
 
-**Settings → Branches → Add branch ruleset** (or *Add rule* on the classic UI)
-
-- Target branch: `main`
-- ☑ **Require status checks to pass before merging**, and add all four by name — **confirmed
-  present and correctly named in `.github/workflows/test.yml`**:
+- Name: `main protection`, Enforcement status: **Active**
+- Target branches: **Include default branch** (`main`)
+- ☑ **Require a pull request before merging.** Development is PR-based from 2026-09-06; it was
+  direct-push to `main` for the whole port before that (`TASKS.md` T-005). This is not only about
+  review — required status checks cannot be satisfied by a direct push at all, since the checks
+  run *after* the push and a fresh commit has none yet. So the two rules come as a pair: choosing
+  to require checks is choosing to work on branches.
+- ☑ **Require status checks to pass**, and add all three by name — **confirmed present and
+  correctly named in `.github/workflows/test.yml`**:
   - `tests (node 22)`
   - `browser smoke test`
   - `slow tests (ailab sweeps)`
 
-  All three must be listed. There used to be a fourth, `tests (node 20)`, and its removal is worth
-  understanding rather than copying: `package.json` claimed `">=20"` while the multiplayer client
-  uses the global `WebSocket`, which Node only exposes from 22. That leg could never pass, and it
-  did not fail cleanly either — it hung awaiting connections that could not open, for 36 minutes
-  against 72 seconds on the Node 22 leg, so the whole gate read as broken. The matrix now names
-  exactly the versions actually supported, and `test/runtime-floor.test.js` keeps `package.json`,
-  the Dockerfile and this matrix agreeing. The
-  smoke job is the only check that can see a page which parses cleanly and then throws on load.
-  And the slow job is where the 72 long-running bench guards live since they were split out of
-  `npm test` — they are not optional, they are just off the inner loop, so leaving them out of
-  this list is the one way that split could turn into a silent deletion of 72 tests.
+  All three must be listed, and each earns its place differently. The Node 22 job is the suite.
+  The smoke job is the only check that can see a page which parses cleanly and then throws on
+  load. The slow job holds the 72 long-running bench guards since they were split out of
+  `npm test` — they are not optional, only off the inner loop, so leaving them out of this list is
+  the one way that split could quietly become a deletion of 72 tests.
+
+  There used to be a fourth, `tests (node 20)`, and its removal is worth understanding rather than
+  repeating: `package.json` claimed `">=20"` while the multiplayer client uses the global
+  `WebSocket`, which Node only exposes from 22. That leg could never pass — and it did not fail
+  cleanly either, it hung awaiting connections that could not open, 36 minutes against 72 seconds
+  on the Node 22 leg, so the whole gate read as broken rather than as one false version claim. The
+  matrix now names only the versions actually supported, and `test/runtime-floor.test.js` keeps
+  `package.json`, the Dockerfile and that matrix agreeing so they cannot drift apart again.
 - ☑ **Require branches to be up to date before merging** — so a check that passed against a stale
   base cannot count for a merge onto a newer one.
 - ☑ **Block force pushes**
 
-Leave "Require a pull request before merging" to taste; it is orthogonal to the failure above,
-which was about a red check rather than an unreviewed one.
+A check only appears in that picker once it has reported recently, so if one is missing, push
+something first and come back.
+
+## Day-to-day workflow
+
+Since 2026-09-06, `main` is protected and takes no direct pushes. The loop is:
+
+```
+git checkout -b some-change     # branch off an up-to-date main
+npm test                        # ~60s; the inner loop, run it constantly
+npm run typecheck               # and before you push
+git push -u origin some-change
+```
+
+then open a pull request and merge it once the three checks are green. `npm run test:slow` is not
+part of the inner loop but CI runs it on the PR, so run it locally too for anything touching the
+AI bench, rather than discovering it at merge time.
+
+The point of the branch is not ceremony: it is that CI can only vouch for a commit *after* it
+exists somewhere, and a branch is the somewhere that is not yet `main`.
 
 The check names come from `.github/workflows/test.yml`'s job name
 (`name: tests (node ${{ matrix.node-version }})`), so adding a Node version to the matrix adds a
