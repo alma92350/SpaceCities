@@ -180,7 +180,7 @@ export function detonateBomb(state, bomb) {
       // unitType/kind (docs/improvement-proposals.md "Tiered destruction"): same additive fields
       // engine/combat.js's own entityKilled pushes carry, so a blast's casualties get the same
       // size-scaled death ring/sound as an ordinary kill, not the flat default.
-      state.events.push({ type: "entityKilled", x: e.x, y: e.y, owner: e.owner, unitType: e.type, kind: e.kind });
+      state.events.push({ type: "entityKilled", id: e.id, x: e.x, y: e.y, owner: e.owner, unitType: e.type, kind: e.kind });
     }
   }
   state.events.push({

@@ -61,6 +61,15 @@
                                                     opened (first join OR a reconnect) — cancels any
                                                     pending grace timer and hands control back if the
                                                     AI had already taken over
+       {type:"describeMap"}                       (agents) ask for this match's own STATIC map
+                                                    reference — every node's commodity/position/max,
+                                                    the map bounds, the tick rate — answered with one
+                                                    {type:"mapMeta", map, nodes} message. Exists
+                                                    because engine/projection.js ships a node as
+                                                    {id, amount} only (a browser client regenerates
+                                                    the rest from the seed; an MCP agent cannot).
+                                                    Request/response, not a post at boot: the
+                                                    consumer attaches its listener after an await.
        {type:"fingerprint", seat, tick, fp}  (T-040)  a seat's own periodic self-check
                                                     (net/fingerprint.js's seatFingerprint, computed
                                                     client-side) — compared against this worker's own
@@ -211,6 +220,27 @@ parentPort.on("message", msg => {
       const seq = msg.envelope && Number.isInteger(msg.envelope.seq) ? msg.envelope.seq : null;
       if (seq !== null) parentPort.postMessage({ type: "commandResult", seat: msg.seat, seq, result: { ok: false, code: admitted.code } });
     }
+    return;
+  }
+  if (msg.type === "describeMap") {
+    // Agent-observability: the STATIC half of this match's map — what each resource node actually
+    // is and where, plus map bounds and tick rate. engine/projection.js deliberately ships only
+    // {id, amount} per node, because a browser client regenerates the rest deterministically from
+    // the seed it already has; an MCP agent has no map generator and so had no way to learn a
+    // node's commodity except by walking a worker to it and watching which counter moved — the
+    // single gap that makes "mine the closest ore" an unanswerable instruction over MCP.
+    // Request/response rather than an unprompted post at boot, because a consumer
+    // (server/mcpObservationCache.js) attaches its listener AFTER an await in tools/serve.js and
+    // would miss a one-shot message sent before that.
+    // No fog is bypassed by answering this in full: the merge on the other side is keyed by the
+    // ids in that seat's OWN fog-filtered proj.nodes, so an undiscovered node stays invisible —
+    // this adds detail to nodes a seat can already see, never nodes. Node positions are in any
+    // case already public to any client that can regenerate the map from the seed.
+    parentPort.postMessage({
+      type: "mapMeta",
+      map: { width: match.state.map.width, height: match.state.map.height, planetId: match.state.planetId, tickRate: Math.round(1000 / TICK_MS) },
+      nodes: match.state.map.nodes.map(n => ({ id: n.id, com: n.com, x: n.x, y: n.y, max: n.max, hidden: !!n.hidden })),
+    });
     return;
   }
   if (msg.type === "surrender") {

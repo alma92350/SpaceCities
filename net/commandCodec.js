@@ -22,10 +22,10 @@
 "use strict";
 
 import * as cmd from "../engine/commands.js";
-import { queueProduction, cancelProduction, researchUpgrade } from "../engine/production.js";
+import { queueProduction, cancelProduction, researchUpgrade, productionRefusalReason } from "../engine/production.js";
 import { researchTech, cancelResearch } from "../engine/techtree.js";
 import { lightFuse } from "../engine/bomb.js";
-import { BUILDINGS } from "../engine/entities.js";
+import { BUILDINGS, UNITS } from "../engine/entities.js";
 import { FORMATION_SHAPES, LEADER_POSITIONS } from "../engine/formation.js";
 import { LOGI_PRIORITIES } from "../engine/haul.js";
 import { isVisibleAt, isExploredAt, isNodeDiscovered } from "../engine/fog.js";
@@ -298,7 +298,10 @@ const SCHEMA = {
     // re-run by the engine against authoritative state at THIS tick. Re-implementing none of it
     // is the payoff of ADR-0006 D1.
     const id = cmd.issueBuild(state, w.result.id, c.b, c.x, c.y);
-    return id ? ok({ buildingId: id }) : err(REJECT.REFUSED);
+    if (id) return ok({ buildingId: id });
+    // Which of those engine-side checks actually said no — see engine/commands.js's own
+    // buildRefusalReason for why the discriminator lives there rather than being re-derived here.
+    return { ok: false, code: REJECT.REFUSED, reason: cmd.buildRefusalReason(state, w.result.id, c.b, c.x, c.y) };
   }},
 
   // T-019: issueRecycle's own optional owner param is passed too — redundant with this codec's
@@ -357,11 +360,30 @@ const SCHEMA = {
      paying player from building.owner internally (engine/production.js, engine/techtree.js) —
      same exposure class as issueBuild (dossier 02 §2.2) until this resolver scopes the building
      to the submitting owner FIRST. */
+  /* A queued job's own receipt (agent-observability). This used to `return ok()` unconditionally —
+     including when engine/production.js's queueProduction had refused — so a caller got the exact
+     same empty success for "queued" and for "declined", and the ore isn't debited until the job
+     actually starts, leaving nothing observable to tell them apart either. An agent reading that
+     as a silent no-op re-sends the same order several times, which is the failure this shape ends:
+     a refusal now reports WHY (productionRefusalReason, the same checks the engine itself just
+     ran), and a success reports the queue slot it landed in and how long the whole queue takes to
+     drain, so the caller can wait rather than re-order. `etaSeconds` is nominal build time only —
+     the raw def.buildTime sum, deliberately not the modifier/electrification-adjusted rate
+     updateProductionQueue actually advances at (that varies tick to tick with the power grid and
+     with buildings being razed), so it reads as the estimate its name says it is. */
   queueProduction: { run(state, owner, c) {
     if (typeof c.u !== "string" || !bool(c.alt)) return err(REJECT.MALFORMED);
     const b = ownBuilding(state, owner, c.building); if (!b.ok) return b;
-    queueProduction(state, b.result.id, c.u, !!c.alt);
-    return ok();
+    const building = b.result;
+    if (!queueProduction(state, building.id, c.u, !!c.alt)) {
+      return { ok: false, code: REJECT.REFUSED, reason: productionRefusalReason(state, building.id, c.u, !!c.alt) };
+    }
+    const queue = building.queue;
+    const etaSeconds = queue.reduce((sum, job, i) => {
+      const bt = UNITS[job.unitType]?.buildTime || 0;
+      return sum + (i === 0 ? bt * (1 - (job.progress || 0)) : bt);
+    }, 0);
+    return ok({ building: building.id, unit: c.u, queueIndex: queue.length - 1, queueLength: queue.length, etaSeconds });
   }},
 
   cancelProduction: { run(state, owner, c) {

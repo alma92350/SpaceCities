@@ -211,6 +211,10 @@
  * @property {number} y
  * @property {boolean} [hidden]   a cache, invisible until scouted
  * @property {number} [miners]    workers currently assigned (engine/gather.js saturation)
+ * @property {boolean} [depletedAnnounced]  this node's own one-shot "it ran dry" latch — set when
+ *   engine/gather.js pushes its nodeDepleted event, so several miners landing the finishing tick
+ *   together announce it once between them rather than once each. Transient, never persisted (a
+ *   reloaded dry node simply never announces again, which is the same outcome).
  * @property {boolean} [crater]   spawned by a Helium Bomb detonation (engine/bomb.js), not
  *   engine/map.js generation — needs its whole shape saved/restored, not just its amount
  *   (engine/persist.js)

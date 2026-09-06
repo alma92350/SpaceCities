@@ -75,6 +75,11 @@ function nextNodeAfterDepletion(state, unit, node) {
     if (better) { best = n; bestUnderCap = underCap; bestDist = dist; }
   }
   unit.order = best ? { type: "gather", nodeId: best.id, phase: "toNode" } : null;
+  // unitIdle (agent-observability): a worker whose seam ran dry with nothing left to retarget to
+  // simply stopped, silently — no event, and nothing in a unit's projected shape an observer could
+  // poll for it either, so a match could quietly rot with half an economy standing still. Emitted
+  // exactly at the one transition that produces an idle worker, never per-tick while it stays idle.
+  if (!best) state.events.push({ type: "unitIdle", id: unit.id, unitType: unit.type, reason: "node-depleted", x: unit.x, y: unit.y, owner: unit.owner });
 }
 
 /** @param {State} state @param {Unit} unit @param {number} dt */
@@ -109,6 +114,13 @@ export function updateGather(state, unit, dt) {
     const take = Math.min(def.gatherRate * miningEfficiency(node, def) * dt, node.amount, room);
     unit.cargo.qty += take;
     node.amount -= take;
+    // nodeDepleted (agent-observability): the pairing event for unitIdle above — announced ONCE per
+    // node (the flag), not once per miner that happens to land the finishing tick, and not again on
+    // every later tick a miner walks up to the dry seam.
+    if (node.amount <= 0 && !node.depletedAnnounced) {
+      node.depletedAnnounced = true;
+      state.events.push({ type: "nodeDepleted", id: node.id, com: node.com, x: node.x, y: node.y });
+    }
     if (unit.cargo.qty >= def.cargoCap - 1e-6 || node.amount <= 0) order.phase = "toDrop";
     return;
   }

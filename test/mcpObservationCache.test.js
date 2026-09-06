@@ -174,3 +174,36 @@ test("a wait for seat A is never resolved by seat B's own new event", async () =
   const result = await pending;
   assert.equal(result.timedOut, true, "seat ai's own new event must never resolve seat player's own wait");
 });
+
+
+/* ---------- the static map reference (agent-observability) ----------
+   engine/projection.js ships a node as {id, amount} only; an MCP agent has no map generator to
+   regenerate the rest from the seed, so the cache asks the worker for it once. Requested rather
+   than pushed at boot because tools/serve.js attaches this listener after an await and would miss
+   a one-shot message. */
+
+test("attachProjectionCache asks its worker for the map reference and remembers the reply", () => {
+  const worker = new EventEmitter();
+  const asked = [];
+  worker.postMessage = msg => asked.push(msg);
+  const cache = attachProjectionCache(worker);
+
+  assert.deepEqual(asked, [{ type: "describeMap" }]);
+  assert.equal(cache.mapMeta(), null, "null until the reply lands — a tool degrades, never blocks");
+
+  worker.emit("message", {
+    type: "mapMeta",
+    map: { width: 100, height: 80, planetId: "ferros", tickRate: 20 },
+    nodes: [{ id: "n1", com: "ore", x: 10, y: 20, max: 500, hidden: false }],
+  });
+
+  const meta = cache.mapMeta();
+  assert.equal(meta.map.width, 100);
+  assert.equal(meta.nodesById.get("n1").com, "ore");
+});
+
+test("attachProjectionCache tolerates a worker double with no postMessage at all", () => {
+  const worker = new EventEmitter();   // no postMessage, as every pre-existing caller's double has
+  const cache = attachProjectionCache(worker);
+  assert.equal(cache.mapMeta(), null);
+});
