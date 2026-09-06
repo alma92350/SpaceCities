@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    ADR-0009 M3 (T-028b): delta-encode a projectFor(state, seat) snapshot against the previous one
    sent to the same connection, instead of re-sending everything every tick. T-015 measured that a
@@ -71,6 +72,10 @@ function roundNumbers(value) {
  *   QUANTIZE_DP decimal places. players/events/tick/etc. are left exactly as they were — tiny
  *   regardless, and always sent in full, so there is nothing to gain by rounding them.
  */
+/**
+ * @param {Object} proj a projectFor()-shaped snapshot
+ * @returns {Object} the same shape with every entity number rounded to wire precision
+ */
 export function quantizeForWire(proj) {
   const out = { ...proj };
   for (const field of ENTITY_FIELDS) out[field] = proj[field].map(roundNumbers);
@@ -128,6 +133,11 @@ function applyEntityDiff(prevArr, diff) {
  * @param {Object} curr - the current one
  * @returns {Object} a delta: added/removed/changed for units/buildings/nodes, everything else
  *   (players, events, tick, time, over, winner, winReason, owners) carried in full
+ */
+/**
+ * @param {Object} prev the snapshot the receiver last reconstructed
+ * @param {Object} curr the snapshot being sent now
+ * @returns {Object} a patch applyDelta(prev, ...) turns back into curr
  */
 export function computeDelta(prev, curr) {
   const delta = { ...curr };

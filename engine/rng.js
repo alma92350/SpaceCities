@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    The sim's one sanctioned source of randomness: a small, fast, seedable
    PRNG. Passing a mulberry32(seed) into createGameState makes a whole match
@@ -13,6 +14,10 @@
 // spread-fire target pick. It lived, byte-identical, in four separate modules; centralised here
 // (the natural home for deterministic number sources) so a change can't drift between copies.
 // All ids are ASCII, so this is exact; >>> 0 keeps it an unsigned 32-bit int.
+/**
+ * @param {string} s an entity id, or any ASCII key worth a stable tie-break
+ * @returns {number} an unsigned 32-bit hash
+ */
 export function hashStr(s) {
   let h = 7;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
@@ -21,6 +26,10 @@ export function hashStr(s) {
 
 // mulberry32: 32-bit state, good distribution, identical output across JS
 // engines for the same seed. Returns a function producing floats in [0, 1).
+/**
+ * @param {number} seed
+ * @returns {() => number} a function producing floats in [0, 1)
+ */
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function () {

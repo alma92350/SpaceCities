@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    The Antimatter Gate — Odyssey's endgame wonder (Phase 3). A `wonder:true`
    building that CHARGES by consuming strategic goods over time; at full charge the
@@ -29,6 +30,12 @@ import { BUILDINGS } from "./entities.js";
 // wonder. `charge` is a 0..1 float on the building (persists for free — serPlanet
 // serializes whole building objects), so a save mid-charge round-trips and
 // continues identically. Reads only building/player state — deterministic.
+/**
+ * @param {State} state
+ * @param {Building} building
+ * @param {number} dt seconds of sim time
+ * @returns {void}
+ */
 export function updateWonder(state, building, dt) {
   if (building.constructing) return;
   const def = BUILDINGS[building.type];
@@ -73,6 +80,11 @@ export function updateWonder(state, building, dt) {
 // a galaxy-wide event, sensed regardless of line-of-sight; a caller that needs visibility (the
 // AI targeting the player's Gate, the player targeting a rival's) applies its OWN fog check at
 // the seam that actually acts on it.
+/**
+ * @param {State} state
+ * @param {string} owner
+ * @returns {Building | null}
+ */
 export function chargingWonderOf(state, owner) {
   let best = null;
   for (const b of state.buildings.values()) {
@@ -88,6 +100,10 @@ export function chargingWonderOf(state, owner) {
 // siege-target bias in engine/ai.js, and the diplomacy war-push in engine/diplomacy.js).
 // Byte-identical to the pre-generalization function: a thin delegate, so neither caller
 // changes at all.
+/**
+ * @param {State} state
+ * @returns {Building | null}
+ */
 export function chargingPlayerWonder(state) {
   return chargingWonderOf(state, "player");
 }

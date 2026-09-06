@@ -88,12 +88,22 @@ instead of an untyped bag. **No build step, no runtime dependency** — the ship
 ES modules.
 
 Type checking is **opt-in per file**: a file is checked only if it starts with a `// @ts-check`
-pragma. Twenty engine files opt in today — the core data and hot-path modules (`state.js`, `movement.js`,
-`gather.js`, `grid.js`, `fog.js`, `separation.js`, `formation.js`, `haul.js`, `recycle.js`,
-`wreckage.js`) plus `supply.js`, `colliders.js`, `scout.js`, `victory.js`, `production.js`,
-`persist.js`, `aiCommon.js`, `aiStrategy.js`, `aiDifficulty.js` and `aiArchetypes.js`. Expand
-coverage file-by-file by adding the pragma **and annotating** the functions'
-`state`/`unit`/`building` params with the shared typedefs.
+pragma. **29 of the 51 engine files** opt in today — the core data and hot-path modules
+(`state.js`, `movement.js`, `gather.js`, `grid.js`, `fog.js`, `separation.js`, `formation.js`,
+`haul.js`, `recycle.js`, `wreckage.js`), plus `supply.js`, `colliders.js`, `scout.js`,
+`victory.js`, `production.js`, `persist.js`, `aiCommon.js`, `aiStrategy.js`, `aiDifficulty.js`,
+`aiArchetypes.js`, and most recently `rng.js`, `factions.js`, `colony.js`, `wonder.js`,
+`projectionDelta.js` and `colonyPolicy.js`. Rather than counting the list by hand, ask the tree:
+
+```
+for f in engine/*.js; do head -1 "$f" | grep -q '@ts-check' || echo "$f"; done   # what's left
+```
+
+Expand coverage file-by-file by adding the pragma **and annotating** the functions'
+`state`/`unit`/`building` params with the shared typedefs. It is worth doing rather than
+box-ticking: adding those six turned up `Building.capital` — a field `engine/galaxy.js` writes and
+`engine/colony.js` reads to refuse packing a Capital, declared on no typedef — plus two return
+types this guide's own author had written down wrong.
 
 The annotation half is not optional: `strict` and `noImplicitAny` are off, so an un-annotated
 parameter is `any` and the pragma alone checks nothing. `test/types-contract.test.js` enforces both
