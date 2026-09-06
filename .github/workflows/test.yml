@@ -4,15 +4,50 @@ on:
   push:
   pull_request:
 
+# Cancel a run that a newer push has already superseded — but ONLY on a branch that is not the
+# default one.
+#
+# The asymmetry is the point. On a feature branch, an in-flight run for a commit you have already
+# replaced is answering a question nobody is asking any more, and cancelling it frees the runner
+# for the commit you actually care about. On main it is the opposite: this project pushes directly
+# to main, several times a day, and a cancelled run leaves a commit on the permanent history with
+# no verdict — so a later bisect cannot say which of five commits turned the suite red, which is
+# exactly when you most want to know. Every commit on main gets its own answer.
+#
+# This is about runner queueing and feedback latency, not cost: Actions minutes are free and
+# unlimited for a public repository, so there is nothing here to save by skipping a main run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        # The game targets Node >=20 (see package.json engines); run the suite on
-        # the current LTS lines so a version-specific regression can't slip through.
-        node-version: [20, 22]
+        # Node 22 only, and the narrowing is a correction rather than a retreat.
+        #
+        # This read [20, 22] against a package.json that claimed ">=20". That claim was false:
+        # net/wsClientTransport.js and net/wsSpectatorTransport.js construct a global `WebSocket`,
+        # which Node exposes only from 22 (on 20 it exists solely behind --experimental-websocket).
+        # So on Node 20 the multiplayer client cannot connect at all, and the tests for it do not
+        # fail cleanly — they HANG, awaiting a connection that can never open, until the job's own
+        # timeout. Observed: `tests (node 20)` ran 36 minutes while `tests (node 22)` finished the
+        # identical suite in 72 seconds. A leg that can only ever hang is worse than no leg, because
+        # a run that never concludes reads as "CI is broken" rather than "that version is not
+        # supported" — which is precisely how it was read.
+        #
+        # 22 is also what actually ships: the Dockerfile is FROM node:22-slim. So the matrix, the
+        # engines field and the deployed image now say the same thing, and test/runtime-floor.test.js
+        # asserts they keep saying it.
+        #
+        # WHY NOT ADD 24 to keep two legs. Because it is not currently true either, and adding it
+        # would recreate this exact situation with a different number. On Node 24 every test passes,
+        # but four files (httpServer, wsReconnect, wsTransport, wsWorkerTransport) leave a handle
+        # open and the process never exits — a real cleanup bug in those tests, worth fixing on its
+        # own terms, and worth adding a 24 leg the day it is fixed. Not before.
+        node-version: [22]
     name: tests (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v5
@@ -40,6 +75,34 @@ jobs:
       # deliberately, in its own commit, so a compiler upgrade is reviewable on its own.
       - name: Type-check the annotated files
         run: npx --yes --package typescript@5.7.2 -- tsc -p jsconfig.json
+
+  # The long half of the ailab guards, as its own job.
+  #
+  # These 72 tests drive real matches and take ~4 minutes; the other ~3200 tests in the repo take
+  # under 25 seconds combined. Leaving them in `npm test` meant every `npm test` — the command
+  # CONTRIBUTING.md tells a contributor to run on every change — was gated end to end on an
+  # AI-tuning sweep that almost no commit can affect, and a red-green loop measured in minutes is
+  # a loop people quietly stop running.
+  #
+  # A SEPARATE JOB, NOT A SKIP. Nothing here is optional or conditional: it runs on every push and
+  # every pull request, exactly like the fast suite, and belongs in the required-checks list in
+  # CONTRIBUTING.md. It is only taken off the critical path of the inner loop, not out of the
+  # build. test/suite-integrity.test.js pins the arrangement from the other side, so the slow half
+  # cannot become an empty directory that passes vacuously.
+  #
+  # ONE NODE VERSION, deliberately. These tests exercise the sim, which the fast matrix already
+  # covers on both LTS lines; running four minutes of sweeps twice would cost eight to learn the
+  # same thing.
+  slow:
+    runs-on: ubuntu-latest
+    name: slow tests (ailab sweeps)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Run the long-running bench guards
+        run: npm run test:slow
 
   # The suite above is headless and dependency-free, which is the whole point of it — and it means
   # nothing in it can see a page that parses, imports cleanly, and then throws on load. With no
@@ -76,3 +139,16 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Boot the game in a real browser
         run: npm run smoke
+      # A SECOND step in this job rather than a job of its own, for two reasons: Chromium is
+      # already installed here (a separate job would download it again to learn the same thing),
+      # and the branch ruleset names its required checks one per JOB — so a new job would silently
+      # not be required until somebody remembered to add it, which is the exact failure mode
+      # CONTRIBUTING.md's protection section is about. As a step, it is covered by the
+      # `browser smoke test` check that is already required.
+      #
+      # What it adds: two browsers, one server, a real shared link. Everything multiplayer is
+      # tested one layer down over real sockets in Node, and the single-page smoke test above
+      # plays a skirmish — between them sits the path a real player takes, and it was uncovered.
+      # It caught a live-match autosave crash on its first run.
+      - name: Two browsers, one shared link — the real multiplayer path
+        run: npm run smoke:mp

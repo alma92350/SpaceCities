@@ -203,6 +203,13 @@ match.emitAck = rec => {
 };
 
 parentPort.on("message", msg => {
+  // "Say that again": re-answers the ready message above for a parent that attached too late to
+  // hear it the first time. Idempotent and read-only — it reports what this worker already is, and
+  // starts nothing — so it is safe to ask at any point in a match's life, and safe to ask twice.
+  if (msg.type === "ready?") {
+    parentPort.postMessage(readyMessage());
+    return;
+  }
   if (msg.type === "command") {
     const admitted = admit(match, msg.envelope, msg.seat);
     // Mirrors net/wsServerTransport.js's own in-process reasoning exactly: a shape-rejected
@@ -304,7 +311,18 @@ parentPort.on("message", msg => {
   }
 });
 
-parentPort.postMessage({ type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId });
+// The one message every attachment needs before it can route anything (net/wsWorkerTransport.js's
+// attachWsMatchWorker resolves on it). It is posted EAGERLY, as it always was, so the ordinary
+// attach-immediately path costs nothing — but a Worker's port is flowing from construction, so this
+// is DROPPED, not queued, if the parent has not attached its listener yet. That is an ordinary
+// shape (spawn several workers, attach to each in turn) and it used to leave the parent bound to
+// `matchId: undefined`, rejecting every upgrade in silence. So the same answer is also available on
+// REQUEST below: a parent that missed this one asks for it, rather than waiting forever for a
+// message that has already been and gone.
+function readyMessage() {
+  return { type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId };
+}
+parentPort.postMessage(readyMessage());
 
 // T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only ever
 // auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this file to do

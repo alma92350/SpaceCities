@@ -1,5 +1,5 @@
 {
-  "//": "Editor + `npm run typecheck` config. NOT a build step — nothing is emitted (noEmit) and the shipped code stays plain ES modules. checkJs is off, so ONLY files that opt in with a `// @ts-check` pragma are error-checked; this lets type coverage grow file-by-file. The shared shapes live in engine/types.js. NOTE: the pragma alone buys nothing while strict/noImplicitAny are off — an un-annotated param is `any`, so a file must annotate its exports with the shared typedefs to actually be checked (test/types-contract.test.js enforces that). tools/ is in the program so the ailab/selfplay benches can opt in too.",
+  "//": "Editor + `npm run typecheck` config. NOT a build step — nothing is emitted (noEmit) and the shipped code stays plain ES modules. checkJs is off, so ONLY files that opt in with a `// @ts-check` pragma are error-checked; this lets type coverage grow file-by-file. The shared shapes live in engine/types.js. NOTE: the pragma alone buys nothing while strict/noImplicitAny are off — an un-annotated param is `any`, so a file must annotate its exports with the shared typedefs to actually be checked (test/types-contract.test.js enforces that). tools/ is in the program so the ailab/selfplay benches can opt in too. net/ and server/ are in it for the same reason and were NOT until 2026-09-06: the entire multiplayer transport and match-server layer sat outside the program, so a `// @ts-check` pragma added to any of it would have checked nothing at all, silently. noUnusedLocals is on — the one genuine lint rule available here at zero dependency cost, since it needs no linter, only the compiler already being run; it applies to the @ts-check'ed files, which is where it can be trusted.",
   "compilerOptions": {
     "checkJs": false,
     "allowJs": true,
@@ -9,10 +9,11 @@
     "moduleResolution": "bundler",
     "strict": false,
     "noImplicitAny": false,
+    "noUnusedLocals": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "lib": ["ESNext", "DOM", "DOM.Iterable"]
   },
-  "include": ["*.js", "engine/**/*.js", "tools/**/*.js"],
+  "include": ["*.js", "engine/**/*.js", "net/**/*.js", "server/**/*.js", "tools/**/*.js"],
   "exclude": ["node_modules", "test"]
 }

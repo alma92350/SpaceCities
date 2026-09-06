@@ -145,6 +145,19 @@ export class FakeElement extends EventTarget {
   focus() { this._focused = true; }
   blur() { this._focused = false; }
 
+  // A real <select>'s `.value` is its selected option's value, and with nothing selected that is
+  // the FIRST option — which is what every "the user didn't touch this dial" path reads. Without
+  // it, `Number(sizeSelect.value)` is NaN and a test asserting on a POST body would be asserting
+  // against a shape the browser never produces. An explicit assignment still wins, exactly as it
+  // does in the real DOM.
+  get value() {
+    if (this._value !== undefined) return this._value;
+    if (this.tagName === "select") return this.children[0]?.value;
+    return undefined;
+  }
+  set value(v) { this._value = v; }
+  select() { this._selected = true; }
+
   getContext() { return config.context(); }
   toDataURL() { return "data:image/fake,"; }
   getBoundingClientRect() { return { left: 0, top: 0, width: this.clientWidth, height: this.clientHeight }; }
@@ -162,6 +175,10 @@ export function fakeDocument() {
   return {
     getElementById(id) { if (!byId.has(id)) byId.set(id, new FakeElement("div")); return byId.get(id); },
     createElement(tag) { return new FakeElement(tag); },
+    // A text node is not an element, but it is appended like one (lobbyScreen.js's own
+    // "Allow spectators" label), so the cheapest faithful stand-in is a node that carries its
+    // text and has an empty child list like everything else the walkers here traverse.
+    createTextNode(text) { const n = new FakeElement("#text"); n.textContent = text; return n; },
     body,
   };
 }

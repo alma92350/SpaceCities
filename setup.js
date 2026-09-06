@@ -21,7 +21,7 @@ import { hasSave, loadGame, hasOdysseySave, loadOdyssey } from "./saveload.js";
 import { APP_VERSION } from "./version.js";
 import { startGame, startScenario, startRaider, startBounty, startOdyssey } from "./boot.js";
 import * as sound from "./sound.js";
-import { renderCompetition } from "./competition.js";
+import { renderCompetition } from "./competitionScreens.js";
 
 // The curated roster and its order both come from the AI archetype table, so
 // the picker, the opponent temperament, and the tests all agree on one list.
