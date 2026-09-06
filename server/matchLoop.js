@@ -82,7 +82,13 @@ const ownerIndex = (state, owner) => state.owners.indexOf(owner);
 /** @param {Object|null} recResult - a log record's own `.result` field @returns {{ok:boolean, code?:string, result?:*}} */
 export function toCommandResult(recResult) {
   if (recResult && typeof recResult === "object" && "rejected" in recResult) {
-    return { ok: false, code: recResult.rejected };
+    // `reason` (agent-observability) is the codec's own optional, human/machine-readable detail
+    // BEHIND a coarse reject code — "refused" alone can't distinguish a locked unit from an
+    // unaffordable one. Only present when the codec supplied one, so every existing rejection's
+    // wire shape is byte-identical to before.
+    return recResult.reason
+      ? { ok: false, code: recResult.rejected, reason: recResult.reason }
+      : { ok: false, code: recResult.rejected };
   }
   return { ok: true, result: recResult ?? null };
 }
@@ -154,7 +160,7 @@ export function stepMatch(match, dt) {
       // know why nothing happened) — it carries no state mutation, so it can't affect replay,
       // but it must still be PRESENT in the log for the log to be auditable (dossier §5.3).
       const res = apply(state, rec.owner, rec.cmd);
-      rec.result = res.ok ? res.result : { rejected: res.code };
+      rec.result = res.ok ? res.result : { rejected: res.code, ...(res.reason ? { reason: res.reason } : {}) };
       rec.appliedAtTick = state.tick;
       log.push(rec);
       match.emitAck(rec);

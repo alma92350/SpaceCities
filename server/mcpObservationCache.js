@@ -35,10 +35,20 @@ import { SPECTATOR_SEAT } from "../engine/projection.js";
  * @returns {{
  *   latestProjFor: (seat: string) => Object|null,
  *   waitForEvent: (seat: string, timeoutMs: number) => Promise<{tick: number|null, events: Object[], timedOut: boolean}>,
+ *   mapMeta: () => {map: Object, nodesById: Map<string, Object>}|null,
  * }}
  */
 export function attachProjectionCache(worker) {
   const bySeat = new Map();
+  // Agent-observability: this match's own STATIC map reference (node commodity/position/max, map
+  // bounds, tick rate), requested once here and answered by server/matchWorker.js's describeMap
+  // handler. Held OUTSIDE bySeat because it is not per-seat and carries no fog: a caller
+  // (server/mcpObservationTools.js) only ever merges it onto the node ids in a seat's OWN
+  // fog-filtered projection, so an undiscovered node can never reach an answer through it.
+  // Requested rather than pushed at boot because this listener is attached after an await in
+  // tools/serve.js and would miss a one-shot message. null until the reply lands (a tool falls
+  // back to the plain {id, amount} shape until then, never blocks on it).
+  let mapMeta = null;
   /** @type {Map<string, Set<{baseline: Set<string>, settle: (r: Object) => void}>>} */
   const waitersBySeat = new Map();
 
@@ -55,6 +65,10 @@ export function attachProjectionCache(worker) {
   }
 
   worker.on("message", msg => {
+    if (msg && msg.type === "mapMeta") {
+      mapMeta = { map: msg.map, nodesById: new Map(msg.nodes.map(n => [n.id, n])) };
+      return;
+    }
     // The spectator's own projection is a different, deliberately UNFILTERED audience
     // (engine/projection.js's projectForSpectator) — never cached under a real seat id, so it can
     // never be looked up as if it were some seat's own fog-safe view.
@@ -78,5 +92,9 @@ export function attachProjectionCache(worker) {
     });
   }
 
-  return { latestProjFor: seat => bySeat.get(seat) ?? null, waitForEvent };
+  // Tolerates a test double with no postMessage at all — every caller before this existed passes
+  // a real worker_threads Worker, and one that can't be asked simply leaves mapMeta null.
+  if (typeof worker.postMessage === "function") worker.postMessage({ type: "describeMap" });
+
+  return { latestProjFor: seat => bySeat.get(seat) ?? null, waitForEvent, mapMeta: () => mapMeta };
 }

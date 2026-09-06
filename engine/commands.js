@@ -426,6 +426,30 @@ export function issueHoldFormation(units, shape = "grid", leaderPos = "front", s
 // validated (and payment withheld) before anything is committed, so a bad
 // click never charges the player -- see engine/colliders.js for what
 // counts as valid ground.
+/**
+ * Why issueBuild(state, workerId, buildingType, x, y) would refuse — the SAME checks in the same
+ * order, as a machine-readable reason rather than issueBuild's own bare `null`. Same rationale as
+ * engine/production.js's productionRefusalReason: a human clicking a build button already sees the
+ * price, the lock, and the red placement ghost, while a caller driving the match over the wire got
+ * only "refused" and had to guess between "wrong worker", "too expensive", "not unlocked" and
+ * "can't place here" — net/commandCodec.js fills the reject's `reason` in from this. Read-only:
+ * issueBuild's own return type is unchanged, so no existing caller is affected.
+ * @param {State} state @param {string} workerId @param {string} buildingType
+ * @param {number} x @param {number} y @returns {string|null} null when the build would succeed
+ */
+export function buildRefusalReason(state, workerId, buildingType, x, y) {
+  const worker = state.units.get(workerId);
+  if (!worker) return "no-such-worker";
+  const def = BUILDINGS[buildingType];
+  if (!def) return "unknown-building-type";
+  if (def.odysseyOnly && !state.endless) return "odyssey-only-building";
+  if (!canBuildCategory(worker.type, def.category)) return "unit-cannot-build-this-category";
+  if (!canAfford(state.players[worker.owner].resources, def.cost)) return "cannot-afford";
+  if (!prereqsMet(state, worker.owner, def)) return "prereq-not-met";
+  if (!canPlaceBuilding(state, buildingType, x, y)) return "invalid-placement";
+  return null;
+}
+
 export function issueBuild(state, workerId, buildingType, x, y) {
   const worker = state.units.get(workerId);
   if (!worker) return null;

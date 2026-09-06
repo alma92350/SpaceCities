@@ -495,3 +495,51 @@ test("a collection-point hold survives a save/load with no quantity lost (T2)", 
   const after = Object.values(loaded.freight).reduce((a, v) => a + v, 0);
   assert.equal(after, before, "load-time truncation must never silently delete matter");
 });
+
+
+/* ---------- depletion is announced, not silent (agent-observability) ----------
+   A drained seam used to leave a worker standing still with no event and nothing in its projected
+   shape to poll — the quietest way for a match to rot. */
+
+test("a node running dry emits nodeDepleted exactly once, no matter how many miners land the last tick", () => {
+  const state = createGameState({ planetId: "ferros", rng: () => 0.5 });
+  const node = firstNode(state, "ore");
+  const workers = [...state.units.values()].filter(u => u.owner === "player" && u.type === "worker").slice(0, 2);
+  assert.ok(workers.length >= 1);
+  node.amount = 1;
+  for (const w of workers) {
+    w.x = node.x; w.y = node.y;
+    w.cargo = { com: "ore", qty: 0 };
+    w.order = { type: "gather", nodeId: node.id, phase: "mining" };
+  }
+  state.events.length = 0;
+  for (const w of workers) updateGather(state, w, 1);
+  const depleted = state.events.filter(e => e.type === "nodeDepleted");
+  assert.equal(depleted.length, 1, "announced once per node, not once per miner");
+  assert.equal(depleted[0].id, node.id);
+  assert.equal(depleted[0].com, "ore");
+
+  // And never again on a later tick against the same dry node.
+  state.events.length = 0;
+  for (const w of workers) updateGather(state, w, 1);
+  assert.equal(state.events.filter(e => e.type === "nodeDepleted").length, 0);
+});
+
+test("a gatherer left with nowhere to go emits unitIdle naming itself", () => {
+  const state = createGameState({ planetId: "ferros", rng: () => 0.5 });
+  const worker = [...state.units.values()].find(u => u.owner === "player" && u.type === "worker");
+  const node = firstNode(state, "ore");
+  // Nothing anywhere left to retarget to, so the retarget search must come up empty.
+  for (const n of state.map.nodes) n.amount = 0;
+  worker.x = node.x; worker.y = node.y;
+  worker.order = { type: "gather", nodeId: node.id, phase: "mining" };
+  state.events.length = 0;
+
+  updateGather(state, worker, 1);
+  assert.equal(worker.order, null);
+  const idle = state.events.find(e => e.type === "unitIdle");
+  assert.ok(idle, "a worker that just stopped working must say so");
+  assert.equal(idle.id, worker.id);
+  assert.equal(idle.owner, "player");
+  assert.equal(idle.reason, "node-depleted");
+});
