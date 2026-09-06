@@ -41,7 +41,7 @@
 
 import { UNITS, BUILDINGS } from "./entities.js";
 import { isVisibleAt } from "./fog.js";
-import { otherOwner } from "./aiCommon.js";
+import { opponentsOf, controllerFor } from "./aiCommon.js";
 // aiStrategy.js is the pure, import-free leaf its own header describes, so this is a downward
 // edge with no cycle — the same one aiWorkers/aiMilitary/aiEconomy already have.
 import { strategyFor } from "./aiStrategy.js";
@@ -136,23 +136,25 @@ export function isMilitaryBuilding(def) {
 }
 
 /**
- * What `owner` can SEE of its enemy this instant, valued in ore. The live half of the belief —
+ * What `owner` can SEE of its enemies this instant, valued in ore — every OTHER seat combined
+ * (T-043: opponentsOf, not one hardcoded rival), so the belief this feeds is "how much opposition
+ * have I seen", not "how much has this one particular rival got". The live half of the belief —
  * updateIntel folds this into the persistent estimate below.
  * @param {State} state @param {string} [owner]
  * @returns {{ mil: number, eco: number }}
  */
 export function sightEnemy(state, owner = "ai") {
-  const enemyOwner = otherOwner(owner);
+  const enemies = opponentsOf(state, owner);
   const fog = state.fogs[owner];
   let mil = 0, eco = 0;
   for (const u of state.units.values()) {
-    if (u.owner !== enemyOwner || !isVisibleAt(fog, u.x, u.y)) continue;
+    if (!enemies.includes(u.owner) || !isVisibleAt(fog, u.x, u.y)) continue;
     const def = UNITS[u.type];
     if (!def) continue;
     if (def.role === "combat") mil += costValue(def.cost); else eco += costValue(def.cost);
   }
   for (const b of state.buildings.values()) {
-    if (b.owner !== enemyOwner || !isVisibleAt(fog, b.x, b.y)) continue;
+    if (!enemies.includes(b.owner) || !isVisibleAt(fog, b.x, b.y)) continue;
     const def = BUILDINGS[b.type];
     if (!def) continue;
     if (isMilitaryBuilding(def)) mil += costValue(def.cost); else eco += costValue(def.cost);
@@ -179,7 +181,7 @@ export function sightEnemy(state, owner = "ai") {
  * @param {State} state @param {string} [owner] @returns {void}
  */
 export function updateIntel(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   if (!controller) return;
   const live = sightEnemy(state, owner);
   refreshChannel(controller, state.time, "intelMil", "intelMilAt", live.mil);
@@ -196,7 +198,7 @@ export function updateIntel(state, owner = "ai") {
  * @returns {{ posture: number|null, confidence: number, mil: number, eco: number, age: number|null }}
  */
 export function readEnemy(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   if (!controller) return { posture: null, confidence: 0, mil: 0, eco: 0, age: null };
   // Each channel's stored PEAK, faded by its own elapsed time — the fade lives here, at the read,
   // and is never written back (see channelValue).
@@ -276,7 +278,7 @@ export const ADAPT_RATE = 0.04;      // …and then moves at most this far per t
  * @param {State} state @param {string} [owner] @param {number} [adaptivity] @returns {number}
  */
 export function updateAdaptMode(state, owner = "ai", adaptivity = 1) {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   if (!controller) return ADAPT_NEUTRAL;
   const cur = controller.adaptMode == null ? ADAPT_NEUTRAL : controller.adaptMode;
   if (adaptivity <= 0) { controller.adaptMode = ADAPT_NEUTRAL; return ADAPT_NEUTRAL; }
@@ -312,7 +314,7 @@ const DEFENCE_SWING = 0.6;
  * @param {State} state @param {string} [owner] @returns {number}
  */
 export function adaptDefenceMult(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   const mode = controller && controller.adaptMode != null ? controller.adaptMode : ADAPT_NEUTRAL;
   const strategy = strategyFor(state, owner);
   const swing = DEFENCE_SWING * (strategy.defenceSwingMult ?? 1);

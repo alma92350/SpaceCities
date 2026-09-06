@@ -538,3 +538,439 @@ test("T-040: a desync report for one seat never fires for the other seat's own c
     assert.equal(sawDesync, false);
   } finally { await worker.terminate(); }
 });
+
+/* ---------- T-059a (FR-8): a real network trigger for engine/victory.js's own surrender() ---------- */
+// A low-level protocol test, same posture as T-036/T-040 above: no lobby, no WS, no MCP — those are
+// net/wsWorkerTransport.js's and server/mcpActionTools.js's own jobs (their own tests cover that
+// layer). This file only has to prove the worker's own reaction to {type:"surrender", seat} is
+// correct — surrender()'s own semantics (idempotent, N-seat standing, score-tiebreak exclusion) are
+// already exhaustively covered by test/victory.test.js and are not re-tested here.
+
+test("T-059a: {type:'surrender', seat} ends the match on the next tick, the OTHER seat winning by elimination", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "player" });
+    const overMsg = await waitFor(worker, m => m.type === "state" && m.seat === "ai" && m.proj.over === true, 3000);
+    assert.equal(overMsg.proj.winner, "ai", "the seat that surrendered must not be the winner");
+    assert.equal(overMsg.proj.winReason, "elimination", "surrender funnels through the same state.eliminated path a real defeat does — same reason string, by design (engine/victory.js)");
+  } finally { await worker.terminate(); }
+});
+
+test("T-059a: surrendering the seat driven by the built-in scripted AI is ignored — defense-in-depth against a malformed/stray message, mirroring endTurn's own identical guard", async () => {
+  // aiEnabled left at its default (true): seat "ai" is scripted-AI-controlled here, so a
+  // surrender claiming to be from it must never apply — no real connection could ever send this.
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "ai" });
+    // A real wait, not just "no over:true in one instant" — proving it was IGNORED needs to
+    // observe an absence over real time, several TICK_MS worth, the same pattern this file's own
+    // T-035/T-036 tests already establish for a negative result.
+    let sawOver = false;
+    const onMsg = m => { if (m.type === "state" && m.proj.over) sawOver = true; };
+    worker.on("message", onMsg);
+    await new Promise(resolve => setTimeout(resolve, 300));
+    worker.off("message", onMsg);
+    assert.equal(sawOver, false, "a scripted-AI seat has no real connection to surrender from — the match must keep going");
+  } finally { await worker.terminate(); }
+});
+
+test("T-059a: a second surrender for an already-eliminated seat is a harmless no-op", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "player" });
+    await waitFor(worker, m => m.type === "state" && m.proj.over === true, 3000);
+    // Must not throw, hang, or post anything further that a listener could mistake for a NEW result.
+    worker.postMessage({ type: "surrender", seat: "player" });
+    let sawSecondCommandResult = false;
+    const onMsg = m => { if (m.type === "commandResult") sawSecondCommandResult = true; };
+    worker.on("message", onMsg);
+    await new Promise(resolve => setTimeout(resolve, 200));
+    worker.off("message", onMsg);
+    assert.equal(sawSecondCommandResult, false);
+  } finally { await worker.terminate(); }
+});
+
+/* ---------- bugfix: pushState() must drain state.events every tick ---------- */
+// Reported live, by a human playing a real match against an MCP agent: a fast-firing unit's attack
+// tracer never disappeared. Root cause (see pushState()'s own comment above): state.events used to
+// accumulate for a live match's WHOLE lifetime (deliberately, for wait_for_event's own fog-correct
+// baseline diffing — server/mcpObservationCache.js), and engine/projection.js builds a seat's
+// proj.events fresh from that growing history every tick. engine/projectionDelta.js's computeDelta
+// assumes a projection's `events` field is ALREADY "just this tick's new ones" and always sends it
+// in full — true for the single-player client (boot.js drains its own state.events every frame),
+// false for a live match, so a real WS-relayed client kept re-receiving (and re-playing, via
+// boot.js's own processFrameEvents -> effects.js addTracer/addDeathFlash/sound) its ENTIRE event
+// history on every single incoming tick, forever. A 3-seat match here (not the 2-seat matches this
+// file otherwise uses) so surrendering ONE seat leaves 2 others standing — the match itself must
+// keep ticking (and pushing state) past the surrender, which is exactly what observing "the very
+// next tick's push" needs.
+test("bugfix: an event must not still be in the state push for the NEXT tick — state.events is drained every pushState, not just once at the end of the match", async () => {
+  const worker = new Worker(WORKER_FILE, {
+    workerData: {
+      createGameStateOpts: {
+        planetId: "ferros", seed: SEED,
+        ownerDefs: [
+          { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+          { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+          { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+        ],
+      },
+    },
+  });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "surrender", seat: "player" });
+    const hasSurrenderEvent = proj => (proj.events || []).some(e => e.type === "eliminated" && e.owner === "player" && e.reason === "surrender");
+
+    const pushA = await waitFor(worker, m => m.type === "state" && m.seat === "player" && hasSurrenderEvent(m.proj), 3000);
+    assert.equal(pushA.proj.over, false, "3 seats, only 1 surrendered — 2 remain standing, so the match itself must not be over yet (the case this test actually needs: ticking continues)");
+
+    const pushB = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick > pushA.proj.tick, 3000);
+    assert.equal(hasSurrenderEvent(pushB.proj), false, "the surrender event must not still be present on a LATER tick's own push — an undrained state.events would keep resending it forever, which is exactly the live tracer/sound bug this test guards against");
+  } finally { await worker.terminate(); }
+});
+
+/* ============================================================
+   T-057 (§6.3, ADR-0007): clockPolicy:"deliberation" — the sim advances in FIXED batches, gated
+   on every REQUIRED (non-scripted-AI) seat calling {type:"endTurn", seat}, with a real wall-clock
+   watchdog so a stalled seat can never hang the match. Every existing test ABOVE this section
+   proves the DEFAULT (workerData.clockPolicy omitted or "realtime") is completely untouched — this
+   whole feature is gated behind an explicit opt-in, never a change to the existing code path.
+   deliberationTicksPerStep/watchdogMs are workerData-overridable the same way graceMs already is,
+   so a test can use a tiny batch/timeout instead of the real 20-tick/20-second production values.
+   ============================================================ */
+
+function spawnDeliberationWorker({ seed = SEED, aiEnabled = false, deliberationTicksPerStep = 3, watchdogMs = 60000 } = {}) {
+  return new Worker(WORKER_FILE, {
+    workerData: {
+      createGameStateOpts: { planetId: "ferros", seed, aiEnabled },
+      clockPolicy: "deliberation", deliberationTicksPerStep, watchdogMs,
+    },
+  });
+}
+
+test("deliberation mode never ticks on its own — no new state arrives without an endTurn, unlike realtime's own free-running interval", async () => {
+  const worker = spawnDeliberationWorker();
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    void ready;
+    let sawTickAdvance = false;
+    worker.on("message", m => { if (m.type === "state" && m.seat === "player" && m.proj.tick > 0) sawTickAdvance = true; });
+    await new Promise(resolve => setTimeout(resolve, 300));
+    assert.equal(sawTickAdvance, false, "with nobody having called endTurn yet, the sim must not have advanced past tick 0");
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode advances exactly deliberationTicksPerStep ticks once every required seat calls endTurn, then resolves endTurnResult", async () => {
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep: 5 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    // Only ONE of the two required seats so far — must not have advanced yet.
+    await new Promise(resolve => setTimeout(resolve, 150));
+    let advancedEarly = false;
+    worker.on("message", m => { if (m.type === "endTurnResult") advancedEarly = true; });
+    assert.equal(advancedEarly, false, "must still be waiting on seat ai's own endTurn");
+
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    const result = await waitFor(worker, m => m.type === "endTurnResult");
+    assert.equal(result.tick, 5);
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick === 5);
+    assert.equal(stateMsg.proj.tick, 5);
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode only requires seats NOT under scripted-AI control — a scripted-AI seat's own turn is never waited on", async () => {
+  // aiEnabled left at its default (true) — seat "ai" is scripted-AI-controlled, so only "player"'s
+  // own endTurn should be needed to advance a round.
+  const worker = spawnDeliberationWorker({ aiEnabled: true, deliberationTicksPerStep: 4 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    const result = await waitFor(worker, m => m.type === "endTurnResult");
+    assert.equal(result.tick, 4);
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode's watchdog force-advances a round when a required seat never calls endTurn", async () => {
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep: 2, watchdogMs: 150 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });   // "ai" (human/agent here) never calls its own
+    const result = await waitFor(worker, m => m.type === "endTurnResult", 3000);
+    assert.equal(result.tick, 2, "the watchdog must force the round through at exactly the same batch size, not skip ticks");
+  } finally { await worker.terminate(); }
+});
+
+test("deliberation mode supports multiple consecutive rounds — readiness genuinely resets each time, not stuck permanently \"ready\"", async () => {
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep: 2, watchdogMs: 60000 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    const r1 = await waitFor(worker, m => m.type === "endTurnResult");
+    assert.equal(r1.tick, 2);
+
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    const r2 = await waitFor(worker, m => m.type === "endTurnResult" && m.tick === 4);
+    assert.equal(r2.tick, 4);
+  } finally { await worker.terminate(); }
+});
+
+test("a command issued before endTurn is admitted immediately and takes effect once the round actually steps — the real codec, unchanged by clock policy", async () => {
+  // admit() schedules an ACCEPTED envelope for state.tick + INPUT_DELAY_TICKS (net/commandLoop.js's
+  // own same-tick-batch fairness window, reused UNCHANGED here — deliberation mode adds no second
+  // command path); stepMatch only actually applies it (and only THEN posts commandResult, via
+  // emitAck) once state.tick reaches that applyTick — which, in this mode, only happens as part of
+  // a round's own batched ticks. A batch size AT OR BELOW INPUT_DELAY_TICKS would leave the command
+  // still pending at the end of this one round (the due-check runs BEFORE each tick, never once
+  // exactly AT the final tick a small batch stops on) — so this test deliberately uses a batch
+  // comfortably larger than INPUT_DELAY_TICKS to prove the command is caught WITHIN a single round.
+  const deliberationTicksPerStep = INPUT_DELAY_TICKS + 2;
+  const worker = spawnDeliberationWorker({ deliberationTicksPerStep });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const unit = stateMsg.proj.units.find(u => u.owner === "player");
+    const target = { x: unit.x + 300, y: unit.y };
+    const envelope = encode({ t: "move", ids: [unit.id], x: target.x, y: target.y }, 1, null);
+    worker.postMessage({ type: "command", seat: "player", envelope });
+
+    // Nothing advances the sim until BOTH required seats end their turn — an ACCEPTED envelope's
+    // own commandResult only arrives once stepMatch actually processes it (emitAck), so it cannot
+    // arrive before this round runs at all, unlike realtime mode's own continuously-ticking loop.
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+
+    await waitFor(worker, m => m.type === "commandResult" && m.seq === 1);
+    const after = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick === deliberationTicksPerStep);
+    const moved = after.proj.units.find(u => u.id === unit.id);
+    assert.equal(moved.order.type, "move");
+    assert.equal(moved.order.x, target.x);
+  } finally { await worker.terminate(); }
+});
+
+test("T-057's own exit criterion: a seeded deliberation match driven by a fixed scripted sequence of endTurn/commands replays to the exact same outcome every time", async () => {
+  const SHARED_SEED = 77777;
+  const BATCH = INPUT_DELAY_TICKS + 2;   // comfortably above the input-delay window — see the test above for why
+
+  // Stands in for "a scripted agent": a fixed, deterministic sequence of commands/endTurn calls,
+  // not wall-clock-timed thinking — exactly what a benchmark harness replays across runs.
+  async function driveScriptedMatch() {
+    const worker = spawnDeliberationWorker({ seed: SHARED_SEED, deliberationTicksPerStep: BATCH });
+    try {
+      await waitFor(worker, m => m.type === "ready");
+      const first = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+      const unit = first.proj.units.find(u => u.owner === "player");
+
+      worker.postMessage({ type: "command", seat: "player", envelope: encode({ t: "move", ids: [unit.id], x: unit.x + 250, y: unit.y }, 1) });
+      worker.postMessage({ type: "endTurn", seat: "player" });
+      worker.postMessage({ type: "endTurn", seat: "ai" });
+      await waitFor(worker, m => m.type === "endTurnResult" && m.tick === BATCH);
+
+      // A second round, so the script exercises "readiness genuinely resets" too, not just one shot.
+      worker.postMessage({ type: "endTurn", seat: "player" });
+      worker.postMessage({ type: "endTurn", seat: "ai" });
+      const final = await waitFor(worker, m => m.type === "endTurnResult" && m.tick === BATCH * 2);
+      const finalState = await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick === final.tick);
+      // Stringifying the whole per-seat projection is a strictly MORE demanding equality check
+      // than comparing a handful of fields — matches this file's own "exit criterion (identically)"
+      // determinism test above for realtime mode, applied here to the batched/gated clock instead.
+      return JSON.stringify(finalState.proj);
+    } finally { await worker.terminate(); }
+  }
+
+  // Sequential, deliberately not concurrent — proves determinism in isolation from wall-clock
+  // scheduling, the same reasoning this file's own realtime-mode determinism test above already
+  // documents.
+  const outcomeA = await driveScriptedMatch();
+  const outcomeB = await driveScriptedMatch();
+  assert.equal(outcomeA, outcomeB);
+});
+
+/* ============================================================
+   T-061 (Ops): structured operational logging (server/log.js) wired into this file's own four
+   real sites — desync, disconnect/reconnect/AI-takeover, match-ended, and tick-overrun. logEvent
+   itself is exhaustively covered in isolation by test/log.test.js; everything below only proves
+   the WIRING: the right event, with the right fields, at the right moment, exactly once.
+
+   Each worker below is spawned with {stdout:true} (a real Node Worker option — see the Node docs
+   for worker_threads) so console.log calls made INSIDE the worker thread arrive at the PARENT as
+   a real byte stream on worker.stdout instead of being piped straight through to this test
+   process's own process.stdout — the only way to actually observe them from here, since a worker
+   thread has its own separate global `console` that this test's own console.log monkey-patching
+   (test/log.test.js's own captureLog) could never reach. That stream is a genuinely separate
+   channel from the postMessage one every other test in this file already waits on, so after
+   awaiting a postMessage-based signal that a code path definitely ran, every test below still
+   waits a short, fixed settle time before reading `lines` — the same "real wait, not just one
+   instant" posture this file's own T-035/T-036 tests already use for a different async boundary.
+   ============================================================ */
+
+function spawnWorkerWithStdout(workerData) {
+  const worker = new Worker(WORKER_FILE, { workerData, stdout: true });
+  const lines = [];
+  let buf = "";
+  worker.stdout.on("data", chunk => {
+    buf += chunk.toString("utf8");
+    let idx;
+    while ((idx = buf.indexOf("\n")) !== -1) {
+      const line = buf.slice(0, idx).trim();
+      buf = buf.slice(idx + 1);
+      if (line) lines.push(JSON.parse(line));
+    }
+  });
+  return { worker, lines };
+}
+
+test("T-061: a desync report logs a structured 'desync' event alongside the existing desyncDetected reply", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED } });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    const stateMsg = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    worker.postMessage({ type: "fingerprint", seat: "player", tick: stateMsg.proj.tick, fp: "obviously-not-a-real-fingerprint" });
+    await waitFor(worker, m => m.type === "desyncDetected");
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const events = lines.filter(e => e.type === "desync");
+    assert.equal(events.length, 1);
+    assert.equal(events[0].matchId, ready.matchId);
+    assert.equal(events[0].seat, "player");
+    assert.equal(events[0].tick, stateMsg.proj.tick);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: seatDisconnected and the resulting aiTakeover each log a structured event carrying the match's own id", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false }, graceMs: 150 });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    const grew = await watchForBuildingGrowth(worker, "ai", 4000);
+    assert.equal(grew, true, "fixture sanity: the AI really did take over");
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const disconnected = lines.filter(e => e.type === "seatDisconnected");
+    const takeover = lines.filter(e => e.type === "aiTakeover");
+    assert.equal(disconnected.length, 1);
+    assert.equal(disconnected[0].seat, "ai");
+    assert.equal(disconnected[0].matchId, ready.matchId);
+    assert.equal(takeover.length, 1);
+    assert.equal(takeover[0].seat, "ai");
+    assert.equal(takeover[0].matchId, ready.matchId);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: reconnecting after a real AI takeover logs seatReconnected", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false }, graceMs: 150 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    const grew = await watchForBuildingGrowth(worker, "ai", 4000);
+    assert.equal(grew, true, "fixture sanity: the AI really did take over first");
+
+    worker.postMessage({ type: "seatConnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    const reconnected = lines.filter(e => e.type === "seatReconnected");
+    assert.equal(reconnected.length, 1);
+    assert.equal(reconnected[0].seat, "ai");
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: seatConnected for a seat that was never away logs nothing — a first join is not a reconnect", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED } });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatConnected", seat: "player" });
+    await new Promise(resolve => setTimeout(resolve, 200));
+    assert.equal(lines.filter(e => e.type === "seatReconnected").length, 0);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: a reconnect that cancels a pending grace timer BEFORE any takeover still logs seatReconnected — it really was away", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false }, graceMs: 300 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "seatDisconnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 100));   // well inside the 300ms grace window
+    worker.postMessage({ type: "seatConnected", seat: "ai" });
+    await new Promise(resolve => setTimeout(resolve, 200));
+
+    assert.equal(lines.filter(e => e.type === "aiTakeover").length, 0, "fixture sanity: reconnected before the grace period ever fired");
+    assert.equal(lines.filter(e => e.type === "seatReconnected").length, 1);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: a match ending logs exactly one structured matchEnded event, with the final tick/winner/winReason", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "spacecities-matchworker-log-over-test-"));
+  try {
+    const seed = 271828;
+    const state = createGameState({ planetId: "ferros", seed, rng: mulberry32(seed) });
+    const match = createMatch(state);
+    const aiCC = [...match.state.buildings.values()].find(b => b.owner === "ai" && b.type === "command");
+    match.state.buildings.delete(aiCC.id);   // last Command Center gone -> ends on the very next tick
+    await writeSnapshot(dir, "match-about-to-end-for-logging", match.state);
+
+    const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed }, dataDir: dir });
+    try {
+      const overMsg = await waitFor(worker, m => m.type === "state" && m.proj.over === true);
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Exactly one, despite the same final tick posting one "state" message PER SEAT PLUS the
+      // spectator (this file's own pushState) — stopMatchTimers (where matchEnded logs) only ever
+      // runs once, the same "no later tick" guarantee T-035's own test above already established.
+      const ended = lines.filter(e => e.type === "matchEnded");
+      assert.equal(ended.length, 1);
+      assert.equal(ended[0].winner, "player");
+      assert.equal(ended[0].tick, overMsg.proj.tick);
+      assert.equal(typeof ended[0].matchId, "string");
+      assert.equal(typeof ended[0].time, "number");
+    } finally { await worker.terminate(); }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("T-061 (NFR-2): an unreachably small tick budget makes every tick log a tickOverrun — proves the comparison actually fires, not just exists", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED }, tickBudgetMs: 0 });
+  try {
+    const ready = await waitFor(worker, m => m.type === "ready");
+    await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick >= 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    const overruns = lines.filter(e => e.type === "tickOverrun");
+    assert.ok(overruns.length >= 1, "a real tick always takes measurably more than 0ms, so a 0ms budget must be exceeded every time");
+    assert.equal(overruns[0].matchId, ready.matchId);
+    assert.equal(typeof overruns[0].tick, "number");
+    assert.equal(typeof overruns[0].elapsedMs, "number");
+  } finally { await worker.terminate(); }
+});
+
+test("T-061 (NFR-2): a generous tick budget never logs a tickOverrun — the guard is a real comparison, not an unconditional log", async () => {
+  // 100 real SECONDS, not milliseconds — no actual tick could ever exceed this regardless of
+  // machine speed/contention, so this stays deterministic rather than racing real wall-clock load
+  // the way asserting against the real ~25ms production budget under full-suite contention would.
+  const { worker, lines } = spawnWorkerWithStdout({ createGameStateOpts: { planetId: "ferros", seed: SEED }, tickBudgetMs: 100000 });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick >= 3);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(lines.filter(e => e.type === "tickOverrun").length, 0);
+  } finally { await worker.terminate(); }
+});
+
+test("T-061: deliberation mode's own batched ticks never log a tickOverrun — NFR-2's per-tick budget deliberately does not apply there", async () => {
+  const { worker, lines } = spawnWorkerWithStdout({
+    createGameStateOpts: { planetId: "ferros", seed: SEED, aiEnabled: false },
+    clockPolicy: "deliberation", deliberationTicksPerStep: 5, watchdogMs: 60000,
+  });
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    worker.postMessage({ type: "endTurn", seat: "player" });
+    worker.postMessage({ type: "endTurn", seat: "ai" });
+    await waitFor(worker, m => m.type === "endTurnResult");
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(lines.filter(e => e.type === "tickOverrun").length, 0);
+  } finally { await worker.terminate(); }
+});

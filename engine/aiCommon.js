@@ -2,7 +2,7 @@
 /* ============================================================
    AI — shared primitives used by every decision phase (engine/ai.js and the
    aiEconomy / aiMilitary / aiIndustry phase modules): owner resolution
-   (controllerFor/otherOwner), the APM action budget (the configurable AI
+   (controllerFor/opponentsOf/otherOwner), the APM action budget (the configurable AI
    speed), the reserve-aware affordability check, the "which idle worker founds
    this building" pick, and the found-a-building protocol those picks feed.
 
@@ -17,23 +17,25 @@
 
 import { issueBuild } from "./commands.js";
 import { findPlacement } from "./colliders.js";
+import { controllerFor, opponentsOf } from "./controllers.js";
 
-const APM_BURST_FRAC = 1 / 15;   // a busy AI can bank at most ~4 seconds' worth of unspent actions
+// Exported (T-056) so net/agentApm.js's own MCP-agent budget can mirror this exact same burst
+// allowance rather than a separately-authored, driftable copy of the number.
+export const APM_BURST_FRAC = 1 / 15;   // a busy AI can bank at most ~4 seconds' worth of unspent actions
 
 /* ---------- owner resolution (Tier 1 self-play) ---------- */
 
-// Which controller object is driving `owner` this match — state.ai for "ai" (always present,
-// every match ever created), or state.playerAi for "player" (present only when self-play —
-// tools/selfplay.js — has populated it; null otherwise). Every AI phase module threads its
-// ctx.owner through this instead of ever reaching for state.ai directly, so the two controllers'
-// action budgets, scout ids, wave timers etc. can never collide or leak into one shared object —
+// Which controller object is driving `owner` this match — state.controllers[owner] (T-042), a real
+// N-capable registry; "ai" is always present (every match ever created), "player" only when
+// self-play (tools/selfplay.js) has populated it, null otherwise. Every AI phase module threads its
+// ctx.owner through this instead of ever reaching for state.ai/state.controllers directly, so each
+// controller's action budget, scout id, wave timer etc. can never collide or leak into another's —
 // see the header comment on engine/ai.js's runAI(state, dt, owner) for why that matters.
-/** @param {State} state @param {string} owner @returns {AiState|undefined} */
-export function controllerFor(state, owner) {
-  if (owner === "ai") return state.ai;
-  if (owner === "player") return state.playerAi;
-  return null;
-}
+// Re-exported (not just called) from engine/controllers.js — the real, import-free leaf T-042
+// introduced (docs/analysis/01-engine-nplayer-seams.md's own §7.1 "Option (iii)") — so every
+// existing `import { controllerFor } from "./aiCommon.js"` call site across the AI layer keeps
+// working completely unchanged.
+export { controllerFor };
 
 // T-017/ADR-0008: the fairness gates (formation dispatch, idle-worker auto-assignment) want "is a
 // human actually driving this seat", not a hardcoded owner literal — a seat is human-controlled
@@ -43,13 +45,23 @@ export function controllerFor(state, owner) {
 /** @param {State} state @param {string} owner @returns {boolean} */
 export function isHumanControlled(state, owner) { return controllerFor(state, owner) === null; }
 
-// The other side in a two-owner skirmish/self-play match — the only two owners this engine models
-// today (state.owners). Centralised here so every AI phase module resolves "my opponent" the same
-// way, instead of each hardcoding "ai"/"player" itself.
+// The other side in a two-owner skirmish/self-play match — pinned to exactly "ai"/"player" on
+// purpose. T-043 gave every AI DECISION call site (sightEnemy, the aiMilitary.js targeting
+// functions, aiContext) the real N-capable opponentsOf(state, owner) below instead — but this
+// stays, unchanged, for hud.js/overlays.js's own genuinely 2-party "you vs. the foe" scoreboard
+// line, which is a separate, later UI concern (an N-player scoreboard needs its own design, not a
+// mechanical swap) and was never in docs/analysis/01-engine-nplayer-seams.md's own engine/-only
+// audit to begin with.
 /** @param {string} owner @returns {string} */
 export function otherOwner(owner) {
   return owner === "ai" ? "player" : "ai";
 }
+
+// T-043 (ADR-0008): every OTHER owner this match actually has — the real, N-capable replacement for
+// otherOwner()'s axiom in the AI DECISION layer (see engine/controllers.js's own header for the
+// full design note). Re-exported from there for the same reason controllerFor is: every existing
+// named import from this module in the AI layer can just add it to that same line.
+export { opponentsOf };
 
 /* ---------- action budget (the configurable AI speed / APM) ---------- */
 

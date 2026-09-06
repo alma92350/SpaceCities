@@ -126,7 +126,7 @@ test("a saved game round-trips state.ai.difficulty through JSON", () => {
 test("an old save with no aiDifficulty field loads as medium — the same defaulting every other additive ai.* field already gets", () => {
   const a = createGameState({ planetId: "ferros", difficulty: "hard" });
   const save = serializeGame(a);
-  delete save.ai.aiDifficulty;   // simulate a save written before this field existed
+  delete save.controllers.ai.difficulty;   // simulate a save written before this field existed
   const b = deserializeGame(JSON.parse(JSON.stringify(save)));
   assert.equal(b.ai.difficulty, "medium");
 });

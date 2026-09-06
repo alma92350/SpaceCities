@@ -66,8 +66,8 @@
                                                     client-side) — compared against this worker's own
                                                     CURRENT match.state (the only place that state
                                                     lives); a mismatch posts {type:"desyncDetected",
-                                                    seat, tick} back AND logs it (console.error) —
-                                                    see the branch below for why comparing against
+                                                    seat, tick} back AND logs it (T-061's structured
+                                                    logEvent) — see the branch below for why comparing against
                                                     "current", not a historical checkpoint at msg.tick,
                                                     is a deliberate v1 simplification
      worker -> parent (continued)
@@ -97,6 +97,25 @@
    dials): an abandoned seat gets a plain default-opts controller — solid and unexceptional, matching
    FR-5's own "falls to AI control" without inventing a preference nothing upstream ever expressed.
 
+   T-057 (§6.3, ADR-0007): workerData.clockPolicy === "deliberation" replaces the real-time
+   setInterval tick loop below with a GATED one — the sim advances in fixed batches
+   (deliberationTicksPerStep, default 20 = 1 sim second) only once every seat NOT under scripted-AI
+   control (engine/controllers.js's controllerFor(state, owner) === null — the same "human/agent
+   seat" test T-034a/T-042 already established) has posted {type:"endTurn", seat}, so a bench/eval
+   harness gets fully reproducible outcomes (no wall-clock model latency can ever leak into how far
+   the sim advanced). A watchdog (watchdogMs, default 20000) force-advances a round that never
+   completes — a stalled/crashed agent's own missing seat is simply treated as a pass for that
+   round, never a hang. Both are workerData-overridable the same way graceMs already is, so tests
+   use tiny values instead of real production ones. Every branch below is a NEW, additive code path
+   behind this explicit opt-in — every caller that omits clockPolicy (every one before this task)
+   keeps the exact real-time setInterval loop, byte-for-byte unchanged.
+
+   Deliberately never wired to graceTimers/snapshotTimer/fingerprint handling: a deliberation match
+   is never reachable through any human-facing surface at all (server/lobby.js's own
+   listOpenMatches excludes it, and tools/serve.js's HTTP create-match handler never forwards a
+   caller-supplied clockPolicy) — nothing ever opens a real WebSocket to one, so
+   seatDisconnected/seatConnected/fingerprint messages simply never arrive for it in practice.
+
    SNAPSHOT/RESTORE (T-029a, ADR-0012, FR-22, server/matchSnapshot.js). `workerData.dataDir`, when
    given, is where this match's own state (and matchId, T-029b) gets snapshotted so an UNEXPECTED
    restart (a crash, not a graceful one — see matchSnapshot.js's own header for why that's the
@@ -116,11 +135,14 @@ import { parentPort, workerData } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { createGameState, createAiController } from "../engine/state.js";
 import { runAI } from "../engine/ai.js";
+import { controllerFor } from "../engine/controllers.js";
+import { surrender } from "../engine/victory.js";
 import { mulberry32 } from "../engine/rng.js";
 import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
 import { readSnapshot, writeSnapshot } from "./matchSnapshot.js";
 import { seatFingerprint } from "../net/fingerprint.js";
+import { logEvent } from "./log.js";
 
 const { seed } = workerData.createGameStateOpts;
 const dataDir = workerData.dataDir || null;
@@ -153,6 +175,15 @@ const snapshotTimer = dataDir ? setInterval(() => writeSnapshot(dataDir, matchId
 const GRACE_MS = Number.isFinite(workerData.graceMs) ? workerData.graceMs : 20000;
 const graceTimers = new Map();   // seat -> real setTimeout handle, only while counting down
 
+// T-057: deliberation mode's own tuning, both workerData-overridable (tests use tiny values) —
+// see this file's own header. clockPolicy defaults to "realtime" for anything other than the
+// literal opt-in string, so a typo/unexpected value never silently disables the ordinary loop.
+const clockPolicy = workerData.clockPolicy === "deliberation" ? "deliberation" : "realtime";
+const DELIBERATION_TICKS_PER_STEP = Number.isFinite(workerData.deliberationTicksPerStep) ? workerData.deliberationTicksPerStep : 20;
+const WATCHDOG_MS = Number.isFinite(workerData.watchdogMs) ? workerData.watchdogMs : 20000;
+let readySeats = new Set();
+let watchdogTimer = null;
+
 // Owner "ai" already has state.ai (engine/sim.js's own built-in, unconditional runAI call); owner
 // "player" needs its own state.playerAi (this file's own tick loop below drives it explicitly,
 // since the engine never does) — see this file's own header for why the two aren't symmetric.
@@ -175,21 +206,52 @@ parentPort.on("message", msg => {
     }
     return;
   }
+  if (msg.type === "surrender") {
+    // T-059a (FR-8): the real network trigger single-player already has (boot.js/overlays.js/
+    // starmap.js all call this exact same engine/victory.js function) and multiplayer never did.
+    // Nothing else needs to happen here: engine/victory.js's own surrender() doesn't end the match
+    // immediately, only marks this seat eliminated — the very next regular tick's own stepMatch ->
+    // checkWinCondition resolves state.over/winner/winReason from that, the identical one-tick
+    // latency every other elimination (a lost Command Center, T-046) already has. Same
+    // defense-in-depth guard endTurn already uses above: a scripted-AI-controlled seat has no real
+    // connection (WebSocket or MCP seat handle) to ever send this from.
+    if (!controllerFor(match.state, msg.seat)) surrender(match.state, msg.seat);
+    return;
+  }
+  if (msg.type === "endTurn") {
+    // Only a REQUIRED seat's own call counts — a scripted-AI-controlled owner never sends this
+    // message at all (it has no MCP tool call driving it), so this guard is defense-in-depth
+    // against a malformed/stray message, not something a real caller would ever hit.
+    if (clockPolicy !== "deliberation" || controllerFor(match.state, msg.seat)) return;
+    readySeats.add(msg.seat);
+    const required = match.state.owners.filter(o => !controllerFor(match.state, o));
+    if (required.every(o => readySeats.has(o))) advanceDeliberationRound();
+    return;
+  }
   if (msg.type === "seatDisconnected") {
     if (graceTimers.has(msg.seat)) return;   // already counting down — a second close for the same seat is not a second grace period
+    logEvent("seatDisconnected", { matchId, seat: msg.seat });
     graceTimers.set(msg.seat, setTimeout(() => {
       graceTimers.delete(msg.seat);
       const slot = aiSlotFor(msg.seat);
-      if (!match.state[slot]) match.state[slot] = createAiController(match.state.planetId, {});
+      if (!match.state[slot]) {
+        match.state[slot] = createAiController(match.state.planetId, {});
+        logEvent("aiTakeover", { matchId, seat: msg.seat });
+      }
     }, GRACE_MS));
     return;
   }
   if (msg.type === "seatConnected") {
     const timer = graceTimers.get(msg.seat);
+    // A genuine reconnect (mid-grace, or after AI had already taken over) is worth an operational
+    // log line; seatConnected ALSO fires for a seat's very first join (this file's own header),
+    // which is not a reconnect at all and would just be noise here.
+    const wasAway = !!timer || !!match.state[aiSlotFor(msg.seat)];
     if (timer) { clearTimeout(timer); graceTimers.delete(msg.seat); }
     // Hands control back unconditionally — a harmless no-op if the grace period never actually
     // fired (already null), the real point if it did.
     match.state[aiSlotFor(msg.seat)] = null;
+    if (wasAway) logEvent("seatReconnected", { matchId, seat: msg.seat });
     return;
   }
   if (msg.type === "fingerprint") {
@@ -199,13 +261,13 @@ parentPort.on("message", msg => {
     // lives only here). Under real network latency a client's own report always reflects a tick
     // slightly behind whatever this worker is at by the time it arrives, so an occasional benign
     // mismatch from tick drift alone is possible — acceptable for what this is: an operations
-    // signal a human reviews (console.error below), never an enforcement action (no disconnect, no
-    // correction), so a rare false positive costs a look at a log line, not a wrongly-punished
-    // player. A genuine, sustained divergence (the actual target) reproduces on every report, tick
-    // drift or not.
+    // signal a human reviews (logEvent below — one structured JSON line, T-061), never an
+    // enforcement action (no disconnect, no correction), so a rare false positive costs a look at
+    // a log line, not a wrongly-punished player. A genuine, sustained divergence (the actual
+    // target) reproduces on every report, tick drift or not.
     const expected = seatFingerprint(match.state, msg.seat);
     if (expected !== msg.fp) {
-      console.error(`desync detected: match ${matchId} seat ${msg.seat} tick ${msg.tick} — client fingerprint does not match server state`);
+      logEvent("desync", { matchId, seat: msg.seat, tick: msg.tick });
       parentPort.postMessage({ type: "desyncDetected", seat: msg.seat, tick: msg.tick });
     }
     return;
@@ -214,32 +276,105 @@ parentPort.on("message", msg => {
 
 parentPort.postMessage({ type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId });
 
-// T-035 (FR-6): a final push still goes out WITH `over: true` (so every connected client's own
-// showGameOver fires — see boot.js's render loop, which already reads game.state.over generically,
-// T-030's own seam), but nothing ticks or pushes again after — a finished match has no more state
-// to advance and no one left who should keep paying its CPU/bandwidth cost. The periodic snapshot
-// stops too: an ended match's own last snapshot before this point is all a restart could ever need
-// to recover (there's nothing further to lose).
-const tickTimer = setInterval(() => {
-  // T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only
-  // ever auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this
-  // file to do for "player" what the engine already does for "ai" on its own. Same ordering
-  // server/session.js's own aiSeats loop already established (AI decisions before the sim step
-  // that acts on them, so both AI-driven owners get applied at the same relative tick position).
+// T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only ever
+// auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this file to do
+// for "player" what the engine already does for "ai" on its own. Same ordering server/session.js's
+// own aiSeats loop already established (AI decisions before the sim step that acts on them, so both
+// AI-driven owners get applied at the same relative tick position). Shared verbatim by both clock
+// policies below — advancing the sim by exactly one tick is the same operation either way; only
+// WHEN it happens, and whether every intermediate tick gets its own state push, differs.
+function stepOnce() {
   if (match.state.playerAi) runAI(match.state, TICK_DT, "player");
   stepMatch(match, TICK_DT);
+}
+
+function pushState() {
   for (const seat of match.state.owners) {
     parentPort.postMessage({ type: "state", seat, proj: projectFor(match.state, seat) });
   }
-  // T-037 (FR-7): posted unconditionally, every tick, exactly like each real seat's own push above
+  // T-037 (FR-7): posted unconditionally, every push, exactly like each real seat's own push above
   // — this worker has no idea whether any spectator is actually connected (that bookkeeping is
   // entirely net/wsWorkerTransport.js's own job, one hop further out), so it doesn't try to know.
   parentPort.postMessage({ type: "state", seat: SPECTATOR_SEAT, proj: projectForSpectator(match.state) });
-  if (match.state.over) {
-    clearInterval(tickTimer);
-    if (snapshotTimer) clearInterval(snapshotTimer);
-    // No seat is coming back to reclaim anything from a finished match.
-    for (const timer of graceTimers.values()) clearTimeout(timer);
-    graceTimers.clear();
-  }
-}, TICK_MS);
+  // Bugfix: drain now that every seat's (and the spectator's) own fog-filtered proj.events has
+  // already captured this tick's events by value above — mirrors boot.js's single-player
+  // `state.events.length = 0`. Without this, state.events grew for a live match's ENTIRE
+  // lifetime (server/mcpObservationCache.js's own header used to document this as deliberate, for
+  // wait_for_event's fog-correct baseline diffing), which broke engine/projectionDelta.js's own
+  // assumption that a projection's `events` field is "already this tick's new events only": every
+  // WS-relayed human client re-received the match's FULL event history on every single tick and
+  // replayed it in full (boot.js's processFrameEvents draining its own copy every frame didn't
+  // help — the very next network push repopulated it), so any attack's tracer/sound/death-flash
+  // kept re-firing forever, worst on a fast-firing unit. Draining here doesn't regress
+  // wait_for_event: its baseline-vs-later-pushes diff (mcpObservationCache.js) only needs
+  // "genuinely new since the call", which holds whether a tick's proj.events is the whole history
+  // or (as now) just that tick's own — it only ever aggregates across however many pushes land
+  // between the call and the resolve.
+  match.state.events.length = 0;
+}
+
+// A finished match has no more state to advance and no one left who should keep paying its
+// CPU/bandwidth cost — shared end-of-match cleanup for both clock policies (T-057's own
+// deliberation path has no dataDir/graceTimers in practice per this file's own header, but a
+// stray one left running costs nothing to also stop here).
+function stopMatchTimers(tickTimer) {
+  // Only ever called once match.state.over is true (both call sites below gate on it first) — safe
+  // to log the match's own final outcome unconditionally right here, the one place both clock
+  // policies' end-of-match paths already converge.
+  logEvent("matchEnded", { matchId, tick: match.state.tick, time: match.state.time, winner: match.state.winner, winReason: match.state.winReason ?? null });
+  if (tickTimer) clearInterval(tickTimer);
+  if (snapshotTimer) clearInterval(snapshotTimer);
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  for (const timer of graceTimers.values()) clearTimeout(timer);
+  graceTimers.clear();
+}
+
+// NFR-2: < 25ms of server-side work per tick (a 4-seat Gigantic-map late game, HF free-tier CPU) —
+// workerData-overridable the same way graceMs/watchdogMs/deliberationTicksPerStep already are, so
+// a test can force (or rule out) an overrun deterministically instead of depending on real machine
+// speed. Deliberately not wired into deliberation mode below — it advances a whole batch of ticks
+// silently and by design answers to no wall-clock-per-tick budget at all (this file's own header).
+const TICK_BUDGET_MS = Number.isFinite(workerData.tickBudgetMs) ? workerData.tickBudgetMs : 25;
+
+if (clockPolicy === "realtime") {
+  // T-035 (FR-6): a final push still goes out WITH `over: true` (so every connected client's own
+  // showGameOver fires — see boot.js's render loop, which already reads game.state.over
+  // generically, T-030's own seam), but nothing ticks or pushes again after.
+  const tickTimer = setInterval(() => {
+    const t0 = performance.now();
+    stepOnce();
+    pushState();
+    const elapsedMs = performance.now() - t0;
+    if (elapsedMs > TICK_BUDGET_MS) logEvent("tickOverrun", { matchId, tick: match.state.tick, elapsedMs: Math.round(elapsedMs * 100) / 100 });
+    if (match.state.over) stopMatchTimers(tickTimer);
+  }, TICK_MS);
+} else {
+  // T-057: one push for the starting tick=0 state — an agent needs to see what it's starting with
+  // to decide its own first turn — then no interval at all: the first ROUND advances only once
+  // every required seat has posted its own endTurn (the message handler above) or this initial
+  // watchdog fires first, whichever happens first. advanceDeliberationRound re-arms the next
+  // round's own watchdog itself.
+  pushState();
+  armDeliberationWatchdog();
+}
+
+function armDeliberationWatchdog() {
+  watchdogTimer = setTimeout(advanceDeliberationRound, WATCHDOG_MS);
+}
+
+// T-057 (§6.3, ADR-0007): a whole round — up to DELIBERATION_TICKS_PER_STEP ticks, advanced
+// SILENTLY (no per-tick state push; an eval harness never asked to see N-1 throwaway intermediate
+// frames) — then ONE state push reflecting the round's own final tick. endTurnResult is posted
+// BEFORE that push, deliberately: it's the signal a caller's own sequential "await the result, THEN
+// await the resulting state" awaits in that order (test/matchWorker.test.js's own T-057 cases), and
+// since each postMessage is delivered as its own turn on the receiving side, sending the smaller,
+// order-defining message first is what makes that chaining reliable rather than racy.
+function advanceDeliberationRound() {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  readySeats = new Set();
+  for (let i = 0; i < DELIBERATION_TICKS_PER_STEP && !match.state.over; i++) stepOnce();
+  parentPort.postMessage({ type: "endTurnResult", tick: match.state.tick });
+  pushState();
+  if (match.state.over) { stopMatchTimers(null); return; }
+  armDeliberationWatchdog();
+}

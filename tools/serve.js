@@ -14,10 +14,17 @@
 
    T-027 — "the real multiplayer server" this file's header used to say it was ahead of — lands
    here: ADR-0010's own deployment decision #7 is "serve everything on one port: static assets, the
-   game WebSocket, and /mcp." createAppServer() is that server. /mcp is RESERVED (a 501, not a 404
-   or a hijacked WebSocket upgrade) since T-049 (Phase 6) is its real implementation — this file's
-   only job is to make sure nothing else quietly claims that path first, static serving and the
-   game socket both included.
+   game WebSocket, and /mcp." createAppServer() is that server.
+
+   T-049: /mcp is now the real Streamable HTTP + JSON-RPC 2.0 MCP endpoint (net/mcp.js — protocol
+   revision 2026-07-28), not the earlier 501 placeholder. A SINGLE exact path, per that revision's
+   own "the server MUST provide a single HTTP endpoint path" rule — unlike the placeholder, which
+   reserved the whole /mcp/* namespace as a stopgap before the real shape was known, /mcp/anything
+   now falls through to ordinary static resolution (a 404, since no such file exists) exactly like
+   any other unknown path; there is no URL-based sub-routing in this protocol, only the JSON-RPC
+   `method` field in the body. The registered `tools` list here is empty — T-051/T-052/T-053
+   (Phase 6's own later tasks) are what actually populate it with real lobby/observation/action
+   tools, closing over `lobby`/`liveMatches` the same way the HTTP handlers below already do.
 
    T-029: a match runs inside its own worker_threads Worker (server/matchWorker.js), relayed to real
    WebSocket connections by net/wsWorkerTransport.js — ADR-0011's own architecture, not a shortcut
@@ -67,8 +74,18 @@ import { Worker } from "node:worker_threads";
 import { runProbe } from "./dataProbe.js";
 import { runBenchSuite } from "./bench.js";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
-import { createLobby, OWNER_IDS } from "../server/lobby.js";
+import { createLobby, OWNER_IDS, publicMatch } from "../server/lobby.js";
 import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
+import { createMatchResultsStore } from "../server/matchResults.js";
+import { createMcpServer } from "../net/mcp.js";
+import { createLobbyTools } from "../server/mcpLobbyTools.js";
+import { createObservationTools } from "../server/mcpObservationTools.js";
+import { attachProjectionCache } from "../server/mcpObservationCache.js";
+import { createActionTools } from "../server/mcpActionTools.js";
+import { createEventTools } from "../server/mcpEventTools.js";
+import { attachCommandBridge } from "../server/mcpCommandBridge.js";
+import { createGameResources } from "../server/mcpResources.js";
+import { AGENT_APM, createAgentApmGuard } from "../net/agentApm.js";
 
 const ROOT = normalize(join(dirname(fileURLToPath(import.meta.url)), ".."));   // project root (tools/ is one level down)
 const PORT = Number(process.argv[2]) || Number(process.env.PORT) || 8080;
@@ -124,16 +141,6 @@ const MATCH_WORKER_FILE = join(ROOT, "server", "matchWorker.js");
 const requestHandler = async (req, res) => {
   try {
     const pathname = new URL(req.url, "http://localhost").pathname;
-
-    // Reserved, not a 404: T-049 (Phase 6) is /mcp's real implementation. A distinct status
-    // (501, not the static handler's 404 or the traversal guard's 403) says "this path is real
-    // and spoken for" rather than "doesn't exist" — checked before static resolution so nothing
-    // under this namespace can ever be shadowed by an actual on-disk /mcp file or directory.
-    if (pathname === "/mcp" || pathname.startsWith("/mcp/")) {
-      res.writeHead(501, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" });
-      res.end(JSON.stringify({ error: "not_implemented", message: "MCP transport not yet implemented — see TASKS.md T-049." }));
-      return;
-    }
 
     // The boot-time probe result, if DATA_DIR is set — 404s exactly like any other unknown path
     // in local dev, where dataProbeResult is null. See docs/adr/0012, TASKS.md T-008a.
@@ -202,32 +209,73 @@ function respondJson(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-// The safe subset of a server/lobby.js match record a stranger browsing the open-match list may
-// see: never a seat's own token (a bearer credential — server/lobby.js's own header), never the
-// live createGameStateOpts seed (would let a spectator predict resource-node placement ahead of
-// discovering it in-fog). spectatorsEnabled (T-037) IS meant for exactly this audience — a
-// prospective spectator needs to know before attempting to watch, same reason a seat's own
-// kind/taken state is public.
-function publicMatch(match) {
-  return {
-    id: match.id, status: match.status, createdAt: match.createdAt,
-    planetId: match.config.planetId, sizeMult: match.config.sizeMult ?? 1, resourceMult: match.config.resourceMult ?? 1,
-    matchTimeLimit: match.config.matchTimeLimit ?? null,
-    seats: match.seats.map(s => ({ kind: s.kind, taken: !!s.owner })),
-    spectatorsEnabled: match.config.spectatorsEnabled !== false,
-  };
+// The RAW body string for /mcp — unlike readJsonBody above, this does NOT parse it: net/mcp.js's
+// own handleRequest does its own JSON.parse so a malformed body becomes a spec-correct JSON-RPC
+// -32700 Parse error response, not a generic 400 this file would otherwise have to invent.
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", c => chunks.push(c));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", reject);
+  });
 }
 
-// Builds one fresh HTTP server: static assets, the /mcp reservation, the lobby's three HTTP
+// Builds one fresh HTTP server: static assets, the real /mcp endpoint, the lobby's three HTTP
 // endpoints, and every LIVE match's own WebSocket game transport, all on whatever port the caller
 // eventually `.listen()`s. A factory rather than a module-level singleton so tests can build an
-// independent instance per test (its own lobby, its own matches) and tear it down cleanly
-// afterward — the same reason net/wsWorkerTransport.js's attachWsMatchWorker is a function and not
-// a side effect of importing it.
+// independent instance per test (its own lobby, its own matches, its own mcpServer) and tear it
+// down cleanly afterward — the same reason net/wsWorkerTransport.js's attachWsMatchWorker is a
+// function and not a side effect of importing it.
 export async function createAppServer() {
   const dataDir = process.env.DATA_DIR || null;   // production only — same gate dataProbeResult/__bench already use above
   const lobby = dataDir ? restoreLobby(dataDir) : createLobby();
-  const liveMatches = new Map();   // matchId -> {worker, wsMatch} — only matches THIS boot actually spawned a worker for
+  // T-059 (FR-22): the piece T-029a's own live-match snapshot deliberately doesn't cover — a
+  // finished match's own outcome, recorded once and kept even after its worker exits and its
+  // liveMatches entry is gone. Restored here at boot the same way the lobby itself is.
+  const resultsStore = createMatchResultsStore(dataDir);
+  // matchId -> {worker, wsMatch, projCache} — only matches THIS boot actually spawned a worker
+  // for. Declared BEFORE mcpServer below so the observation tools' own getCache can close over
+  // this SAME map by reference — matches start (and get an entry here) well after boot, so the
+  // tools need the live, growing Map itself, never a snapshot taken at construction time.
+  const liveMatches = new Map();
+  // T-051/T-052/T-053/T-054: the real lobby tools (list_matches/join_match/leave_match),
+  // observation tools (get_situation/list_entities/get_map_overview/get_tech_options), action
+  // tools (issue_command), and the event-wait tool (wait_for_event) — all closing over this SAME
+  // `lobby`/`liveMatches` the HTTP handlers below already share, so an MCP agent and a browser
+  // client see and mutate the identical lobby/match state, never two independent copies.
+  // wait_for_event reuses the SAME projCache as the observation tools (T-054 added a second
+  // capability, waitForEvent, onto server/mcpObservationCache.js's own cache object) rather than
+  // a parallel one, so both read the identical live per-seat projection stream.
+  const mcpServer = createMcpServer({
+    serverInfo: { name: "SpaceCities", version: "1.1.0" },
+    tools: [
+      // Bugfix: join_match used to never start a match on its own (docs/agent-guide.md's own §2
+      // told an agent to expect this gap: "the host still has to start the match separately"),
+      // unlike the HTTP join endpoint below, which always has via FR-4's own "automatically when
+      // all seats are filled" clause — an asymmetry that was a tolerable inconvenience when a
+      // human host always held seat 0 and could just click Start, but became a genuine dead end
+      // once hostJoins:false (above) lets a match exist with NO seat holder able to start it at
+      // all: two agents' own join_match calls were the only way anything would ever fill those
+      // seats, so THEY have to be what starts it too. Passed by reference (hoisted function
+      // declarations, defined further down this same closure) — mirrors handleCreateMatch's and
+      // handleJoinMatch's own `seatsFilled(match) ? await startAndSpawnIfReady(match) : false`
+      // exactly, so join_match and the HTTP endpoints can never disagree about when a match is
+      // ready to start.
+      ...createLobbyTools(lobby, async match => {
+        if (!seatsFilled(match)) return false;
+        const startedNow = await startAndSpawnIfReady(match);
+        if (dataDir) writeLobbySnapshot(dataDir, lobby);
+        return startedNow;
+      }),
+      ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+      ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null, matchId => liveMatches.get(matchId)?.apmGuard ?? null),
+      ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    ],
+    // T-055: unit stats/build costs/counter triangle/tech tree — fully static, computed once at
+    // boot (createGameResources takes no lobby/match dependency at all, unlike every tool above).
+    resources: createGameResources(),
+  });
 
   // Spawns this match's own worker_threads Worker and attaches its WebSocket transport, keyed by
   // this match's own id (server/matchWorker.js's workerData.matchId override, T-034) so the lobby's
@@ -270,7 +318,36 @@ export async function createAppServer() {
       // defaults to enabled.
       spectatorsEnabled: match.config.spectatorsEnabled !== false,
     });
-    liveMatches.set(match.id, { worker, wsMatch });
+    // T-052/T-053: two more independent listeners on the SAME worker `attachWsMatchWorker`
+    // already listens to — Node's EventEmitter supports any number of "message" listeners with
+    // no interference between them, so neither ever competes with or changes that relay.
+    // projCache remembers only the LATEST per-seat projection so an observation tool can read it
+    // on demand; cmdBridge submits an action tool's command into this SAME worker and resolves
+    // once the matching commandResult comes back — attached ONCE per worker here (not per call),
+    // so its own seq counter and pending-reply map stay live for the worker's whole lifetime.
+    const projCache = attachProjectionCache(worker);
+    const cmdBridge = attachCommandBridge(worker);
+    // T-056: one APM guard per match, independent of the worker/engine entirely (net/agentApm.js's
+    // own header explains why it can't live in state.controllers the way the scripted AI's own
+    // budget does) — created here, once per match, so it persists across every issue_command call
+    // for this match's whole lifetime, the same lifecycle projCache/cmdBridge already have.
+    const apmGuard = createAgentApmGuard();
+    // T-059: a THIRD independent listener on the same worker — the match's own final tick pushes
+    // one {type:"state", proj:{over:true, ...}} per owner PLUS one for the spectator, so this
+    // fires several times for the same match end; resultsStore.record() is itself idempotent per
+    // matchId (server/matchResults.js's own contract), so no separate "have I seen this end
+    // already" bookkeeping belongs here.
+    worker.on("message", msg => {
+      if (msg?.type !== "state" || !msg.proj?.over) return;
+      // Only fields projectFor's own wire-safe output actually carries (engine/projection.js) —
+      // this listener never sees raw match.state at all, by the same design that keeps every
+      // other main-thread consumer (T-052's own observation cache included) off of it.
+      resultsStore.record({
+        matchId: match.id, owners: msg.proj.owners, winner: msg.proj.winner, winReason: msg.proj.winReason,
+        tick: msg.proj.tick, time: msg.proj.time, endedAt: Date.now(),
+      });
+    });
+    liveMatches.set(match.id, { worker, wsMatch, projCache, cmdBridge, apmGuard });
   }
 
   // T-035 (FR-4): "all seats filled" — every seat is either not "open" kind (an "ai"/"agent" seat
@@ -312,17 +389,41 @@ export async function createAppServer() {
       });
     } catch (err) { respondJson(res, 400, { error: "bad-config", message: err.message }); return; }
     // The host auto-claims seat 0 in the SAME request that creates the match — a stranger opening
-    // a shareable link should never find a match that exists but has nobody in it yet.
-    const joined = lobby.joinMatch(match.id, 0);
-    // Auto-starts ONLY when seat 1 needed no human to begin with (seatKinds:["open","ai"]) — an
-    // ordinary ["open","open"] host still waits, per FR-4, for a second join or their own /start.
+    // a shareable link should never find a match that exists but has nobody in it yet. Bugfix:
+    // opt-outable via hostJoins:false (default true, so every existing caller is byte-for-byte
+    // unaffected — the same "omitted preserves prior behavior" contract spectatorsEnabled already
+    // has) for a creator who wants to watch rather than play — e.g. two separate MCP agents each
+    // filling a real seat via join_match, with the creator only ever spectating. Without this, a
+    // host could never set up that match at all: creating it always consumed the ONE seat a second
+    // agent would otherwise need.
+    const hostJoins = body.hostJoins !== false;
+    const joined = hostJoins ? lobby.joinMatch(match.id, 0) : null;
+    // Auto-starts ONLY when every seat is already filled — an ordinary ["open","open"] host still
+    // waits, per FR-4, for a second join or their own /start; a hostJoins:false creation starts only
+    // once something else has claimed BOTH seats (e.g. two agents' own join_match calls).
     const started = seatsFilled(match) ? await startAndSpawnIfReady(match) : false;
     if (dataDir) writeLobbySnapshot(dataDir, lobby);
-    respondJson(res, 201, { matchId: match.id, seatIndex: 0, owner: joined.owner, token: joined.token, started });
+    respondJson(res, 201, {
+      matchId: match.id,
+      seatIndex: joined ? 0 : null,
+      owner: joined ? joined.owner : null,
+      token: joined ? joined.token : null,
+      started,
+    });
   }
 
   function handleListMatches(req, res) {
-    respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch) });
+    // T-056: agent_apm_cap is a fixed server policy (net/agentApm.js), not per-match data — reported
+    // once here, the same as server/mcpLobbyTools.js's own list_matches tool, so a human deciding
+    // whether to join a match an agent might occupy can see the published rule up front.
+    respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch), agent_apm_cap: AGENT_APM });
+  }
+
+  // T-059: every match this boot's own workers have seen finish, oldest first — a match that
+  // ended in an EARLIER boot (recorded to disk, then this process restarted) is included exactly
+  // the same way, since resultsStore itself was restored from the same file at construction.
+  function handleListResults(req, res) {
+    respondJson(res, 200, { results: resultsStore.list() });
   }
 
   async function handleJoinMatch(req, res, matchId) {
@@ -361,10 +462,24 @@ export async function createAppServer() {
     respondJson(res, 200, { matchId, started: true });
   }
 
+  // T-049: the real MCP endpoint — net/mcp.js's handleRequest is transport-agnostic (plain
+  // {httpMethod, origin, headers, rawBody} in, {status, body} out), so this is the ONLY place that
+  // touches a real http.IncomingMessage/ServerResponse for it. A non-POST method (GET, DELETE, …)
+  // still reaches handleRequest with an empty rawBody — it replies 405 on its own before ever
+  // looking at the body, so there's no need to special-case that here.
+  async function handleMcp(req, res) {
+    const rawBody = req.method === "POST" ? await readRawBody(req) : "";
+    const result = await mcpServer.handleRequest({ httpMethod: req.method, origin: req.headers.origin, headers: req.headers, rawBody });
+    if (result.body === null) { res.writeHead(result.status, { "Cache-Control": "no-store" }).end(); return; }
+    respondJson(res, result.status, result.body);
+  }
+
   const server = createServer((req, res) => {
     const url = new URL(req.url, "http://localhost");
+    if (url.pathname === "/mcp") { handleMcp(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "POST") { handleCreateMatch(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res); return; }
+    if (url.pathname === "/api/results" && req.method === "GET") { handleListResults(req, res); return; }
     const joinMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/join$/.exec(url.pathname);
     if (joinMatch) { handleJoinMatch(req, res, decodeURIComponent(joinMatch[1])); return; }
     const startMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/start$/.exec(url.pathname);

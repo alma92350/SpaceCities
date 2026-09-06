@@ -50,10 +50,19 @@ export function mulberry32(seed) {
 }
 
 // Full-precision fingerprint of ONE engine state. Every field a same-seed replay must
-// reproduce bit-for-bit: each entity's id/type/owner/position/hp/cargo/order, both
-// economies, and how much fog is revealed. Entities are joined in a FIXED field order
-// (not object-key order) and sorted by id, so neither Map iteration order nor JSON key
-// order can leak in — only genuine value differences show up.
+// reproduce bit-for-bit: each entity's id/type/owner/position/hp/cargo/order, every
+// owner's economy, and how much fog each owner has revealed. Entities are joined in a
+// FIXED field order (not object-key order) and sorted by id, so neither Map iteration
+// order nor JSON key order can leak in — only genuine value differences show up.
+//
+// T-047 (ADR-0008): res/fog used to read state.players.player/.ai and state.fog directly —
+// byte-identical for the 2-seat roster every caller used to be, but a REAL blind spot once
+// createGameState can seed a 3rd/4th owner (T-041/T-044): a divergence in a "rebels" or
+// "raiders" economy or fog-of-war would never move this fingerprint at all. state.owners is
+// the canonical N-capable roster (engine/state.js), always in the same fixed creation order
+// a same-seed run reproduces, so mapping over it keeps this one code path for every N —
+// and for the ["player","ai"] roster every existing caller still passes, `res` reads the
+// exact same two owners in the exact same order the old hardcoded expression did.
 export function entitySnapshot(state) {
   const units = [...state.units.values()].map(u =>
     [u.id, u.type, u.owner, u.x, u.y, u.hp,
@@ -64,8 +73,8 @@ export function entitySnapshot(state) {
     [b.id, b.type, b.owner, b.hp, b.buildProgress ?? "-", b.constructing ? 1 : 0,
      (b.queue || []).length, b.tier || 0, b.charge ?? "-"].join("|")
   ).sort();
-  const res = JSON.stringify(state.players.player.resources) + "/" + JSON.stringify(state.players.ai.resources);
-  const fog = state.fog.explored.reduce((a, v) => a + v, 0);
+  const res = state.owners.map(id => JSON.stringify(state.players[id].resources)).join("/");
+  const fog = state.owners.map(id => state.fogs[id].explored.reduce((a, v) => a + v, 0)).join("/");
   return JSON.stringify({ units, builds, res, fog, tick: state.tick, time: state.time, over: state.over, winner: state.winner });
 }
 

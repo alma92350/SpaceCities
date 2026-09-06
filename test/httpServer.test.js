@@ -17,6 +17,7 @@ import assert from "node:assert/strict";
 import { request as httpRequest } from "node:http";
 import { createAppServer } from "../tools/serve.js";
 import { createWsClientTransport } from "../net/wsClientTransport.js";
+import { PROTOCOL_VERSION } from "../net/mcp.js";
 
 async function listen(server) {
   await new Promise(resolve => server.listen(0, resolve));
@@ -53,6 +54,39 @@ async function postJson(port, path, body) {
   return { status: res.status, json: res.body ? JSON.parse(res.body) : null };
 }
 
+// A real MCP tools/call, over a real HTTP connection to the SAME /mcp endpoint a real agent
+// speaks to — every dedicated mcp*.test.js file constructs its own createMcpServer directly
+// instead of going through createAppServer's full HTTP stack (this file's own established
+// "prove the mechanism, then prove the piece that feeds it, separately" split), so this helper
+// exists here only for the one test that specifically needs proof of the REAL tools/serve.js
+// wiring end to end, not just the mechanism.
+async function callMcpTool(port, name, args) {
+  const payload = {
+    jsonrpc: "2.0", id: 1, method: "tools/call",
+    params: {
+      name, arguments: args,
+      _meta: { "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION, "io.modelcontextprotocol/clientCapabilities": {} },
+    },
+  };
+  const res = await new Promise((resolve, reject) => {
+    const body = JSON.stringify(payload);
+    const req = httpRequest({
+      host: "localhost", port, path: "/mcp", method: "POST",
+      headers: {
+        "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body),
+        "MCP-Protocol-Version": PROTOCOL_VERSION, "Mcp-Method": "tools/call", "Mcp-Name": name,
+      },
+    }, r => {
+      const chunks = [];
+      r.on("data", c => chunks.push(c));
+      r.on("end", () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.on("error", reject);
+    req.end(body);
+  });
+  return { status: res.status, json: JSON.parse(res.body) };
+}
+
 async function withApp(fn) {
   const app = await createAppServer();
   const port = await listen(app.server);
@@ -73,20 +107,57 @@ test("static assets: the server still serves index.html correctly", async () => 
   });
 });
 
-test("/mcp is RESERVED, not a 404 — a distinct response, since T-049 (Phase 6) is its real implementation", async () => {
+test("T-049: GET /mcp is 405 — this protocol revision has no GET SSE endpoint, and the real handler (not the old 501 placeholder) now answers", async () => {
   await withApp(async (app, port) => {
     const res = await get(port, "/mcp");
-    assert.equal(res.status, 501, "501 Not Implemented: a real, recognized endpoint, just not built yet");
-    assert.match(res.headers["content-type"], /application\/json/);
-    const body = JSON.parse(res.body);
-    assert.equal(body.error, "not_implemented");
+    assert.equal(res.status, 405);
   });
 });
 
-test("/mcp reserves its whole namespace, not just the exact path", async () => {
+test("T-049: /mcp is a SINGLE exact path — /mcp/anything is no longer specially reserved, it 404s like any other unknown path", async () => {
   await withApp(async (app, port) => {
     const res = await get(port, "/mcp/tools/list");
-    assert.equal(res.status, 501);
+    assert.equal(res.status, 404);
+  });
+});
+
+test("T-049: POST /mcp speaks real Streamable HTTP + JSON-RPC 2.0 (protocol revision 2026-07-28) end to end, over a real HTTP connection", async () => {
+  await withApp(async (app, port) => {
+    const payload = {
+      jsonrpc: "2.0", id: 1, method: "server/discover",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    };
+    const res = await new Promise((resolve, reject) => {
+      const body = JSON.stringify(payload);
+      const req = httpRequest({
+        host: "localhost", port, path: "/mcp", method: "POST",
+        headers: {
+          "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body),
+          "MCP-Protocol-Version": PROTOCOL_VERSION, "Mcp-Method": "server/discover",
+        },
+      }, r => {
+        const chunks = [];
+        r.on("data", c => chunks.push(c));
+        r.on("end", () => resolve({ status: r.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+    assert.equal(res.status, 200);
+    const json = JSON.parse(res.body);
+    assert.equal(json.result.resultType, "complete");
+    assert.deepEqual(json.result.supportedVersions, [PROTOCOL_VERSION]);
+    // T-055: the real createAppServer() now registers real static resources (unit stats, the
+    // counter triangle, build costs, the tech tree), so its own server/discover capabilities
+    // genuinely include resources:{} now — see net/mcp.test.js for the capability-declaration
+    // mechanism itself (only ever declared once something is actually registered).
+    assert.deepEqual(json.result.capabilities, { tools: {}, resources: {} });
+    assert.deepEqual(json.result._meta["io.modelcontextprotocol/serverInfo"], { name: "SpaceCities", version: "1.1.0" });
   });
 });
 
@@ -135,6 +206,86 @@ test("POST /api/matches (default seatKinds, both open) creates a match, auto-joi
 
     // Not live yet: no worker exists for this match until something actually starts it.
     await assert.rejects(createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=player&token=${created.json.token}`));
+  });
+});
+
+test("T-057 (ADR-0007): POST /api/matches can never set clockPolicy — a client-supplied clockPolicy in the request body is silently ignored, never forwarded to the lobby", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", clockPolicy: "deliberation" });
+    assert.equal(created.status, 201);
+    const match = app.lobby.getMatch(created.json.matchId);
+    assert.equal(match.config.clockPolicy, undefined, "the ONLY network-reachable match-creation path must never be able to set a non-realtime clockPolicy — that would break ADR-0007's own \"never in a lobby with a human\" safety property");
+    // Also publicly listed — confirming it's a genuinely ordinary (realtime) match, not just that
+    // the field was dropped.
+    assert.ok(app.lobby.listOpenMatches().some(m => m.id === created.json.matchId));
+  });
+});
+
+/* ============================================================
+   Bugfix, reported live: a user trying to seat TWO separate MCP agents into the two seats of an
+   ordinary match (intending to watch as a spectator, playing neither seat themselves) found the
+   second agent's own join_match always rejected with "no-open-seat" — because creating the match
+   at all (POST /api/matches) unconditionally auto-claimed seat 0 for the host in the same request,
+   leaving only ONE seat ever open for anyone else to join, agent or human. hostJoins:false lets a
+   creator opt out of that auto-claim (default true, so every existing caller — including every
+   test above this one — is unaffected) specifically for this "I'm only spectating" case.
+   ============================================================ */
+
+test("bugfix: POST /api/matches with hostJoins:false claims NEITHER seat — the creator gets no seat/token, and the match waits with every seat still genuinely open for someone else to join", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", hostJoins: false });
+    assert.equal(created.status, 201);
+    assert.equal(created.json.seatIndex, null);
+    assert.equal(created.json.owner, null);
+    assert.equal(created.json.token, null);
+    assert.equal(created.json.started, false);
+
+    const match = app.lobby.getMatch(created.json.matchId);
+    assert.equal(match.seats[0].owner, null, "seat 0 must still be genuinely unclaimed, not silently taken by the creator");
+    assert.equal(match.seats[1].owner, null);
+  });
+});
+
+test("bugfix: two separate joins fill both seats of a hostJoins:false match — the exact scenario a human host previously could never set up (two independent agents, no seat of their own)", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", hostJoins: false });
+
+    const first = await postJson(port, `/api/matches/${created.json.matchId}/join`, {});
+    assert.equal(first.json.seatIndex, 0);
+    assert.equal(first.json.started, false, "one seat filled, one still open — not ready yet");
+
+    const second = await postJson(port, `/api/matches/${created.json.matchId}/join`, {});
+    assert.equal(second.json.seatIndex, 1);
+    assert.equal(second.json.started, true, "the LAST open seat filling must start the match on its own — no host token exists to call /start with in this scenario");
+
+    // Genuinely live, for BOTH seats — not just a flag that says so.
+    const transportA = await createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=${first.json.owner}&token=${first.json.token}`);
+    const transportB = await createWsClientTransport(`ws://localhost:${port}/ws?match=${created.json.matchId}&seat=${second.json.owner}&token=${second.json.token}`);
+    const stateA = await new Promise(resolve => transportA.onEvent(e => { if (e.type === "state") resolve(e.state); }));
+    assert.ok(stateA.units instanceof Map);
+    transportA.close();
+    transportB.close();
+  });
+});
+
+test("bugfix, REAL end to end: two real join_match MCP tool calls (not the HTTP join endpoint) fill both seats of a hostJoins:false match and start it — the exact reported scenario, over the real /mcp endpoint tools/serve.js actually wires", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", hostJoins: false });
+
+    const first = await callMcpTool(port, "join_match", { match_id: created.json.matchId });
+    assert.equal(first.json.result.isError, undefined, JSON.stringify(first.json.result));
+    assert.equal(first.json.result.structuredContent.started, false);
+
+    const second = await callMcpTool(port, "join_match", { match_id: created.json.matchId });
+    assert.equal(second.json.result.isError, undefined, JSON.stringify(second.json.result));
+    assert.equal(second.json.result.structuredContent.started, true,
+      "join_match itself must start the match once it fills the last seat — nothing else in this scenario ever could");
+
+    const { owner: ownerA } = first.json.result.structuredContent;
+    const { owner: ownerB } = second.json.result.structuredContent;
+    assert.notEqual(ownerA, ownerB, "fixture sanity: two genuinely different seats");
+    // Confirmed live on the SAME match the two agents just joined — app.lobby, not a second copy.
+    assert.equal(app.lobby.getMatch(created.json.matchId).status, "started");
   });
 });
 
@@ -357,6 +508,51 @@ test("GET /api/matches exposes spectatorsEnabled in the public listing, so a cli
     const mDisabled = list.matches.find(m => m.id === disabled.json.matchId);
     assert.equal(mEnabled.spectatorsEnabled, true);
     assert.equal(mDisabled.spectatorsEnabled, false);
+  });
+});
+
+/* ============================================================
+   T-059 (FR-22): GET /api/results — a match's own final outcome, recorded once its worker
+   reports over:true, independent of the raw engine snapshot (which stops the instant a match
+   ends — server/matchWorker.js's own header). matchTimeLimit gives a REAL, fast, deterministic
+   way to end a match in a test without inventing a special test-only trigger: engine/victory.js's
+   own checkWinCondition ends it via "timeout-score" the moment state.time reaches the limit,
+   exactly the same path a real long match eventually hits on its own.
+   ============================================================ */
+
+test("GET /api/results starts empty, before any match has ever ended", async () => {
+  await withApp(async (app, port) => {
+    const res = await get(port, "/api/results");
+    assert.equal(res.status, 200);
+    assert.deepEqual(JSON.parse(res.body).results, []);
+  });
+});
+
+test("a real match ending via matchTimeLimit is recorded and reported by GET /api/results", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", {
+      planetId: "ferros", seatKinds: ["open", "ai"], matchTimeLimit: 0.2,
+    });
+    assert.equal(created.json.started, true, "fixture sanity: an [open, ai] match starts immediately");
+
+    const result = await new Promise((resolve, reject) => {
+      const deadline = Date.now() + 10000;
+      const poll = async () => {
+        const listed = JSON.parse((await get(port, "/api/results")).body).results;
+        const found = listed.find(r => r.matchId === created.json.matchId);
+        if (found) { resolve(found); return; }
+        if (Date.now() > deadline) { reject(new Error("match never appeared in /api/results")); return; }
+        setTimeout(poll, 100);
+      };
+      poll();
+    });
+
+    assert.equal(result.winReason, "timeout-score");
+    assert.deepEqual(result.owners, ["player", "ai"]);
+    assert.ok(result.owners.includes(result.winner), "the recorded winner must be one of this match's own real owners");
+    assert.ok(result.time >= 0.2, "the match must have actually run at least matchTimeLimit's own worth of sim time");
+    assert.ok(Number.isFinite(result.tick) && result.tick > 0);
+    assert.ok(Number.isFinite(result.endedAt) && result.endedAt <= Date.now());
   });
 });
 

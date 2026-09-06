@@ -13,6 +13,7 @@ import { BUILDINGS, UNITS } from "./entities.js";
 import { createFog, updateFog } from "./fog.js";
 import { archetypeFor, ARCHETYPES } from "./aiArchetypes.js";
 import { difficultyFor } from "./aiDifficulty.js";
+import { attachControllerAliases } from "./controllers.js";
 
 // Entity-id counter (ADR-0011, TASKS.md T-016 — "Fix B1"). Each state carries its OWN counter,
 // state.nextEntityId, reset to 1 by createGameState (below): a fresh game is a pure function of
@@ -186,7 +187,18 @@ export function createAiController(planetId, opts = {}) {
  * @param {{ planetId?: string, rng?: () => number, seed?: number, sizeMult?: number,
  *   resourceMult?: number, swapAsym?: boolean, matchTimeLimit?: number, popCap?: number, endless?: boolean,
  *   aiApm?: number, aiMicro?: boolean, aiEnabled?: boolean,
- *   aiStrategy?: string, difficulty?: string, aiArchetype?: string, playerFaction?: string, aiFaction?: string }} [opts]
+ *   aiStrategy?: string, difficulty?: string, aiArchetype?: string, playerFaction?: string, aiFaction?: string,
+ *   ownerDefs?: {id: string, faction: string, isAI: boolean, color: string, aiOpts?: Object}[],
+ *   basePositions?: Object.<string, {x: number, y: number}> }} [opts]
+ *   ownerDefs (T-041): a caller-supplied N-entry side list, replacing the default ["player","ai"]
+ *   pair wholesale — omitted (every caller today), byte-identical to before. Each entry's own
+ *   `aiOpts` (T-042, default {}) is forwarded to createAiController for that owner when isAI is
+ *   true — the createGameState-level shortcuts (aiApm/aiMicro/aiStrategy/difficulty/aiArchetype)
+ *   only ever apply to the DEFAULT pair, exactly like playerFaction/aiFaction already do.
+ *   basePositions: a per-owner start-position override, consulted before map.bases. T-044's own
+ *   generateRadialMap now gives every owner (2 or N) a real position, so this is no longer a
+ *   stopgap for a gap in the generator — it stays as a genuine override seam (a caller placing a
+ *   seat somewhere the generator wouldn't, e.g. a hand-built test fixture).
  * @returns {State}
  */
 export function createGameState(opts = {}) {
@@ -199,24 +211,25 @@ export function createGameState(opts = {}) {
   // with that sequence either, in any interleaving, reset or not.
   nextEntityId = 1000000;
   const planetId = opts.planetId || "ferros";
-  // The one sanctioned fallback: an UNSEEDED caller (a direct test, or a call
-  // that predates seeding) uses the platform PRNG for map generation only.
-  // Production always passes a seeded rng (see main.js), so this branch never
-  // runs in a real match — the engine-purity guard whitelists the marked line.
-  const map = generateMap(planetId, opts.rng || Math.random, {   // deterministic-exempt: unseeded default rng
-    sizeMult: opts.sizeMult || 1,
-    resourceMult: opts.resourceMult || 1,
-    swapAsym: !!opts.swapAsym,
-  });
 
-  // The sides in this world. Today always exactly the human "player" and the AI
+  // The sides in this world. Today almost always exactly the human "player" and the AI
   // opponent, but the SCAFFOLD is owner-generic: state.owners is the canonical
   // side list, and the player map, per-owner fog, seeding, persistence and the
   // victory check are all driven by ITERATING it — not by two hardcoded names.
   // So a future N-faction world is a change to this list, not a sweep across the
   // engine. (state.fog / state.fogAI stay as aliases into state.fogs so the many
   // existing fog consumers keep working unchanged.)
-  const ownerDefs = [
+  //
+  // T-041 (FR-1): opts.ownerDefs lets a caller supply its own N-entry list — omitted (every
+  // existing caller), this is byte-identical to the literal 2-entry pair it always was, so
+  // playerFaction/aiFaction keep meaning exactly what they always did. Once a caller passes its
+  // own ownerDefs, those two shortcut opts are simply never consulted (the caller's own entries
+  // already carry `faction` per owner) — the more detailed config wins, not both at once.
+  //
+  // Computed BEFORE generateMap (T-044) so the map generator itself can see the real owner
+  // roster — 2 ids dispatches to its own byte-identical mirrored path (just keyed by whatever
+  // those 2 ids are), 3+ to the new radial generator (engine/map.js's own generateRadialMap).
+  const ownerDefs = opts.ownerDefs || [
     // Faction is a passive-trait bundle (engine/factions.js). It defaults to
     // "neutral" (no traits) so a bare createGameState — every engine test —
     // behaves exactly as before; the setup screen (main.js) passes the real
@@ -225,6 +238,18 @@ export function createGameState(opts = {}) {
     { id: "ai", faction: opts.aiFaction || "neutral", isAI: true, color: "#f87171" },
   ];
   const owners = ownerDefs.map(d => d.id);
+
+  // The one sanctioned fallback: an UNSEEDED caller (a direct test, or a call
+  // that predates seeding) uses the platform PRNG for map generation only.
+  // Production always passes a seeded rng (see main.js), so this branch never
+  // runs in a real match — the engine-purity guard whitelists the marked line.
+  const map = generateMap(planetId, opts.rng || Math.random, {   // deterministic-exempt: unseeded default rng
+    sizeMult: opts.sizeMult || 1,
+    resourceMult: opts.resourceMult || 1,
+    swapAsym: !!opts.swapAsym,
+    owners,
+  });
+
   /** @type {Object.<string, Player>} */
   const players = {};
   for (const d of ownerDefs)
@@ -233,6 +258,34 @@ export function createGameState(opts = {}) {
   const fogs = {};
   for (const id of owners) fogs[id] = createFog(map);   // one fog grid per side — the AI scouts for its own intel too (engine/ai.js)
 
+  // T-042 (ADR-0008): state.controllers{} — the real, N-capable registry engine/controllers.js's
+  // controllerFor reads by owner id. The DEFAULT ownerDefs (every existing caller) builds it with
+  // the EXACT SAME two expressions this always used, so it's byte-identical to before; a caller's
+  // OWN ownerDefs (T-041) is, like playerFaction/aiFaction themselves, a more detailed config that
+  // wins outright — aiEnabled/aiApm/aiMicro/aiStrategy/difficulty/aiArchetype are then simply never
+  // consulted, and each entry's own optional `aiOpts` (default {}) decides that owner's controller.
+  /** @type {Object.<string, AiState|null>} */
+  const controllers = {};
+  if (opts.ownerDefs) {
+    for (const d of ownerDefs) controllers[d.id] = d.isAI ? createAiController(planetId, d.aiOpts || {}) : null;
+  } else {
+    controllers.player = null;
+    // opts.aiEnabled (default true): false is the T-034a seam — the moment a real match can put a
+    // human on seat "ai" (a lobby join, not self-play's separate playerAi slot), the "ai" controller
+    // must be able to stay null so isHumanControlled(state,"ai") is true and engine/sim.js's tick()
+    // stops calling runAI for "ai" — exactly the null a fresh "player" controller already models.
+    // Every existing caller leaves this unset, so this stays exactly as populated as before.
+    controllers.ai = opts.aiEnabled === false ? null : createAiController(planetId, {
+      apm: opts.aiApm, micro: opts.aiMicro, strategy: opts.aiStrategy, difficulty: opts.difficulty,
+      // docs/competitions-and-elo.md D3, one layer up from createAiController's own opts.archetype
+      // (which this just forwards verbatim, including its own null/unknown-key fallback to
+      // archetypeFor(planetId)) — absent on every call site before this stage, so byte-identical
+      // until a caller actually passes it (Quick Duel's own per-entrant archetype pick, via
+      // tools/duelCore.js's runDuelMatch -> tools/selfplay.js's createSelfPlayState -> here).
+      archetype: opts.aiArchetype,
+    });
+  }
+
   const state = {
     time: 0,
     tick: 0,
@@ -240,6 +293,8 @@ export function createGameState(opts = {}) {
     over: false,
     winner: null,
     winReason: null,   // set by engine/victory.js finish() — why the match ended, once it does
+    eliminated: [],    // T-046: owners no longer standing (engine/victory.js checkWinCondition/surrender)
+    surrendered: [],   // T-046: the subset of eliminated who quit voluntarily
     seed: opts.seed ?? null,   // the match seed, if one was supplied — reproduces this whole game
     // The generation inputs, kept so a save can regenerate the (deterministic)
     // map from the seed instead of serialising the whole terrain/node table.
@@ -278,47 +333,30 @@ export function createGameState(opts = {}) {
     fogs,                   // per-owner fog of war, keyed by owner id — see engine/fog.js
     fog: fogs.player,       // alias: the human player's fog (=== state.fogs.player)
     fogAI: fogs.ai,         // alias: the AI's own fog, no longer omniscient (=== state.fogs.ai)
-    // The AI OPPONENT's runtime bookkeeping, grouped under one key so it doesn't clutter the
-    // top-level state (which is the shared sim world). This is the AI *controller's* scratch
-    // state — distinct from state.players.ai, which is the AI's economy/faction. Serialized under
-    // the save's `ai:` key (engine/persist.js). The think/wave/attack-schedule fields used to be
-    // set lazily by ai.js on first tick; initialising them here keeps the shape complete and
-    // self-documenting, and is behaviourally identical (they were read `|| 0` / `?? …` anyway).
-    // opts.aiEnabled (default true): false is the T-034a seam — the moment a real match can put a
-    // human on seat "ai" (a lobby join, not self-play's separate playerAi slot below), state.ai
-    // must be able to stay null so isHumanControlled(state,"ai") is true and engine/sim.js's tick()
-    // stops calling runAI for "ai" — exactly the null a fresh state.playerAi already models, and
-    // engine/aiCommon.js's controllerFor/runAI already treat a null controller as a safe no-op.
-    // Every existing caller leaves this unset, so state.ai is exactly as populated as before.
-    ai: opts.aiEnabled === false ? null : createAiController(planetId, {
-      apm: opts.aiApm, micro: opts.aiMicro, strategy: opts.aiStrategy, difficulty: opts.difficulty,
-      // docs/competitions-and-elo.md D3, one layer up from createAiController's own opts.archetype
-      // (which this just forwards verbatim, including its own null/unknown-key fallback to
-      // archetypeFor(planetId)) — absent on every call site before this stage, so byte-identical
-      // until a caller actually passes it (Quick Duel's own per-entrant archetype pick, via
-      // tools/duelCore.js's runDuelMatch -> tools/selfplay.js's createSelfPlayState -> here).
-      archetype: opts.aiArchetype,
-    }),
-    // A second, parallel AI controller for owner "player" — same shape as `ai` above (see
-    // createAiController), but null for every match that exists today. Tier 1 self-play
-    // (tools/selfplay.js, a headless bench — never setup.js/boot.js/the shipped game) is the only
-    // thing that ever populates it, by assigning a controller object here directly; every other
-    // caller leaves it null, so playerBuildings/playerUnits/runAI's single-owner default path is
-    // completely untouched. Kept OUTSIDE `players` (state.players.player is the human's economy/
-    // faction, unrelated) and outside `ai` itself, exactly parallel to it — see engine/ai.js's
-    // runAI(state, dt, owner) and engine/aiCommon.js's controllerFor.
-    playerAi: null,
+    // T-042: the real, N-capable registry (built above) — state.ai/state.playerAi become live
+    // accessor aliases into controllers.ai/controllers.player right after this object literal
+    // closes (attachControllerAliases below), so every existing reader/writer of the old two names
+    // keeps working completely unchanged.
+    controllers,
     events: [],              // sim events this tick (unitSpawned/attackHit/entityKilled/buildingComplete) — pushed by
                               // production.js/combat.js, drained and turned into sound by main.js each render frame
     craters: [],              // pending Helium Bomb craters awaiting maturity into a real node (engine/bomb.js)
     wrecks: [],                // pending battle-wreckage sites awaiting maturity into real nodes (engine/wreckage.js)
   };
+  attachControllerAliases(state);
 
   // Seed each side's opening (a colony ship in Odyssey, a Command Center + workers in
   // skirmish) and prime its vision before the first render — both by iterating owners,
   // so the id-minting order and fog state are byte-identical to the old player-then-ai
   // pair. map.bases is keyed by owner id (engine/map.js).
-  for (const id of owners) seedPlayer(state, id, map.bases[id]);
+  //
+  // T-041: opts.basePositions is an explicit per-owner override, consulted FIRST — the map
+  // generator itself still only ever produces "player"/"ai" (a real N-position generator is
+  // T-044's own, later job); this is a deliberate stopgap so a caller with its own ownerDefs can
+  // supply where the extra owners start, without this file needing any map-generation logic of
+  // its own. Every existing caller leaves it unset, so map.bases[id] alone decides, exactly as
+  // before this option existed.
+  for (const id of owners) seedPlayer(state, id, (opts.basePositions && opts.basePositions[id]) || map.bases[id]);
   for (const id of owners) updateFog(state, state.fogs[id], id);
 
   // Hard difficulty's economic edge (engine/aiDifficulty.js): seed the synthetic hardEdge

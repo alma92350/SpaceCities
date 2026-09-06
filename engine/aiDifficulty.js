@@ -77,6 +77,8 @@
 
 "use strict";
 
+import { controllerFor } from "./controllers.js";
+
 export const DIFFICULTY_OPTIONS = [
   { label: "Easy", mult: "easy", note: "slow · no micro · predictable", aiApm: 20, aiMicro: false,
     workerTargetMult: 0.8, graceMult: 1.15, grievanceMult: 0.85, researchPaceMult: 1.3,
@@ -111,11 +113,12 @@ export function adaptivityFor(state, owner = "ai") {
  * medium entry when unset or naming a key that isn't in the list, the same fallback boot.js's
  * difficultyDials already applies before a match even starts. Tier 1 self-play (tools/selfplay.js)
  * passes owner="player" to read state.playerAi.difficulty instead, its own independently-picked
- * dial; deliberately NOT an import of engine/aiCommon.js's controllerFor, so this file stays the
- * pure, import-free leaf its header describes. */
+ * dial. T-042: controllerFor now comes from engine/controllers.js, a true zero-import leaf — NOT
+ * engine/aiCommon.js, so this file stays exactly the pure, import-free-of-the-AI-LAYER leaf its
+ * header describes (test/static-integrity.test.js's own cycle check has nothing to catch here). */
 /** @param {State} state @param {string} [owner] @returns {Object} */
 export function difficultyFor(state, owner = "ai") {
-  const controller = owner === "ai" ? state.ai : state.playerAi;
+  const controller = controllerFor(state, owner);
   return DIFFICULTY_OPTIONS.find(o => o.mult === (controller && controller.difficulty))
       || DIFFICULTY_OPTIONS.find(o => o.mult === "medium");
 }

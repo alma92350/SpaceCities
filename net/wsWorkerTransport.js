@@ -197,6 +197,17 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
               return;
             }
 
+            if (envelope.type === "surrender") {
+              // T-059a (FR-8): a seat's own deliberate choice to end its participation — no
+              // payload beyond the type itself needed; `seat` comes from THIS connection's own
+              // already-authenticated identity (resolved once, at connect time, above), never
+              // anything a client's own message body could claim to override. Relayed to the
+              // worker unchanged, the same pure-relay posture as fingerprint below — only IT holds
+              // the live match.state a real concession has to apply against.
+              worker.postMessage({ type: "surrender", seat });
+              return;
+            }
+
             if (envelope.type === "fingerprint") {
               // T-040: relayed to the worker unchanged — only IT holds the live match.state a
               // report can actually be compared against (see this file's own header). A malformed

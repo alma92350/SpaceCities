@@ -78,8 +78,26 @@ function shareLink(matchId) {
 // bootState time (T-034's own boot.js fix explains why this file, not that one, owns applying
 // pushes: nothing ticks locally for a live network transport, so nothing else ever touches
 // game.state again after boot without this).
-function applyLiveState(live, fresh) {
-  for (const key of Object.keys(fresh)) live[key] = fresh[key];
+//
+// `selection` is deliberately EXCLUDED from this copy — a real bug, found by actually playing a
+// live match rather than by any test: `selection` is UI-only (engine/projection.js's own header:
+// "it moves to the client session, the server never reads or sends it"), and reassembleProjection
+// correctly always returns `selection: []` for exactly that reason. But this function used to copy
+// EVERY key from `fresh` onto `live`, including that placeholder — so the instant a player clicked
+// a unit (input.js's own `state.selection = [...]`), the very next tick's state push (arriving
+// several times a second) stomped it back to empty, making every click un-selectable in practice.
+// Preserving `live.selection` verbatim isn't quite enough on its own, though: single-player's own
+// removeEntity (engine/state.js) also drops a destroyed entity's id from `state.selection` the
+// instant it's removed — a cleanup this network path never gets, since the sim it would be
+// reacting to runs server-side only. Re-deriving that same filter here (against the FRESH
+// units/buildings this push just delivered) is what keeps a selection that outlives its own unit
+// from silently accumulating dead ids forever.
+export function applyLiveState(live, fresh) {
+  for (const key of Object.keys(fresh)) {
+    if (key === "selection") continue;
+    live[key] = fresh[key];
+  }
+  live.selection = live.selection.filter(id => live.units.has(id) || live.buildings.has(id));
 }
 
 // Connects over a real WebSocket as the given seat and hands off into the running match, exactly
@@ -88,9 +106,29 @@ function applyLiveState(live, fresh) {
 // immediately (camera framing on the local seat's own base). The ongoing onEvent subscription is
 // registered only AFTER bootState has actually set game.state, so applyLiveState never has a stale
 // or wrong object to fold onto.
+// T-060 (ADR-0010): the Space this game is deployed to sleeps after 48h idle and returns a 503
+// until it wakes — every joinLive() caller below shares this ONE connection call, so fixing the
+// "first visitor after idle sees a loading state, not an error" gap here fixes it everywhere at
+// once, rather than needing each host/join/rejoin call site to remember its own retry handling.
+async function connectLive(matchId, owner, token, statusEl) {
+  return createWsClientTransport(wsUrlFor(matchId, owner, token), {
+    initialConnectRetry: {
+      onRetry(attempt, delayMs) {
+        if (statusEl) statusEl.textContent = `Waking up the game server… (attempt ${attempt}, retrying in ${Math.round(delayMs / 1000)}s)`;
+      },
+    },
+  });
+}
+
 async function joinLive(matchId, owner, token, statusEl) {
   if (statusEl) statusEl.textContent = "Connecting…";
-  const transport = await createWsClientTransport(wsUrlFor(matchId, owner, token));
+  let transport;
+  try {
+    transport = await connectLive(matchId, owner, token, statusEl);
+  } catch (err) {
+    if (statusEl) statusEl.textContent = "Could not reach the game server. Please try again.";
+    throw err;
+  }
   const firstState = await new Promise(resolve => { transport.onEvent(e => { if (e.type === "state") resolve(e.state); }); });
   sound.unlockAudio();   // a real user gesture (the Host/Join click) led here — safe to start audio now
   game.localOwner = owner;
@@ -282,7 +320,10 @@ function renderHostCard(container) {
       // T-035's own FR-4 "all seats filled" clause) rather than assumed away.
       status.textContent = "Match created and already live.";
       hostBtn.textContent = "▶ Enter match";
-      hostBtn.onclick = () => joinLive(created.matchId, created.owner, created.token, status);
+      hostBtn.onclick = () => {
+        hostBtn.disabled = true;
+        joinLive(created.matchId, created.owner, created.token, status).catch(() => { hostBtn.disabled = false; });
+      };
       return;
     }
     status.textContent = "Match created — share the link, or start now against the built-in AI.";
@@ -299,7 +340,9 @@ function renderHostCard(container) {
         hostBtn.disabled = false;
         return;
       }
-      await joinLive(created.matchId, created.owner, created.token, status);
+      try {
+        await joinLive(created.matchId, created.owner, created.token, status);
+      } catch { hostBtn.disabled = false; }
     };
   });
   card.appendChild(hostBtn);
@@ -316,7 +359,14 @@ async function joinMatchById(matchId, statusBtn) {
     statusBtn.textContent = res.json && res.json.error === "no-open-seat" ? "Seat taken" : "Join";
     return;
   }
-  await joinLive(matchId, res.json.owner, res.json.token, null);
+  try {
+    // statusBtn doubles as joinLive's own statusEl — a button's textContent is exactly as
+    // writable as a status paragraph's, so a T-060 "waking up…" message (or the connect-failure
+    // one) shows right on the button a player just clicked, not silently nowhere.
+    await joinLive(matchId, res.json.owner, res.json.token, statusBtn);
+  } catch {
+    statusBtn.disabled = false;
+  }
 }
 
 function renderOpenMatchesCard(container) {
@@ -390,7 +440,9 @@ function renderJoinByLink(joinMatchId) {
       joinBtn.disabled = false;
       return;
     }
-    await joinLive(joinMatchId, res.json.owner, res.json.token, status);
+    try {
+      await joinLive(joinMatchId, res.json.owner, res.json.token, status);
+    } catch { joinBtn.disabled = false; }
   });
   card.appendChild(joinBtn);
 

@@ -198,3 +198,95 @@ test("joinMatch refuses a seat once the match has started — the window for a c
   assert.equal(result.ok, false);
   assert.equal(result.code, "already-started");
 });
+
+// T-051: leaveSeat — a NEW capability, not needed until an MCP agent (which holds no persistent
+// connection at all, so has nothing analogous to T-036's own disconnect detection) needs a way to
+// voluntarily give up a seat it hasn't started playing yet. Self-authenticating like reclaimSeat
+// itself (a token, re-checked here, not trusted from whatever validated it earlier) rather than a
+// bare matchId+seatIndex — every OTHER mutating function in this file already re-checks its own
+// token, and this one shouldn't be the first exception.
+test("leaveSeat frees an open match's seat back to unowned, with the exact right token", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  const joined = lobby.joinMatch(match.id, 0);
+
+  const left = lobby.leaveSeat(match.id, 0, joined.token);
+  assert.equal(left.ok, true);
+
+  const seat = lobby.matches.get(match.id).seats[0];
+  assert.equal(seat.owner, null);
+  assert.equal(seat.token, null);
+  assert.equal(seat.kind, "open", "the seat's KIND is untouched — still open for someone else to claim");
+});
+
+test("a freed seat can genuinely be re-joined by someone else, with a fresh token — leaveSeat isn't just a bookkeeping no-op", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  const joined = lobby.joinMatch(match.id, 0);
+  lobby.leaveSeat(match.id, 0, joined.token);
+
+  const rejoined = lobby.joinMatch(match.id, 0);
+  assert.equal(rejoined.ok, true);
+  assert.notEqual(rejoined.token, joined.token, "a fresh token, never the departed seat's old one");
+  // The old token is well and truly dead — it must not reclaim the new occupant's seat.
+  assert.equal(lobby.reclaimSeat(match.id, 0, joined.token).ok, false);
+  assert.equal(lobby.reclaimSeat(match.id, 0, rejoined.token).ok, true);
+});
+
+test("leaveSeat refuses a wrong token — a departing seat can only be freed by whoever actually holds it", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  const joined = lobby.joinMatch(match.id, 0);
+
+  const result = lobby.leaveSeat(match.id, 0, "not-the-real-token");
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "bad-token");
+  // Refused, so the seat is UNTOUCHED — still legitimately reclaimable by its real owner.
+  assert.equal(lobby.reclaimSeat(match.id, 0, joined.token).ok, true);
+});
+
+test("leaveSeat refuses once the match has started — a live seat leaves through the engine's own surrender, not the lobby", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  const joined = lobby.joinMatch(match.id, 0);
+  lobby.startMatch(match.id);
+
+  const result = lobby.leaveSeat(match.id, 0, joined.token);
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "already-started");
+});
+
+test("leaveSeat refuses an unclaimed seat and an unknown match, without throwing", () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch(baseConfig());
+  assert.equal(lobby.leaveSeat(match.id, 0, "anything").code, "no-such-seat");
+  assert.equal(lobby.leaveSeat("not-a-real-id", 0, "anything").ok, false);
+});
+
+/* ============================================================
+   T-057 (§6.3, ADR-0007): clockPolicy is stored the same opaque way seatKinds/planetId already
+   are — this file has no idea what "deliberation" MEANS, only that it's part of a match's own
+   config. The real safety property ("never in a lobby with a human") is NOT enforced here at
+   all, deliberately: it's enforced by tools/serve.js's own HTTP create-match handler never
+   reading a clockPolicy field out of a request body in the first place, so the only way any
+   match ever gets one is a direct, in-process createMatch() call from trusted server code (a
+   benchmark/eval harness), never a network request. listOpenMatches excluding a non-realtime
+   match is the one piece of defense-in-depth that DOES belong here, since it's this file's own
+   list a browsing human could otherwise stumble across.
+   ============================================================ */
+
+test("createMatch stores an explicit clockPolicy verbatim, and omits it (undefined) when not given — the default is realtime by ABSENCE, not a stored string", () => {
+  const lobby = createLobby();
+  const deliberation = lobby.createMatch(baseConfig({ clockPolicy: "deliberation" }));
+  assert.equal(deliberation.config.clockPolicy, "deliberation");
+  const ordinary = lobby.createMatch(baseConfig());
+  assert.equal(ordinary.config.clockPolicy, undefined);
+});
+
+test("listOpenMatches excludes a deliberation-clockPolicy match — never discoverable by a human browsing the lobby", () => {
+  const lobby = createLobby();
+  const ordinary = lobby.createMatch(baseConfig());
+  lobby.createMatch(baseConfig({ clockPolicy: "deliberation" }));
+  const listed = lobby.listOpenMatches();
+  assert.deepEqual(listed.map(m => m.id), [ordinary.id]);
+});

@@ -29,6 +29,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createGameState, makeBuilding, makeUnit } from "../engine/state.js";
 import { runAI } from "../engine/ai.js";
+import { raidTarget, chooseAttackTarget, counterToPlayerArmy, visibleEnemyForceCount, updateScout } from "../engine/aiMilitary.js";
+import { updateFog } from "../engine/fog.js";
+import { opponentsOf } from "../engine/aiCommon.js";
 
 const THINK = 1.5;   // matches ai.js THINK_INTERVAL — forces a fresh think each call
 
@@ -237,4 +240,123 @@ test("threatCentroid averages the threat positions (T3)", async () => {
   const { threatCentroid } = await import("../engine/aiMilitary.js");
   assert.deepEqual(threatCentroid([{ x: 0, y: 0 }, { x: 10, y: 20 }]), { x: 5, y: 10 });
   assert.deepEqual(threatCentroid([{ x: 7, y: -3 }]), { x: 7, y: -3 });
+});
+
+/* ============================================================
+   T-043 (ADR-0008): opponentsOf() replacing otherOwner()'s "exactly one enemy" axiom.
+
+   visibleEnemyCombatUnits/raidTarget/chooseAttackTarget/counterToPlayerArmy each used to filter on
+   a single hardcoded `enemyOwner`. otherOwner("ai") always answered "player" — so on a 3-owner
+   match a third seat's army was structurally invisible to every one of these: not merely unscouted,
+   but excluded from the candidate pool before fog was even consulted. No new "which rival do I
+   focus on" policy was needed to fix this — every one of these already picks nearest/most-common
+   among a pool; opponentsOf(state, owner) just widens that pool to every real opponent, and the
+   existing pick logic does the rest. ============================================================ */
+
+// Mirrors unvisitedHostileWorld's own "clear the map so each test states its own situation exactly"
+// convention, but with a third AI-controlled owner (basePositions is T-041's own stopgap — it seeds
+// "rebels" a starting position without needing a real N-position map generator, T-044's later job).
+// Strips every OPPONENT's default seeding, same as unvisitedHostileWorld — but, unlike it, keeps
+// "ai"'s own starting Command Center/workers: that CC (sight 220) is what gives updateFog(state,
+// state.fogs.ai, "ai") anything to reveal from at all, exactly as ai.test.js's own revealPlayerArmy
+// helper relies on it too.
+function world3() {
+  const s = createGameState({
+    planetId: "ferros",
+    ownerDefs: [
+      { id: "player", faction: "neutral", isAI: false, color: "#4fd1ff" },
+      { id: "ai", faction: "neutral", isAI: true, color: "#f87171" },
+      { id: "rebels", faction: "neutral", isAI: true, color: "#fbbf24" },
+    ],
+    basePositions: { rebels: { x: 900, y: 300 } },
+  });
+  for (const [id, u] of [...s.units]) if (u.owner !== "ai") s.units.delete(id);
+  for (const [id, b] of [...s.buildings]) if (b.owner !== "ai") s.buildings.delete(id);
+  return s;
+}
+
+test("T-043: visibleEnemyForceCount() counts visible combat units from EVERY opponent, not just one", () => {
+  const s = world3();
+  const aiBase = s.map.bases.ai;
+  const p = makeUnit("skiff", "player", aiBase.x + 40, aiBase.y);
+  const r = makeUnit("skiff", "rebels", aiBase.x + 60, aiBase.y);
+  s.units.set(p.id, p); s.units.set(r.id, r);
+  updateFog(s, s.fogs.ai, "ai");
+  assert.equal(visibleEnemyForceCount(s, "ai"), 2, "both opponents' visible combat units must count, not just one");
+});
+
+test("T-043: raidTarget() finds the nearest visible worker across EVERY opponent, not just one", () => {
+  const s = world3();
+  const aiBase = s.map.bases.ai;
+  // Both within the seeded Command Center's own 220 sight radius, so both are genuinely VISIBLE —
+  // proof this is picking the nearer of two seen candidates, not merely ignoring an unseen one.
+  const farWorker = makeUnit("worker", "player", aiBase.x + 180, aiBase.y);
+  const nearWorker = makeUnit("worker", "rebels", aiBase.x + 50, aiBase.y);
+  s.units.set(farWorker.id, farWorker); s.units.set(nearWorker.id, nearWorker);
+  updateFog(s, s.fogs.ai, "ai");
+  const target = raidTarget(s, "ai");
+  assert.ok(target, "a visible worker exists — must not return null");
+  assert.equal(target.x, nearWorker.x, "the NEARER opponent's worker wins, regardless of which opponent it belongs to");
+  assert.equal(target.y, nearWorker.y);
+});
+
+test("T-043: chooseAttackTarget() picks the nearest seen Command Center across EVERY opponent, not just one", () => {
+  const s = world3();
+  const aiBase = s.map.bases.ai;
+  // Both within the seeded Command Center's own 220 sight radius, so both are genuinely VISIBLE —
+  // proof this is picking the nearer of two seen candidates, not merely ignoring an unseen one.
+  const farCC = makeBuilding("command", "player", aiBase.x + 180, aiBase.y);
+  const nearCC = makeBuilding("command", "rebels", aiBase.x + 80, aiBase.y);
+  s.buildings.set(farCC.id, farCC); s.buildings.set(nearCC.id, nearCC);
+  updateFog(s, s.fogs.ai, "ai");
+  const target = chooseAttackTarget(s, null, "ai");
+  assert.equal(target.x, nearCC.x, "the nearer opponent's Command Center wins the target, whichever opponent it belongs to");
+  assert.equal(target.y, nearCC.y);
+});
+
+test("T-043: chooseAttackTarget()'s hunting fallback degrades safely when an opponent has no known start yet", () => {
+  // Built by SPLICING a third owner onto an otherwise-plain 2-owner state — the same convention
+  // test/ownerScaffold.test.js's own pre-existing "rebels" tests use — rather than via ownerDefs:
+  // T-044 landed a real radial map generator that now gives every ownerDefs-supplied owner a
+  // genuine base, so "an opponent with no known start" can no longer be reached that way.
+  // Splicing keeps state.map.bases at its original 2-key shape untouched, reproducing the
+  // scenario this guard exists for. Nothing placed, nothing seen.
+  const s = createGameState({ planetId: "ferros" });
+  s.owners.push("rebels");
+  assert.equal(s.map.bases.rebels, undefined, "fixture sanity: a spliced-on owner has no map.bases entry of its own");
+  const target = chooseAttackTarget(s, null, "ai");
+  assert.deepEqual(target, { x: s.map.bases.player.x, y: s.map.bases.player.y },
+    "with only one opponent's start actually known, the fallback must use it rather than throw");
+});
+
+test("T-043: updateScout() doesn't crash when its primary opponent has no known base position yet", () => {
+  // Same splice as above (state.map.bases must stay 2-keyed — T-044's real generator would
+  // otherwise give a THIRD ownerDefs-supplied owner a genuine base). Reordering state.owners
+  // puts "rebels" before "player" so opponentsOf(s,"ai")[0] (ai.js's aiContext) — "ai"'s PRIMARY
+  // opponent — resolves to it, and state.map.bases never gets an entry for it.
+  const s = createGameState({ planetId: "ferros" });
+  s.owners = ["rebels", "player", "ai"];
+  assert.deepEqual(opponentsOf(s, "ai"), ["rebels", "player"], "fixture sanity: rebels must be ai's PRIMARY (first) opponent here");
+  assert.equal(s.map.bases.rebels, undefined, "fixture sanity: rebels has no real map.bases entry");
+
+  const army = [];
+  for (let i = 0; i < 5; i++) {
+    const u = makeUnit("skiff", "ai", s.map.bases.ai.x + i * 5, s.map.bases.ai.y);
+    s.units.set(u.id, u); army.push(u);
+  }
+  const ctx = { army, rangers: [], owner: "ai", enemyOwner: opponentsOf(s, "ai")[0], controller: s.controllers.ai };
+  assert.doesNotThrow(() => updateScout(s, ctx, false),
+    "must not crash reaching for an opponent's not-yet-known base position");
+});
+
+test("T-043: counterToPlayerArmy() tallies visible combat unit types across EVERY opponent combined, not just one", () => {
+  const s = world3();
+  const aiBase = s.map.bases.ai;
+  // 2 Dreadnoughts from "player" + 3 from "rebels" = 5 combined outnumbering anything else visible —
+  // COUNTER_OF's Dreadnought counter (Skiff, per test/ai.test.js's own single-opponent proof) must
+  // still win, which only happens if the tally is genuinely COMBINING across opponents.
+  for (let i = 0; i < 2; i++) { const u = makeUnit("dreadnought", "player", aiBase.x + 40 + i * 14, aiBase.y); s.units.set(u.id, u); }
+  for (let i = 0; i < 3; i++) { const u = makeUnit("dreadnought", "rebels", aiBase.x + 40 + i * 14, aiBase.y + 20); s.units.set(u.id, u); }
+  updateFog(s, s.fogs.ai, "ai");
+  assert.equal(counterToPlayerArmy(s, "ai"), "skiff", "5 combined visible Dreadnoughts across two opponents must still draw the Skiff counter-pick");
 });

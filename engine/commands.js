@@ -12,15 +12,21 @@ import { makeBuilding } from "./state.js";
 import { formationSlots, resolveHeading, clusterUnits } from "./formation.js";
 import { FREIGHTER_AI_TECH, LOGI_PRIORITIES } from "./haul.js";
 import { canRecycle, beginRecycle, cancelRecycle } from "./recycle.js";
+import { controllerFor } from "./controllers.js";
 
-// A local copy of engine/aiCommon.js's isHumanControlled(state, owner) — this file cannot import
-// aiCommon.js: aiCommon.js already imports issueBuild from here, and importing back would be the
-// exact cycle aiCommon.js's own header forbids ("imports only DOWNWARD, into commands/colliders —
-// never back into an AI phase module", enforced by test/static-integrity.test.js's SCC check).
-// Same semantics: a seat is human-controlled exactly when it has no AI controller.
+// T-048 (ADR-0008): this file cannot import engine/aiCommon.js's own real isHumanControlled —
+// aiCommon.js already imports issueBuild from here, and importing back would be the exact cycle
+// its own header forbids ("imports only DOWNWARD, into commands/colliders — never back into an AI
+// phase module", enforced by test/static-integrity.test.js's SCC check). But engine/controllers.js
+// is a true zero-import LEAF (T-042's own registry, built exactly so every phase module can depend
+// on it without that cycle), so this reads the real state.controllers{} registry directly instead
+// of hand-rolling its own copy. The hand-rolled version this replaced was a bare
+// `owner === "ai" ? state.ai : owner === "player" ? state.playerAi : null` ternary: for any 3rd+
+// owner that always fell through to `null`, so an AI-FILLED 3rd/4th seat's own real controller was
+// invisible to it — its squads got the human leader/follower formation treatment below instead of
+// the flat per-unit AI spread every other AI-controlled seat gets.
 function isHumanControlled(state, owner) {
-  const controller = owner === "ai" ? state.ai : owner === "player" ? state.playerAi : null;
-  return controller == null;
+  return controllerFor(state, owner) == null;
 }
 
 // Give a unit an order, either replacing what it's doing (a plain command)

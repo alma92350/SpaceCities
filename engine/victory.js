@@ -18,22 +18,64 @@ function ownersOf(state) { return state.owners || ["player", "ai"]; }
 // state.matchTimeLimit can override it (e.g. a future "quick match" option).
 export const DEFAULT_MATCH_TIME_LIMIT = 2400;   // 40 minutes of sim time
 
-// Skirmish ends the moment only one side still holds a Command Center — that
-// side wins. A mutual loss on the same tick (no side left standing), or the
-// time limit with several still standing, is settled by score. Last-side-
-// standing over state.owners: for the classic player-vs-ai pair this is exactly
-// the old three-branch check (player-only alive ⇒ player wins, ai-only ⇒ ai,
-// neither ⇒ score), byte-identical, and it already reads for N sides.
+// Skirmish ends the moment only one side still holds a Command Center — that side wins. A mutual
+// loss on the same tick (no side left standing), or the time limit with several still standing,
+// is settled by score. Last-side-standing over state.owners: for the classic player-vs-ai pair
+// this is exactly the old three-branch check (player-only alive ⇒ player wins, ai-only ⇒ ai,
+// neither ⇒ score), byte-identical, and it already reads for N sides (FR-6's own "generalized to
+// N seats as last-seat-standing" — true before T-046 touched this file at all).
+//
+// T-046: a seat dropping out mid-match (3+ seats, one loses its last Command Center) must not
+// end the match the way it does at N=2 — state.eliminated tracks every owner no longer standing,
+// and the loop below fires a ONE-TIME "eliminated" event for each newly-CC-less owner (checked
+// against state.eliminated so it can never re-fire) before `standing` is computed, so the match
+// simply continues among whoever's left. Skirmish has no way to found a NEW Command Center once
+// your last one is gone (that's Odyssey's own colony-ship mechanic — checkEndlessLoss/
+// checkGalaxyRescue below, not this function), so "no longer standing" is a one-way transition,
+// exactly what the 2-seat game already assumed when it ended outright on the first loss.
 /** @param {State} state @returns {void} */
 export function checkWinCondition(state) {
   if (state.over) return;
-  const standing = ownersOf(state).filter(o => hasCommandCenter(state, o));
+  if (!state.eliminated) state.eliminated = [];
+  if (!state.surrendered) state.surrendered = [];
+  const owners = ownersOf(state);
+  for (const o of owners) {
+    if (!state.eliminated.includes(o) && !hasCommandCenter(state, o)) {
+      state.eliminated.push(o);
+      state.events.push({ type: "eliminated", owner: o, reason: "defeat" });
+    }
+  }
+  const standing = owners.filter(o => !state.eliminated.includes(o));
 
-  if (standing.length === 0) { finish(state, scoreLeader(state), "mutual-wipe-score"); return; }   // mutual wipe → score
-  if (standing.length === 1) { finish(state, standing[0], "elimination"); return; }                // last side standing wins
+  if (standing.length === 0) {
+    // Mutual wipe: score among whoever didn't already forfeit the tiebreak by surrendering. For
+    // the classic 2-seat case (surrendered is always empty there) this is every owner — the exact
+    // scoreLeader(state) call this replaced, byte-identical.
+    finish(state, scoreLeader(state, owners.filter(o => !state.surrendered.includes(o))), "mutual-wipe-score");
+    return;
+  }
+  if (standing.length === 1) { finish(state, standing[0], "elimination"); return; }   // last side standing wins
 
   const limit = state.matchTimeLimit ?? DEFAULT_MATCH_TIME_LIMIT;
-  if (state.time >= limit) finish(state, scoreLeader(state), "timeout-score");
+  if (state.time >= limit) finish(state, scoreLeader(state, standing), "timeout-score");
+}
+
+// A voluntary concession — `owner` is eliminated immediately, whatever they still hold on the
+// board (no Command Center loss required). Idempotent: surrendering an already-eliminated owner
+// is a no-op, so a doubled/late-arriving surrender command can never re-fire the event or
+// duplicate the record. The match itself only ends once checkWinCondition next runs and finds
+// one seat (or none) still standing — the same one-tick latency every other elimination already
+// has, since surrender and the per-tick Command Center check are deliberately the same mechanism
+// (state.eliminated) rather than two separate paths to "is this seat still in it".
+/** @param {State} state @param {string} owner @returns {void} */
+export function surrender(state, owner) {
+  if (state.over) return;
+  if (!state.eliminated) state.eliminated = [];
+  if (!state.surrendered) state.surrendered = [];
+  if (state.eliminated.includes(owner)) return;
+  state.eliminated.push(owner);
+  state.surrendered.push(owner);
+  state.events.push({ type: "eliminated", owner, reason: "surrender" });
 }
 
 // Odyssey (open-world) terminal check: there is no victory by conquest and no
@@ -155,14 +197,19 @@ function costValue(cost) {
   return v;
 }
 
-// Highest score wins; an exact tie goes to the FIRST side listed in state.owners
-// (a defender edge — the human "player" is always first, so state.winner still
-// resolves to "player" on a dead heat, as the rest of the game expects). A strict
-// `>` keeps the first-seen leader on a tie, so for the player-vs-ai pair this is
-// exactly `ai > player ? "ai" : "player"` — byte-identical.
-function scoreLeader(state) {
+// Highest score wins among `candidates`; an exact tie goes to the FIRST one listed (a defender
+// edge — the human "player" is always first in state.owners, so state.winner still resolves to
+// "player" on a dead heat, as the rest of the game expects). A strict `>` keeps the first-seen
+// leader on a tie, so for the player-vs-ai pair with nobody eliminated this is exactly
+// `ai > player ? "ai" : "player"` — byte-identical. T-046: takes an explicit candidate list
+// (rather than reading ownersOf(state) itself) so checkWinCondition's two callers can each
+// exclude a different set — a surrendered seat is disqualified from ANY score tiebreak, but a
+// seat that merely lost its last Command Center still counts toward a genuine same-tick mutual
+// wipe, exactly the 2-seat game's own existing behavior.
+/** @param {State} state @param {string[]} candidates @returns {string|null} */
+function scoreLeader(state, candidates) {
   let best = null, bestScore = -Infinity;
-  for (const o of ownersOf(state)) {
+  for (const o of candidates) {
     const s = playerScore(state, o);
     if (s > bestScore) { bestScore = s; best = o; }
   }

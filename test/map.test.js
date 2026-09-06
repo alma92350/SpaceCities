@@ -351,3 +351,189 @@ test("every modified world is a real planet with a nonempty label, and has an ar
     assert.ok(mod.label && mod.label.length > 0, `${id} should carry a human-readable label`);
   }
 });
+
+/* ============================================================
+   T-044 (ADR-0008): a radial map generator for N >= 3 start positions.
+
+   docs/analysis/01-engine-nplayer-seams.md §3.3's own recommendation: keep generateMap's
+   current 2-base mirrored path VERBATIM as the owners.length === 2 branch (every existing
+   seed/replay/test/determinism-roster.test.js untouched), and add a SEPARATE generator for
+   N >= 3 — "two generators is honest; one generator that also does 2 will not reproduce
+   today's maps." Bases go on an ellipse inscribed in the map rectangle (§3.3 point 2's own
+   "accept mild asymmetry" option, scaled to the map's own 1.6:1 aspect ratio rather than an
+   N-dependent aspect ratio), evenly spaced by angle. Every per-base resource stage places its
+   nodes along the line from that base to the map centre — the wedge-shaped generalization of
+   the 2-seat path's own "player column / ai column" — so node COUNT near every base is
+   exactly equal, satisfying §3.2's "unplayable, not merely unbalanced" bar.
+
+   Deliberately narrower than the 2-seat path (§3.4's own "cheap, honest answer for v1"),
+   not an oversight: per-world terrain features and asym overrides are NOT applied at N >= 3
+   (true N-fold rotation of an arbitrary rectangular terrain stamp is a real geometry problem
+   this task doesn't take on, and reusing today's LEFT/RIGHT specs as-is would silently favor
+   whichever 2 of the N bases happen to land near them — exactly the "seats 3..N play the
+   symmetric version" bug §3.4 itself warns against); hidden caches are a simple ring rather
+   than the 2-seat path's own bespoke fractional spec table (itself built around exactly two
+   bases).
+   ============================================================ */
+
+function ownersN(n) {
+  const ids = ["player", "ai", "rebels", "raiders", "outcasts", "syndicate", "vanguard", "wardens"];
+  return ids.slice(0, n);
+}
+
+test("T-044: generateMap's 2-seat path stays byte-identical when owners is omitted, and when it's explicitly [\"player\",\"ai\"]", () => {
+  const before = generateMap("ferros", lcg(7));
+  const omitted = generateMap("ferros", lcg(7));
+  const explicit = generateMap("ferros", lcg(7), { owners: ["player", "ai"] });
+  assert.deepEqual(omitted, before);
+  assert.deepEqual(explicit, before);
+});
+
+test("T-044: a 2-seat match with custom owner ids still uses the mirrored path, just keyed by those ids", () => {
+  const custom = generateMap("ferros", lcg(7), { owners: ["alice", "bob"] });
+  const stock = generateMap("ferros", lcg(7));
+  assert.deepEqual(Object.keys(custom.bases).sort(), ["alice", "bob"]);
+  assert.ok(Math.abs(custom.bases.alice.x - stock.bases.player.x) < 1e-9, "same geometry, just a different key");
+  assert.ok(Math.abs(custom.bases.bob.x - stock.bases.ai.x) < 1e-9);
+});
+
+test("T-044: N >= 3 owners each get a real base, evenly spaced on the inscribed ellipse and equally angled", () => {
+  // "Equidistant" here means every base sits exactly ON the same inscribed ellipse (the
+  // ellipse-normalized distance is 1 for all of them) and consecutive bases are separated by
+  // the same angle (2*PI/N) — NOT the same raw Euclidean pixel distance from centre, which an
+  // ellipse (unlike a circle) never gives by construction. That's the audit's own explicit
+  // tradeoff (docs/analysis/01-engine-nplayer-seams.md §3.3 point 2): an inscribed ellipse
+  // scaled to the map's own 1.6:1 aspect ratio, accepting this "mild asymmetry" over either an
+  // N-dependent aspect ratio or a circle that either wastes width or pushes bases off a
+  // narrower map.
+  for (const n of [3, 4, 6, 8]) {
+    const owners = ownersN(n);
+    const map = generateMap("ferros", lcg(11), { owners });
+    assert.deepEqual(Object.keys(map.bases).sort(), owners.slice().sort(), `${n} owners -> ${n} bases`);
+    const cx = map.width / 2, cy = map.height / 2;
+    const rx = map.width * 0.35, ry = map.height * 0.35;
+    const angles = [];
+    for (const id of owners) {
+      const b = map.bases[id];
+      const ellipseDist = ((b.x - cx) / rx) ** 2 + ((b.y - cy) / ry) ** 2;
+      assert.ok(Math.abs(ellipseDist - 1) < 1e-6, `${n}-seat: ${id}'s base must sit exactly on the inscribed ellipse`);
+      angles.push(Math.atan2((b.y - cy) / ry, (b.x - cx) / rx));
+    }
+    angles.sort((a, b) => a - b);
+    const gaps = angles.map((a, i) => (i + 1 < angles.length ? angles[i + 1] - a : angles[0] + 2 * Math.PI - a));
+    for (const g of gaps) assert.ok(Math.abs(g - (2 * Math.PI) / n) < 1e-6, `${n}-seat: every base must be evenly angled around the ellipse`);
+  }
+});
+
+test("T-044: N >= 3 bases stay inside the map bounds", () => {
+  const map = generateMap("ferros", lcg(3), { owners: ownersN(6) });
+  for (const base of Object.values(map.bases)) {
+    assert.ok(base.x >= 0 && base.x <= map.width);
+    assert.ok(base.y >= 0 && base.y <= map.height);
+  }
+});
+
+test("T-044: N >= 3 — every base opens onto its own home ore doorstep, the same total as the 2-seat path", () => {
+  const owners = ownersN(4);
+  const map = generateMap("ferros", lcg(5), { owners });
+  for (const id of owners) {
+    const near = map.nodes.filter(n => n.home && n.com === "ore" &&
+      Math.hypot(n.x - map.bases[id].x, n.y - map.bases[id].y) < 250);
+    const total = near.reduce((s, n) => s + n.amount, 0);
+    assert.equal(near.length, 3, `${id}: must get all 3 home ore nodes, same as the 2-seat path`);
+    assert.equal(total, 1050, `${id}: home ore total must match the 2-seat path's own 350*3`);
+  }
+});
+
+test("T-044: N >= 3 — build-critical guarantee holds independently for every base, not just the first", () => {
+  // korrath has no crystals deposit and vesper no radioactives — exactly the worlds the 2-seat
+  // guarantee test above already exercises, now checked per-base instead of per-mirrored-pair.
+  const near = 500 + 80;
+  for (const [planetId, owners] of [["korrath", ownersN(3)], ["vesper", ownersN(5)]]) {
+    const map = generateMap(planetId, lcg(9), { owners });
+    for (const id of owners) {
+      for (const com of ["ore", "crystals", "radioactives"]) {
+        const has = map.nodes.some(n => n.com === com && !n.hidden &&
+          Math.hypot(n.x - map.bases[id].x, n.y - map.bases[id].y) <= near);
+        assert.ok(has, `${planetId}/${id}: needs a surface ${com} source near its own base`);
+      }
+    }
+  }
+});
+
+test("T-044: N >= 3 — every base is assigned the exact same node count, for every commodity — no seat starts behind", () => {
+  // A fixed pixel radius isn't the right measure here: adjacent bases can sit closer together
+  // than double a generous "near" radius (more so as N grows), so a node genuinely generated
+  // FOR one base can also fall inside a NEIGHBOUR's fixed-radius circle — that's a real
+  // shared/contested-middle effect (the same idea the 2-seat path's own frontier belt and
+  // hidden caches already lean on), not an unfairness bug. What the construction actually
+  // guarantees or breaks is which base each node is CLOSEST to: every resource stage below
+  // runs the identical `for (const base of baseList)` loop once per base, so grouping every
+  // non-hidden node by its NEAREST base is the honest, geometry-proof way to check every base
+  // was given an equal share.
+  const owners = ownersN(4);
+  const map = generateMap("helix", lcg(13), { owners });   // helix: extraClusters too, the richest layout
+  const nearestOwner = (x, y) => owners.reduce((best, id) =>
+    Math.hypot(x - map.bases[id].x, y - map.bases[id].y) < Math.hypot(x - map.bases[best].x, y - map.bases[best].y) ? id : best);
+  const countsFor = id => {
+    const counts = {};
+    for (const n of map.nodes) {
+      if (n.hidden || n.frontier) continue;   // caches/frontier are a shared bonus, not the per-base guarantee itself
+      if (nearestOwner(n.x, n.y) === id) counts[n.com] = (counts[n.com] || 0) + 1;
+    }
+    return counts;
+  };
+  const base = countsFor(owners[0]);
+  for (const id of owners.slice(1)) {
+    assert.deepEqual(countsFor(id), base, `${id} must be assigned the exact same node counts as ${owners[0]}`);
+  }
+});
+
+test("T-044: generateMap is deterministic for N >= 3 too: the same seed reproduces the same nodes and bases", () => {
+  const owners = ownersN(5);
+  const a = generateMap("glacius", lcg(42), { owners });
+  const b = generateMap("glacius", lcg(42), { owners });
+  assert.deepEqual(a.nodes, b.nodes);
+  assert.deepEqual(a.bases, b.bases);
+});
+
+test("T-044: N >= 3 — asymmetric worlds are restricted to 2-seat matches: every owner reads the plain shared modifier", () => {
+  const map = generateMap("oort", () => 0.5, { owners: ownersN(3) });
+  assert.equal(map.modifiers.asym, undefined, "the asym block must not survive into an N>=3 map's own modifiers");
+  const state = { map };
+  assert.equal(sideMod(state, "player", "gatherMult", 1), 1, "no more per-owner override — everyone reads the shared/default value");
+  assert.equal(sideMod(state, "rebels", "buildTimeMult", 1), 1);
+  // The world's own SHARED (non-asym) modifiers still apply to everyone alike.
+  const nodeAmountMap = generateMap("oort", () => 0.5, { owners: ownersN(3) });
+  assert.equal(nodeAmountMap.modifiers.nodeAmountMult, 1.3, "the shared richness modifier still applies");
+});
+
+test("T-044: N >= 3 — no per-world terrain features (avoids favoring whichever 2 bases would land near a 2-way-mirrored spec)", () => {
+  const map = generateMap("pyralis", () => 0.5, { owners: ownersN(4) });   // pyralis: a real terrain feature normally
+  assert.ok(map.terrain.type.every(t => t === 0), "every cell must read as plain open ground");
+});
+
+test("T-044: N >= 3 — no two nodes overlap, same guarantee the 2-seat path already gets", () => {
+  const map = generateMap("ferros", lcg(17), { owners: ownersN(5) });
+  for (let i = 0; i < map.nodes.length; i++) {
+    for (let j = i + 1; j < map.nodes.length; j++) {
+      const a = map.nodes[i], b = map.nodes[j];
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      assert.ok(dist >= 32 - 1e-6, `${a.com} node and ${b.com} node are only ${dist.toFixed(1)} apart`);
+    }
+  }
+});
+
+test("T-044: N >= 3 — sizeMult/resourceMult still scale the radial map the same way they scale the 2-seat one", () => {
+  const owners = ownersN(3);
+  const big = generateMap("ferros", lcg(4), { owners, sizeMult: 2 });
+  assert.equal(big.width, MAP_WIDTH * 2);
+  assert.equal(big.height, MAP_HEIGHT * 2);
+  for (const n of big.nodes) assert.ok(n.x >= 0 && n.x <= big.width && n.y >= 0 && n.y <= big.height);
+
+  const rare = generateMap("ferros", lcg(4), { owners, resourceMult: 0.5 });
+  const normal = generateMap("ferros", lcg(4), { owners });
+  const oreRare = rare.nodes.find(n => n.com === "ore" && !n.home);
+  const oreNormal = normal.nodes.find(n => n.com === "ore" && !n.home);
+  assert.ok(oreRare.amount < oreNormal.amount, "resourceMult must still scale radial-map deposits down");
+});

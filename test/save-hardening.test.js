@@ -16,7 +16,7 @@ import { TECHS } from "../engine/techtree.js";
 import { mulberry32 } from "../engine/rng.js";
 import { tick } from "../engine/sim.js";
 import { updateProductionQueue } from "../engine/production.js";
-import { serializeGame, deserializeGame, serializeGalaxy, deserializeGalaxy } from "../engine/persist.js";
+import { serializeGame, deserializeGame, serializeGalaxy, deserializeGalaxy, GALAXY_SAVE_VERSION } from "../engine/persist.js";
 import { updateService } from "../engine/haul.js";
 import { createGalaxy, activeState, stepGalaxy, checkGalaxyRescue, ODYSSEY_WORLDS } from "../engine/galaxy.js";
 import { deployColonyShip } from "../engine/colony.js";
@@ -125,7 +125,7 @@ test("aiWaveCount round-trips (continue-identically for the economy-raid cadence
   assert.equal(st.ai.waveCount, 7, "the committed-wave counter survives a save/reload");
 
   const save = serializeGame(a);
-  delete save.ai.aiWaveCount;                          // an old save predating the field (wire key stays aiWaveCount)
+  delete save.controllers.ai.waveCount;                // an old save predating the field
   assert.equal(deserializeGame(save).ai.waveCount, 0, "an old save loads with the counter defaulted to 0");
 });
 
@@ -138,8 +138,8 @@ function settledGalaxy(seed = 3) {
 }
 
 test("deserializeGalaxy throws on structural nonsense BEFORE the caller tears down the live game", () => {
-  assert.throws(() => deserializeGalaxy({ v: 1, worlds: [], planets: [{ planetId: "ferros" }] }), /no worlds/);
-  assert.throws(() => deserializeGalaxy({ v: 1, worlds: ["ferros"], planets: [] }), /no planets/);
+  assert.throws(() => deserializeGalaxy({ v: GALAXY_SAVE_VERSION, worlds: [], planets: [{ planetId: "ferros" }] }), /no worlds/);
+  assert.throws(() => deserializeGalaxy({ v: GALAXY_SAVE_VERSION, worlds: ["ferros"], planets: [] }), /no planets/);
 
   const save = JSON.parse(JSON.stringify(serializeGalaxy(settledGalaxy(3))));
   // The living galaxy instantiates every world, so manufacture an orphan: drop one world's payload,
@@ -674,9 +674,9 @@ test("an arbitrary key on a saved diplomacy block is dropped (B1)", () => {
 
 test("a tampered AI controller block is coerced on load — the attack timeout still works (B3)", () => {
   const save = freshSkirmishSave(27);
-  Object.assign(save.ai, {
-    aiThink: "abc", aiActionBudget: "5", aiAttackForce: -1e9, aiNextAttackAt: "later",
-    aiUnitsBuilt: null, aiApm: "fast", aiMicro: "yes", aiStrategy: "<script>", aiDifficulty: "impossible",
+  Object.assign(save.controllers.ai, {
+    think: "abc", actionBudget: "5", attackForce: -1e9, nextAttackAt: "later",
+    unitsBuilt: null, apm: "fast", micro: "yes", strategy: "<script>", difficulty: "impossible",
   });
   const st = deserializeGame(save);
   for (const f of ["think", "actionBudget", "attackForce", "unitsBuilt"])
@@ -701,15 +701,16 @@ test("a populated playerAi controller round-trips field-for-field (B3)", () => {
 });
 
 test("state.ai and state.playerAi persist the identical field set (B3)", () => {
-  // persist.js promises in a comment that the two controller blocks "can never structurally
-  // drift". Nothing enforced it, and no test touched playerAi at all.
+  // persist.js promises in a comment that every controller's wire shape "can never structurally
+  // drift" from any other's — T-045's N-keyed controllers: made that a literal identity (every
+  // entry goes through the same serController), where it used to be two independently
+  // hand-written, differently-prefixed object literals nothing enforced stayed in sync.
   const st0 = createGameState({ planetId: "ferros", seed: 29, rng: mulberry32(29) });
   st0.playerAi = createAiController("ferros");
   const save = serializeGame(st0);
-  const strip = (block, prefix) => Object.keys(block).map(k => k.slice(prefix.length)).sort();
-  assert.ok(save.playerAi, "a populated playerAi must reach the wire at all");
-  assert.deepEqual(strip(save.playerAi, "pa"), strip(save.ai, "ai"),
-    "the ai/playerAi wire field sets must match one-for-one — persist.js promises they 'can never structurally drift'");
+  assert.ok(save.controllers.player, "a populated playerAi must reach the wire at all");
+  assert.deepEqual(Object.keys(save.controllers.player).sort(), Object.keys(save.controllers.ai).sort(),
+    "every controller's wire field set must match one-for-one — persist.js promises they 'can never structurally drift'");
 });
 
 test("a duplicated shipId on a saved lane is de-duplicated on load (B5)", () => {

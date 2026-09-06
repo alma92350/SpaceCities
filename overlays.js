@@ -312,6 +312,16 @@ const TOUCH_HELP_ROWS = [
   ["Tap a node (building selected)", "Rally new workers to mine it"],
   ["Minimap", "Tap to jump the view"],
 ];
+// T-064: not gated on actually being in a live match — this overlay is built once at boot
+// (main.js), before any match exists to check, the same reason HELP_ROWS above already carries
+// Odyssey-only rows (M) unconditionally. A single-player/Odyssey player sees four rows that don't
+// apply to them, exactly as a multiplayer one already sees that Odyssey-only "M" row today.
+const MULTIPLAYER_HELP_ROWS = [
+  ["Open seats", "Unclaimed by match start — the built-in AI plays them so a match never waits on a second player"],
+  ["Disconnected", "Your seat holds for about 20 seconds, then the built-in AI quietly takes over so the match keeps going"],
+  ["Reconnecting", "Automatic — reopen the game in the same browser and you're back in, in control again, right where you left off"],
+  ["Chat panel", "On-screen for the whole match — type a message and press Enter, or click Send"],
+];
 function helpRows(rows) {
   return rows.map(([k, v]) =>
     `<div class="help-row"><span class="help-key">${k}</span><span>${v}</span></div>`).join("");
@@ -321,6 +331,7 @@ export function buildHelpOverlay() {
   helpOverlayEl.innerHTML = `<div class="help-card"><h2>Controls &amp; Help</h2>`
     + `<h3 class="help-sub">Mouse &amp; keyboard</h3>${helpRows(HELP_ROWS)}`
     + `<h3 class="help-sub">Touch</h3>${helpRows(TOUCH_HELP_ROWS)}`
+    + `<h3 class="help-sub">Multiplayer</h3>${helpRows(MULTIPLAYER_HELP_ROWS)}`
     + `<p class="help-dismiss">Press F1, ?, or Esc to close</p>`
     // docs/player-handbook.html draws the full tier ladder + every stat table this quick
     // reference only summarizes — linked from nowhere else in the app before techChart.js

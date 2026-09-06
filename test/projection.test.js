@@ -408,6 +408,83 @@ test("reassembleProjection merges the wire's current node amounts into the LOCAL
 });
 
 /* ============================================================
+   Bugfix, reported live by a human playing a real hosted match: battle wreckage (engine/
+   wreckage.js) and Helium Bomb craters (engine/bomb.js) never appeared at all. Both push a BRAND
+   NEW node onto state.map.nodes mid-match — one that does not exist in the client's own
+   deterministically-regenerated map (engine/bomb.js's own spawnCraterNode comment already
+   documents this exact fact for persist.js's save/load path: "this one doesn't exist in the
+   seed-regenerated map at all, so it needs its whole shape saved and re-added on load"). The live
+   wire path never got the same treatment: projectFor reduced every node, wreck/crater included, to
+   {id, amount}, and reassembleProjection's own merge loop only ever UPDATED an existing map node's
+   amount by id — an id it had never seen came back from `.find()` as undefined and was silently
+   dropped, every single tick, forever. Fixed by sending a wreck/crater node in full (projectFor/
+   projectForSpectator) and materializing one reassembleProjection/reassembleSpectatorProjection
+   doesn't already recognize, instead of discarding it.
+   ============================================================ */
+
+test("bugfix: projectFor sends a wreck/crater node in FULL, not reduced to {id, amount} like an ordinary map-generated node", () => {
+  const { state } = buildScenario();
+  const wreckNode = { id: "wreck-999-metals", com: "metals", amount: 12, max: 12, x: 500, y: 500, wreck: true };
+  state.map.nodes.push(wreckNode);
+  if (state.map.nodesById) state.map.nodesById.set(wreckNode.id, wreckNode);
+
+  const proj = projectFor(state, "player");
+  const seen = proj.nodes.find(n => n.id === wreckNode.id);
+  assert.ok(seen, "the wreck node must appear in the projection at all");
+  assert.deepEqual(seen, wreckNode,
+    "a wreck node has no seed-deterministic shape the client could reconstruct on its own, so it must ship in full, not merely {id, amount}");
+
+  // An ORDINARY map-generated node must be unaffected by this — still reduced to {id, amount},
+  // exactly the existing bandwidth-optimal behavior this task must not regress.
+  const chartedNode = state.map.nodes.find(n => !n.hidden && !n.wreck && !n.crater);
+  const seenOrdinary = proj.nodes.find(n => n.id === chartedNode.id);
+  assert.deepEqual(Object.keys(seenOrdinary).sort(), ["amount", "id"]);
+});
+
+test("bugfix: reassembleProjection materializes a crater node the client's own regenerated map never had — the actual live-multiplayer defect (a Helium Bomb crater's resource node never appeared for a real human player)", () => {
+  const { state } = buildScenario();
+  const craterNode = { id: "crater-777", com: "ore", amount: 40, max: 40, x: 600, y: 600, crater: true };
+  state.map.nodes.push(craterNode);
+  if (state.map.nodesById) state.map.nodesById.set(craterNode.id, craterNode);
+
+  const proj = projectFor(state, "player");
+  const wire = JSON.parse(JSON.stringify(proj));
+
+  // A FRESH, separately-regenerated map — exactly like a real net/wsClientTransport.js client's
+  // own map, which never had this crater node pushed onto it (created mid-match, server-side,
+  // well after the client's own map was already built from the seed).
+  const freshMap = generateMap(state.planetId, mulberry32(state.seed),
+    { sizeMult: state.sizeMult, resourceMult: state.resourceMult, swapAsym: state.swapAsym });
+  assert.ok(!freshMap.nodes.some(n => n.id === craterNode.id),
+    "fixture sanity: the freshly regenerated map genuinely has no idea this crater node exists yet");
+
+  const view = reassembleProjection(wire, freshMap, createFog(freshMap), "player");
+  const seen = view.map.nodes.find(n => n.id === craterNode.id);
+  assert.ok(seen, "the crater node must be ADDED to the client's own map, not silently dropped");
+  assert.equal(seen.amount, 40);
+  assert.equal(seen.com, "ore");
+  assert.equal(freshMap.nodesById.get(craterNode.id), seen,
+    "nodesById (hudSelection.js/engine/gather.js's own O(1) lookup) must also learn about it, not just the plain nodes array");
+});
+
+test("bugfix: reassembleSpectatorProjection materializes a wreck node the same way, for a network spectator's own full-vision view", () => {
+  const { state } = buildScenario();
+  const wreckNode = { id: "wreck-555-electronics", com: "electronics", amount: 8, max: 8, x: 700, y: 700, wreck: true };
+  state.map.nodes.push(wreckNode);
+  if (state.map.nodesById) state.map.nodesById.set(wreckNode.id, wreckNode);
+
+  const proj = projectForSpectator(state);
+  const wire = JSON.parse(JSON.stringify(proj));
+  const freshMap = generateMap(state.planetId, mulberry32(state.seed),
+    { sizeMult: state.sizeMult, resourceMult: state.resourceMult, swapAsym: state.swapAsym });
+
+  const view = reassembleSpectatorProjection(wire, freshMap);
+  const seen = view.map.nodes.find(n => n.id === wreckNode.id);
+  assert.ok(seen, "a spectator must also see battle wreckage appear, not just an ordinary seat");
+  assert.equal(seen.amount, 8);
+});
+
+/* ============================================================
    T-037 (FR-7): reassembleSpectatorProjection — the client-side paired decode step for
    projectForSpectator(...)'s own wire shape. No fog to reconstruct (there is no seat to compute it
    FOR, and render.js/minimap.js's own hiddenByFog only ever reads state.fog when observerMode is

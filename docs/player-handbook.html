@@ -250,10 +250,11 @@
       <li><a href="#worlds"><span class="n">09</span>Worlds &amp; Terrain</a></li>
       <li><a href="#opposition"><span class="n">10</span>The Opposition</a></li>
       <li><a href="#victory"><span class="n">11</span>Victory &amp; Defeat</a></li>
-      <li><a href="#odyssey"><span class="n">12</span>The Odyssey</a></li>
-      <li><a href="#operations"><span class="n">13</span>Special Operations</a></li>
-      <li><a href="#saves"><span class="n">14</span>Saves &amp; Continuity</a></li>
-      <li><a href="#appendix"><span class="n">15</span>Quick Reference</a></li>
+      <li><a href="#multiplayer"><span class="n">12</span>Multiplayer</a></li>
+      <li><a href="#odyssey"><span class="n">13</span>The Odyssey</a></li>
+      <li><a href="#operations"><span class="n">14</span>Special Operations</a></li>
+      <li><a href="#saves"><span class="n">15</span>Saves &amp; Continuity</a></li>
+      <li><a href="#appendix"><span class="n">16</span>Quick Reference</a></li>
     </ol>
   </nav>
 
@@ -375,7 +376,7 @@
           <tr><td>WASD / arrows</td><td class="wrap">Pan the camera (also works by pushing the cursor to the screen edge).</td></tr>
           <tr><td><span class="kbd">P</span></td><td class="wrap">Pause / resume.</td></tr>
           <tr><td><span class="kbd">M</span></td><td class="wrap">Toggle the galaxy starmap (Odyssey only).</td></tr>
-          <tr><td><span class="kbd">O</span></td><td class="wrap">Toggle Observer Mode — a free-look spectator camera over the whole Odyssey galaxy (Odyssey only). See §12.</td></tr>
+          <tr><td><span class="kbd">O</span></td><td class="wrap">Toggle Observer Mode — a free-look spectator camera over the whole Odyssey galaxy (Odyssey only). See §13.</td></tr>
           <tr><td><span class="kbd">T</span></td><td class="wrap">Toggle the Tech &amp; Industry Chart — every building, unit gate, and tech node as tier columns, colored by built / affordable / locked.</td></tr>
           <tr><td><span class="kbd">F1</span> / <span class="kbd">?</span></td><td class="wrap">Toggle this game's in-app help overlay.</td></tr>
           <tr><td><span class="kbd">Esc</span></td><td class="wrap">Cancel an armed attack-move, or close whatever overlay is open.</td></tr>
@@ -960,7 +961,7 @@
       <p><strong>Nimbus</strong>: you out-scout (you keep 95% sight to their 75%), they out-tempo (12% faster movement) — the storm hits them harder, but they move through it quicker. <strong>Oort</strong>: you out-mine (richer nodes plus a personal +20% on every haul, compounding), they out-build (everything they gather becomes an army 18% faster) — same rich ground, very different plans for it.</p>
     </div>
 
-    <p class="muted">Odyssey adds two further worlds, both pickable as your own starting world too: <strong>Kybernet</strong> (Tech Hub, Technologist temperament — a small, teched-up elite army and the only archetype that ever fields a Colossus) and <strong>Verdani</strong> (Agri-World, Balanced temperament, a calm, low-industry neighbour) — see §12.</p>
+    <p class="muted">Odyssey adds two further worlds, both pickable as your own starting world too: <strong>Kybernet</strong> (Tech Hub, Technologist temperament — a small, teched-up elite army and the only archetype that ever fields a Colossus) and <strong>Verdani</strong> (Agri-World, Balanced temperament, a calm, low-industry neighbour) — see §13.</p>
   </section>
 
   <!-- ============ 10 OPPOSITION ============ -->
@@ -1031,10 +1032,34 @@
     <p>The final 5 minutes flip the elapsed-time readout to a countdown alongside a live two-sided score bar, so a score-decided ending is never a surprise. Past the time limit, the match is scored rather than left hanging: banked, unspent resources count at only a quarter of their value, while everything actually built — every unit and building's own cost — counts in full, and a fielded combat unit counts for 1.35× its cost on top of that. A stockpiling turtle cannot out-score an opponent who spent what they gathered. An exact tie favors the defending player. The post-game screen states plainly which way the match actually ended — elimination, or the clock — with the full bank/army/structures breakdown whenever score was the decider.</p>
   </section>
 
-  <!-- ============ 12 ODYSSEY ============ -->
-  <section class="doc" id="odyssey">
+  <!-- ============ 12 MULTIPLAYER ============ -->
+  <section class="doc" id="multiplayer">
     <div class="sec-head">
       <span class="sec-eyebrow">Section 12</span>
+      <h2>Multiplayer</h2>
+      <p class="sec-lede">The same Skirmish — economy, units, buildings, combat, victory conditions, all of it — played live over the network against another person instead of the built-in AI. Everything in Sections 03–11 applies exactly as written; this section only covers what's different about getting into and staying in a networked match.</p>
+    </div>
+
+    <h3 class="sub">Hosting a match</h3>
+    <p>From the title screen, choose <strong>🌐 Multiplayer</strong>, then <strong>Host a match</strong>: pick a world, decide whether to allow spectators, and click <strong>Host match</strong>. You're given a shareable link — send it to whoever you're playing with. From there you can either wait for them to join, or click <strong>▶ Start match</strong> to begin right away: whichever seat nobody has claimed yet is played by the same built-in AI from Skirmish, so a match never has to wait on a second person if you'd rather not.</p>
+
+    <h3 class="sub">Joining a match</h3>
+    <p>Open the link a host shared with you and click <strong>Join match</strong> — you're seated automatically, and the match begins the moment both seats are filled. No link handy? The Multiplayer screen's <strong>Open matches</strong> list shows every match still waiting for a second player; click <strong>Join</strong> on one to take its open seat.</p>
+
+    <h3 class="sub">Watching a match</h3>
+    <p>The same shareable link offers a <strong>👁 Watch</strong> option instead of joining — a read-only, full-map spectator view with the same free-look camera as Observer Mode (§13), unless the host turned spectating off when they created the match. A spectator can read the in-match chat below but can't send orders or messages of their own.</p>
+
+    <h3 class="sub">Disconnects and reconnecting</h3>
+    <p>Real connections drop sometimes — that's expected, not a failure state. If your connection is lost or you close the tab, your seat keeps playing passively for about 20 seconds before the built-in AI quietly takes over for you, so a brief blip never stalls the match for the other player. Reopen the game in the same browser at any point afterward and you're dropped straight back into that exact match, in control again, picked up right where you left off — there's nothing to re-enter and no separate "reconnect" step. The first connection to a match that's been sitting idle for a while can take a few seconds while the server wakes back up; you'll see a brief "Waking up the game server…" message while that happens.</p>
+
+    <h3 class="sub">Chat</h3>
+    <p>A chat panel is on-screen for the whole match — type a message and press Enter or click <strong>Send</strong>. Messages are capped at 240 characters.</p>
+  </section>
+
+  <!-- ============ 13 ODYSSEY ============ -->
+  <section class="doc" id="odyssey">
+    <div class="sec-head">
+      <span class="sec-eyebrow">Section 13</span>
       <h2>The Odyssey</h2>
       <p class="sec-lede">A whole galaxy instead of one match: 11 worlds, all simulating from the moment you begin, each already home to its own AI neighbour. There's no conquest clock and no hard win — only milestones you keep playing past, and a two-click surrender if you ever want to stop.</p>
     </div>
@@ -1102,7 +1127,7 @@
   <!-- ============ 13 OPERATIONS ============ -->
   <section class="doc" id="operations">
     <div class="sec-head">
-      <span class="sec-eyebrow">Section 13</span>
+      <span class="sec-eyebrow">Section 14</span>
       <h2>Special Operations</h2>
       <p class="sec-lede">Three shorter, scored missions layered on the same engine, each seeded and fully reproducible. None of them can be saved mid-run — abandoning one forfeits the attempt.</p>
     </div>
@@ -1127,7 +1152,7 @@
   <!-- ============ 14 SAVES ============ -->
   <section class="doc" id="saves">
     <div class="sec-head">
-      <span class="sec-eyebrow">Section 14</span>
+      <span class="sec-eyebrow">Section 15</span>
       <h2>Saves &amp; Continuity</h2>
       <p class="sec-lede">Two independent channels, because a quick checkpoint and a deliberate backup are different needs.</p>
     </div>
@@ -1141,7 +1166,7 @@
   <!-- ============ 15 APPENDIX ============ -->
   <section class="doc" id="appendix">
     <div class="sec-head">
-      <span class="sec-eyebrow">Section 15</span>
+      <span class="sec-eyebrow">Section 16</span>
       <h2>Quick Reference</h2>
       <p class="sec-lede">The numbers you'll want mid-match, in one place.</p>
     </div>

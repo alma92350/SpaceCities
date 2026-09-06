@@ -1,8 +1,8 @@
 {
   "version": "1.1.0",
-  "saveVersion": 1,
-  "galaxySaveVersion": 1,
-  "minSaveVersion": 1,
-  "minGalaxySaveVersion": 1,
-  "notes": "Observer Mode, patrol orders, in-game competitions with Elo ranking, an evolvable AI genome, and a visible counter-triangle. Save formats are unchanged, so 1.0.0 saves load as-is."
+  "saveVersion": 2,
+  "galaxySaveVersion": 2,
+  "minSaveVersion": 2,
+  "minGalaxySaveVersion": 2,
+  "notes": "Engine groundwork for N-player multiplayer (not yet player-facing). Save format changed: 1.1.0 saves will NOT load in this build — export any in-progress game before updating."
 }

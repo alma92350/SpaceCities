@@ -72,9 +72,19 @@ export function projectFor(state, seat) {
   // can already regenerate deterministically from the seed, same as the map it lives on. A hidden
   // node (a cache) is included at all only once this seat's fog has explored its cell; a charted
   // node needs no such gate.
+  //
+  // Bugfix: EXCEPT a wreck (engine/wreckage.js) or crater (engine/bomb.js) node — those are pushed
+  // onto state.map.nodes mid-match and do NOT exist in the client's own seed-regenerated map at
+  // all, exactly the same "needs its whole shape" case engine/bomb.js's own spawnCraterNode comment
+  // already documents for persist.js's rehydratePlanet (the save/load path). The live wire path
+  // never got that same treatment: reducing one of these to {id, amount} left reassembleProjection
+  // with no way to materialize it (an id it had never seen, and nothing to construct a real node
+  // from), so a live multiplayer client never saw battle wreckage or a Helium Bomb crater's own
+  // resource node appear at all. Sent in full instead — plain, already-JSON-safe fields, no live
+  // object references — same treatment an "added" entity already gets elsewhere in this payload.
   const nodes = state.map.nodes
     .filter(n => !n.hidden || isNodeDiscovered(fog, n))
-    .map(n => ({ id: n.id, amount: n.amount }));
+    .map(n => (n.wreck || n.crater) ? { ...n } : { id: n.id, amount: n.amount });
 
   /** @type {Object.<string, Object>} */
   const players = {};
@@ -121,7 +131,8 @@ export function projectFor(state, seat) {
 export function projectForSpectator(state) {
   const units = [...state.units.values()].map(u => sanitizeUnitForExternal(u));
   const buildings = [...state.buildings.values()].map(b => sanitizeBuildingForExternal(b));
-  const nodes = state.map.nodes.map(n => ({ id: n.id, amount: n.amount }));
+  // Bugfix: same wreck/crater exception as projectFor above — see that function's own comment.
+  const nodes = state.map.nodes.map(n => (n.wreck || n.crater) ? { ...n } : { id: n.id, amount: n.amount });
 
   /** @type {Object.<string, Object>} */
   const players = {};
@@ -187,10 +198,24 @@ export function reassembleProjection(wire, map, fog, seat) {
   // otherwise-static regenerated map (reused across every reassembly call by
   // net/wsClientTransport.js), so this accumulates correctly tick over tick, the same as the
   // server's own copy.
+  //
+  // Bugfix: a wreck (engine/wreckage.js) or crater (engine/bomb.js) node has no entry in the
+  // client's own regenerated map at all — it was never part of the deterministic seed generation,
+  // it was pushed onto state.map.nodes mid-match, server-side, same reasoning persist.js's own
+  // rehydratePlanet already documents for the save/load path. Its `mapNode` lookup below always
+  // came back undefined for one of these, so it was silently dropped every tick — a live
+  // multiplayer human never saw battle wreckage or a Helium Bomb crater's resource node appear at
+  // all. projectFor now sends one of these in FULL (not reduced to {id, amount}) for exactly this
+  // reason, so it can be materialized here instead of discarded — mirroring persist.js's own
+  // map.nodes.push(node) on load, one layer further out.
   const { nodes: wireNodes, ...rest } = wire;
   for (const n of wireNodes) {
     const mapNode = map.nodes.find(mn => mn.id === n.id);
-    if (mapNode) mapNode.amount = n.amount;
+    if (mapNode) { mapNode.amount = n.amount; continue; }
+    if (n.wreck || n.crater) {
+      map.nodes.push(n);
+      if (map.nodesById) map.nodesById.set(n.id, n);
+    }
   }
 
   const units = new Map(wire.units.map(u => [u.id, u]));
@@ -232,10 +257,15 @@ export function reassembleProjection(wire, map, fog, seat) {
  * @returns {Object} a state-shaped object render.js and the client's own read paths already expect
  */
 export function reassembleSpectatorProjection(wire, map) {
+  // Bugfix: same wreck/crater materialization as reassembleProjection above — see its own comment.
   const { nodes: wireNodes, ...rest } = wire;
   for (const n of wireNodes) {
     const mapNode = map.nodes.find(mn => mn.id === n.id);
-    if (mapNode) mapNode.amount = n.amount;
+    if (mapNode) { mapNode.amount = n.amount; continue; }
+    if (n.wreck || n.crater) {
+      map.nodes.push(n);
+      if (map.nodesById) map.nodesById.set(n.id, n);
+    }
   }
   const units = new Map(wire.units.map(u => [u.id, u]));
   const buildings = new Map(wire.buildings.map(b => [b.id, b]));

@@ -234,6 +234,13 @@ test("every shipped browser module is reachable from index.html's entry point", 
     "net/wsServerTransport.js",
     "net/wsWorkerTransport.js", "server/matchWorker.js", "server/matchSnapshot.js",
     "server/lobby.js", "server/lobbySnapshot.js",
+    // T-059: server/matchResults.js — same class again, only ever reached from tools/serve.js's
+    // own spawnWorkerFor/handleListResults wiring.
+    "server/matchResults.js",
+    // T-061: server/log.js — same class again, only ever imported by server/matchWorker.js
+    // itself (already exempt above) to log operational events server-side; no browser module
+    // has any reason to import it.
+    "server/log.js",
     // T-039: net/abuseGuard.js's only real caller is net/wsWorkerTransport.js itself (the general
     // per-connection rate gate conn.onmessage runs on every inbound message) — it inherits THAT
     // file's own invisible-edge status rather than carrying a reason of its own, the same class as
@@ -243,6 +250,35 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // abuseGuard.js's own exports — deciding whether to throttle or disconnect a connection is
     // inherently a server-side question — so this one has no equivalent future exit.
     "net/abuseGuard.js",
+    // T-049: net/mcp.js's only real caller is tools/serve.js's createAppServer (the /mcp route),
+    // the exact same class as net/ws.js/net/wsWorkerTransport.js/server/lobby.js above — a real,
+    // tested dependency whose only path from index.html runs through a Node server entry point,
+    // never a browser import. An MCP agent client is a server-to-server peer, never something a
+    // browser tab loads, so unlike net/chatLimiter.js's own past exit there is no future wiring
+    // step that would ever make this reachable from index.html.
+    "net/mcp.js",
+    // T-049a: server/mcpSeatHandle.js's only real callers are the MCP TOOLS that will use
+    // withSeat (T-051/T-052/T-053) — themselves server-side, same as net/mcp.js just above.
+    "server/mcpSeatHandle.js",
+    // T-051: server/mcpLobbyTools.js's only real caller is tools/serve.js's own mcpServer
+    // construction — same class as net/mcp.js/server/mcpSeatHandle.js just above.
+    "server/mcpLobbyTools.js",
+    // T-052: server/mcpObservationTools.js/server/mcpObservationCache.js — same class again,
+    // both only ever reached from tools/serve.js's own mcpServer/spawnWorkerFor wiring.
+    "server/mcpObservationTools.js",
+    "server/mcpObservationCache.js",
+    // T-053: server/mcpActionTools.js/server/mcpCommandBridge.js — same class again.
+    "server/mcpActionTools.js",
+    "server/mcpCommandBridge.js",
+    // T-054: server/mcpEventTools.js — same class again, only ever reached from tools/serve.js's
+    // own mcpServer wiring.
+    "server/mcpEventTools.js",
+    // T-055: server/mcpResources.js — same class again.
+    "server/mcpResources.js",
+    // T-056: net/agentApm.js — same class again (a net/ file, like net/mcp.js above, but only
+    // ever reached from tools/serve.js/server/mcpActionTools.js/server/mcpLobbyTools.js, never
+    // from any browser-side import chain).
+    "net/agentApm.js",
   ]);
   const orphans = browserJs()
     .map(f => relative(root, f))

@@ -553,6 +553,19 @@ test("buildHelpOverlay links to the full field manual, opening in a new tab", ()
   assert.match(html, /Full field manual/i);
 });
 
+// T-064: the exit criterion this row proves is narrow and literal — "a new player understands
+// seats, AI fill and reconnect without asking" — so this checks for the actual FACTS, not just a
+// section heading existing.
+test("buildHelpOverlay documents AI-filled open seats, the disconnect grace period, and automatic reconnect", () => {
+  buildHelpOverlay();
+  const html = helpOverlayEl.innerHTML;
+
+  assert.match(html, /Multiplayer/, "expected a Multiplayer section in the help reference");
+  assert.match(html, /built-in AI/i, "an unclaimed seat being AI-played should be documented");
+  assert.match(html, /20 seconds/, "the real disconnect grace period should be documented, not left unstated");
+  assert.match(html, /[Aa]utomatic/, "reconnecting being automatic (no separate step) should be documented");
+});
+
 test("the help overlay and the tech chart agree on whether a building is completed (T2)", async () => {
   // The same body shipped twice under TWO DIFFERENT NAMES — overlays.js's hasBuilding and
   // techChart.js's hasCompletedBuilding — which is why nobody noticed the duplication. Both are
