@@ -70,6 +70,7 @@
 
 "use strict";
 
+import { fileURLToPath } from "node:url";
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createGameState } from "../engine/state.js";
 import { tick } from "../engine/sim.js";
@@ -2223,7 +2224,7 @@ function main(argv) {
 }
 
 // Only run the CLI when invoked directly, so a test can import run/score/CHECKS.
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) main(process.argv.slice(2));
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2));
 
 // pinnedDuelDials used to be declared `export function` right here in this file; now it's
 // implemented in tools/duelCore.js and imported above, so it's re-exported here instead — same

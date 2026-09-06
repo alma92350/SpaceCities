@@ -13,6 +13,7 @@
 
 "use strict";
 
+import { fileURLToPath } from "node:url";
 import { createSelfPlayState, runSelfPlayMatch } from "./selfplay.js";
 
 function parseArgs(argv) {
@@ -62,4 +63,4 @@ function main(argv) {
 }
 
 // Only run the CLI when invoked directly, so a test can import the functions above.
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) main(process.argv.slice(2));
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2));
