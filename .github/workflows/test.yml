@@ -41,6 +41,34 @@ jobs:
       - name: Type-check the annotated files
         run: npx --yes --package typescript@5.7.2 -- tsc -p jsconfig.json
 
+  # The long half of the ailab guards, as its own job.
+  #
+  # These 72 tests drive real matches and take ~4 minutes; the other ~3200 tests in the repo take
+  # under 25 seconds combined. Leaving them in `npm test` meant every `npm test` — the command
+  # CONTRIBUTING.md tells a contributor to run on every change — was gated end to end on an
+  # AI-tuning sweep that almost no commit can affect, and a red-green loop measured in minutes is
+  # a loop people quietly stop running.
+  #
+  # A SEPARATE JOB, NOT A SKIP. Nothing here is optional or conditional: it runs on every push and
+  # every pull request, exactly like the fast suite, and belongs in the required-checks list in
+  # CONTRIBUTING.md. It is only taken off the critical path of the inner loop, not out of the
+  # build. test/suite-integrity.test.js pins the arrangement from the other side, so the slow half
+  # cannot become an empty directory that passes vacuously.
+  #
+  # ONE NODE VERSION, deliberately. These tests exercise the sim, which the fast matrix already
+  # covers on both LTS lines; running four minutes of sweeps twice would cost eight to learn the
+  # same thing.
+  slow:
+    runs-on: ubuntu-latest
+    name: slow tests (ailab sweeps)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Run the long-running bench guards
+        run: npm run test:slow
+
   # The suite above is headless and dependency-free, which is the whole point of it — and it means
   # nothing in it can see a page that parses, imports cleanly, and then throws on load. With no
   # build step that failure is a blank white screen, and the way it has been caught here before is

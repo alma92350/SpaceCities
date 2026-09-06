@@ -86,11 +86,44 @@ function startServer() {
   });
 }
 
-const steps = [];
-const check = (name, ok, detail = "") => {
-  steps.push({ name, ok, detail });
-  console.log(`  ${ok ? "ok  " : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
-};
+/* ---------- the accounting, exported so it can be tested without a browser ----------
+   Everything below this file's Playwright boundary is ordinary pure code, and it is the part that
+   decides whether CI goes green — so it is the part worth guarding. test/smoke-harness.test.js
+   covers it in `npm test`; the browser half stays in its own job, where it belongs. */
+
+/**
+ * A running list of checks that prints each one as it happens, so a run that hangs still says how
+ * far it got.
+ * @param {(line: string) => void} [log]
+ */
+export function createChecklist(log = console.log) {
+  const steps = [];
+  const check = (name, ok, detail = "") => {
+    steps.push({ name, ok, detail });
+    log(`  ${ok ? "ok  " : "FAIL"}  ${name}${detail ? `  — ${detail}` : ""}`);
+  };
+  return { steps, check };
+}
+
+/**
+ * The exit code for a finished run.
+ *
+ * AN EMPTY LIST IS A FAILURE, and that is the whole reason this is a named function rather than
+ * an inline `failed.length ? 1 : 0`. A plain "any step failed?" test is vacuously false when no
+ * step ran, so a smoke run whose interaction block was removed or never reached printed
+ * "0/0 checks passed" and exited 0 — a green gate that tested nothing, reported to everyone as
+ * evidence that the page boots. A smoke test that made no assertions has not passed; it has not
+ * run.
+ *
+ * @param {{ok: boolean}[]} steps
+ * @returns {number}
+ */
+export function exitCodeFor(steps) {
+  if (steps.length === 0) return 1;
+  return steps.some(s => !s.ok) ? 1 : 0;
+}
+
+const { steps, check } = createChecklist();
 
 async function main() {
   // playwright (full) or playwright-core, whichever is present — the CLI that downloads browsers
@@ -214,9 +247,14 @@ async function main() {
     check("drag-select builds a selection panel", /worker|hp/i.test(panel), panel.split("\n")[0]?.slice(0, 48));
 
     // Right-click: inputCommands.js commandAt, the 92-line order ladder.
+    const errorsBeforeRightClick = errors.length;
     await page.mouse.click(box.x + 600, box.y + 420, { button: "right" });
     await page.waitForTimeout(500);
-    check("a right-click order is dispatched", true);
+    // Asserted the same way as the minimap click below: there is no devtools hook to read the
+    // resulting order back out of the page, so "the ladder ran and raised nothing" is the real
+    // signal. It used to be `check(..., true)`, which passed whatever happened.
+    check("a right-click order is dispatched with no new console errors", errors.length === errorsBeforeRightClick,
+      errors.slice(errorsBeforeRightClick).join(" | "));
 
     // Right-click the MINIMAP: a separate handler in main.js (not input.js/inputCommands.js),
     // issuing move/attack-move for the current selection via game.transport.submitCommand
@@ -231,11 +269,13 @@ async function main() {
     check("a minimap right-click order is dispatched with no new console errors", errors.length === errorsBeforeMinimap);
 
     // Keyboard routes through input.js's own handler, which kept the stateful half.
+    const errorsBeforeKeys = errors.length;
     await page.keyboard.press("q");
     await page.waitForTimeout(300);
     await page.keyboard.press("Escape");
     await page.waitForTimeout(300);
-    check("keyboard commands are handled", true);
+    check("keyboard commands are handled with no new console errors", errors.length === errorsBeforeKeys,
+      errors.slice(errorsBeforeKeys).join(" | "));
 
     check("the browser console stayed clean", errors.length === 0, errors.slice(0, 4).join(" | "));
   } catch (err) {
@@ -247,11 +287,16 @@ async function main() {
 
   const failed = steps.filter(s => !s.ok);
   console.log(`\n${steps.length - failed.length}/${steps.length} checks passed`);
+  if (steps.length === 0) console.log("no checks ran at all — that is a FAILED smoke run, not a clean one");
   if (errors.length) {
     console.log(`\n${errors.length} browser error(s):`);
     for (const e of errors.slice(0, 20)) console.log("  !!", e);
   }
-  if (!HEADED) process.exit(failed.length ? 1 : 0);
+  if (!HEADED) process.exit(exitCodeFor(steps));
 }
 
-main().catch(err => { console.error(err); process.exit(1); });
+// Same entry-guard idiom as tools/ailab.js: importing this module (as test/smoke-harness.test.js
+// does, to reach the accounting helpers above) must not start a server or launch a browser.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  main().catch(err => { console.error(err); process.exit(1); });
+}

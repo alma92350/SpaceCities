@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, sep } from "node:path";
 import { walkJs } from "./_helpers.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -68,4 +68,57 @@ test("the DOM test double lives in exactly one place", () => {
   }
   assert.deepEqual(offenders, [],
     `import FakeElement / fakeCtx from test/_dom.js instead:\n  ${offenders.join("\n  ")}`);
+});
+
+/* ----------
+   The fast/slow split, pinned from both ends.
+
+   test/ailab.test.js's sim-driving half was moved to test/slow/ because it took 307s while the
+   entire rest of the suite took under 25s. That is a real improvement to the inner loop and a
+   real new way for tests to stop running: a directory `npm test` deliberately cannot see is one
+   nobody notices going quiet. A slow half that is empty, or that no CI job invokes, passes
+   vacuously and looks exactly like a slow half that is green.
+
+   So all three legs are asserted here — the directory has tests in it, a script runs them, and
+   CI calls that script — and the two halves are checked to be disjoint but exhaustive, so a new
+   test file cannot land in a third place that neither command reaches.
+   ---------- */
+
+const slowDir = join(root, "test", "slow");
+
+test("the slow half exists and is not empty — a vacuously-green directory is not a passing suite", () => {
+  assert.ok(existsSync(slowDir), "test/slow/ must exist; it holds the long-running bench guards");
+  const files = walkJs(slowDir).filter(f => f.endsWith(".test.js"));
+  assert.ok(files.length > 0, "test/slow/ exists but contains no test files — the long guards have gone missing");
+});
+
+test("npm run test:slow exists and names test/slow explicitly, like npm test does", () => {
+  // Same reasoning as the discovery test above: an explicit glob makes the set of files run a
+  // property of this repo rather than of whichever Node is installed.
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.ok(pkg.scripts["test:slow"], "package.json needs a test:slow script, or nothing runs test/slow/");
+  assert.match(pkg.scripts["test:slow"], /test\/slow\//,
+    `test:slow should name the slow directory explicitly, got: ${pkg.scripts["test:slow"]}`);
+});
+
+test("CI actually invokes the slow half — a job nobody runs is not a gate", () => {
+  // The whole point of moving these tests off the critical path was that they keep running,
+  // just not in the inner loop. If the workflow step is ever dropped, the split silently
+  // becomes a deletion of 72 tests.
+  const wf = readFileSync(join(root, ".github", "workflows", "test.yml"), "utf8");
+  assert.match(wf, /npm run test:slow/,
+    ".github/workflows/test.yml must run `npm run test:slow` — otherwise test/slow/ is dead weight");
+});
+
+test("the two halves are disjoint and exhaustive: every test file is run by exactly one command", () => {
+  // `npm test` globs test/*.test.js (one level, so it cannot see test/slow/) and `npm run
+  // test:slow` globs test/slow/*.test.js. A file added to test/slow/deeper/ or to some third
+  // directory under test/ would be run by neither and would look, from the outside, exactly like
+  // a file that passes.
+  const all = walkJs(join(root, "test")).filter(f => f.endsWith(".test.js"));
+  const orphans = all
+    .map(f => "test/" + f.slice(join(root, "test").length + 1).split(sep).join("/"))
+    .filter(rel => !/^test\/[^/]+\.test\.js$/.test(rel) && !/^test\/slow\/[^/]+\.test\.js$/.test(rel));
+  assert.deepEqual(orphans, [],
+    `these test files are run by neither \`npm test\` nor \`npm run test:slow\`:\n  ${orphans.join("\n  ")}`);
 });

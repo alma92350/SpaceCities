@@ -44,7 +44,7 @@ import { renderObserverPanel } from "./observerPanel.js";
 import { hideChatPanel } from "./chat.js";
 import { showObjectives, hideObjectives, showSeedChip, showFactionChip, showGameOver, showScenarioEnd, showGalaxyToast } from "./overlays.js";
 import { renderMapSelect, setup, DIFFICULTY_OPTIONS } from "./setup.js";
-import { captureCompetitionResult, spectatedGameOverBlock } from "./competition.js";
+import { captureCompetitionResult, spectatedGameOverBlock } from "./competitionScreens.js";
 import { setupEscort, setupRaider, setupBounty } from "./engine/scenarios.js";
 import { createGalaxy, activeState, jumpCapital, sweepColonies, stepGalaxy, surrenderGalaxy, DOMINATION_TARGET, playerSpaceports, previewPlanet, canJump, canJumpTo, jumpCost } from "./engine/galaxy.js";
 import { openLandingPicker } from "./landingPicker.js";

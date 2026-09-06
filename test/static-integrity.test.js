@@ -520,7 +520,13 @@ test("the shipped module graph has no import cycle outside the known UI cluster 
   // bootState — reused rather than redefined, the same CONTRIBUTING.md reason competition.js's own
   // paragraph above already gives, and every one of those calls also lives inside a function
   // (renderLobbyScreen/joinLive), never at this file's own module-evaluation time either.
-  const KNOWN = ["boot.js", "competition.js", "hud.js", "hudSelection.js", "lobbyScreen.js", "overlays.js", "saveload.js", "setup.js"];
+  // competitionScreens.js joins the cluster for exactly the reason competition.js used to be in it:
+  // it is the half of that module that renders, so it is the half that imports setup.js's
+  // renderMapSelect and boot.js's startCompetitionMatch, and setup.js imports its renderCompetition
+  // back. The pure half (competition.js) stays in the list only because the screens import ITS
+  // shaping functions — it no longer imports the DOM, or setup.js's renderMapSelect, at all.
+  const KNOWN = ["boot.js", "competition.js", "competitionScreens.js", "hud.js", "hudSelection.js",
+                 "lobbyScreen.js", "overlays.js", "saveload.js", "setup.js"];
   assert.deepEqual(sccs.map(c => c.join(" ")), [KNOWN.join(" ")],
     "import cycle(s) other than the documented UI cluster (see overlays.js's note on live bindings):\n" +
     sccs.map(c => c.join(", ")).join("\n"));
