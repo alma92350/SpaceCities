@@ -53,3 +53,38 @@ test("resumableMode: T-037 — a live network SPECTATOR is never checkpointed ei
   assert.equal(resumableMode({ state: { over: false }, networkSpectate: false }), "skirmish",
     "…and an ordinary skirmish is untouched by that rule");
 });
+
+/* ----------
+   A LIVE NETWORK MATCH is not the client's game to checkpoint either.
+
+   The networkSpectate rule was added because a spectator's reassembled state has no fog to
+   serialize and engine/persist.js reads it unconditionally. A live network PLAYER has exactly the
+   same broken shape for exactly the same reason — engine/projection.js sends entities and
+   resources, never the per-owner fog structures or controllers a save needs — and was never
+   excluded. So `resumableMode` returned "skirmish" for one, autoSave ran on its 12s timer, and
+   engine/persist.js's serPlanet threw `Cannot read properties of undefined (reading 'player')` on
+   `state.fogs[id]`.
+
+   Found by tools/smokeMultiplayer.js on its very first run, in BOTH browsers of an ordinary
+   two-player match — which is the point of that script: the unit suite cannot see it, the
+   single-page smoke test cannot see it, and it happened in every live match anyone ever played.
+
+   Refusing is the semantically right answer, not merely the safe one. A live match lives on the
+   server, and rejoining one already has its own mechanism (liveMatchStorage.js's
+   {matchId, owner, token} plus lobbyScreen.js's rejoinLiveMatch). A localStorage skirmish
+   checkpoint of a live match would offer "Continue" into a half-state single-player game that
+   never existed.
+   ---------- */
+
+test("a live network PLAYER is not resumable — same rule as a live spectator, same reason", () => {
+  assert.equal(resumableMode({ state: { over: false }, galaxy: null, networkLive: true }), null,
+    "a live network match belongs to the server; a client-side checkpoint of it is not resumable");
+});
+
+test("the live-match refusal does not leak into an ordinary skirmish or Odyssey run", () => {
+  // The fence: this must refuse live matches and nothing else, or it silently disables autosave
+  // for every normal game — a data-loss bug traded for a crash.
+  assert.equal(resumableMode({ state: { over: false }, galaxy: null }), "skirmish");
+  assert.equal(resumableMode({ state: { over: false }, galaxy: {} }), "galaxy");
+  assert.equal(resumableMode({ state: { over: false }, galaxy: null, networkLive: false }), "skirmish");
+});

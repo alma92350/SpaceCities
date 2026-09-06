@@ -122,3 +122,16 @@ test("the two halves are disjoint and exhaustive: every test file is run by exac
   assert.deepEqual(orphans, [],
     `these test files are run by neither \`npm test\` nor \`npm run test:slow\`:\n  ${orphans.join("\n  ")}`);
 });
+
+test("CI invokes the two-browser multiplayer smoke test — a script nobody runs is dead weight", () => {
+  // Same reasoning as the slow-suite guard above. tools/smokeMultiplayer.js is the only thing in
+  // this repo that exercises host -> share link -> second browser joins -> both in one match, and
+  // it found a real crash in every live match on its first run. If its CI step is ever dropped, no
+  // failure appears anywhere — the script simply stops being run and multiplayer goes back to
+  // being verified by hand, which is how it went unverified in the first place.
+  const wf = readFileSync(join(root, ".github", "workflows", "test.yml"), "utf8");
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  assert.ok(pkg.scripts["smoke:mp"], "package.json needs a smoke:mp script");
+  assert.match(wf, /npm run smoke:mp/,
+    ".github/workflows/test.yml must run `npm run smoke:mp`, or the multiplayer smoke test is dead weight");
+});

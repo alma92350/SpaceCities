@@ -139,3 +139,16 @@ jobs:
           npx playwright install --with-deps chromium
       - name: Boot the game in a real browser
         run: npm run smoke
+      # A SECOND step in this job rather than a job of its own, for two reasons: Chromium is
+      # already installed here (a separate job would download it again to learn the same thing),
+      # and the branch ruleset names its required checks one per JOB — so a new job would silently
+      # not be required until somebody remembered to add it, which is the exact failure mode
+      # CONTRIBUTING.md's protection section is about. As a step, it is covered by the
+      # `browser smoke test` check that is already required.
+      #
+      # What it adds: two browsers, one server, a real shared link. Everything multiplayer is
+      # tested one layer down over real sockets in Node, and the single-page smoke test above
+      # plays a skirmish — between them sits the path a real player takes, and it was uncovered.
+      # It caught a live-match autosave crash on its first run.
+      - name: Two browsers, one shared link — the real multiplayer path
+        run: npm run smoke:mp

@@ -442,6 +442,7 @@ export function restartToMapSelect() {
   // …and no live network spectate connection either (T-037) — same dangling-session hazard,
   // one flag over: left set, it would keep offering Observer Mode in the NEXT (ordinary) game.
   game.networkSpectate = false;
+  game.networkLive = false;
   // T-030's own seam back to its documented default. A genuine pre-existing gap, found while
   // adding networkSpectate above: lobbyScreen.js's joinLive sets this to a real seat ("player" OR
   // "ai") BEFORE bootState, and nothing ever reset it back afterward — a player who joined a live
@@ -502,6 +503,7 @@ export function bootState(newState, { intro, selfPlay = false, transport = null 
   game.competition = null;   // …and likewise: startCompetitionMatch re-sets it right after this returns
   game.spectateMatch = null; game.spectateSpeed = 1;   // …and likewise: startSpectatedMatch re-sets them right after this returns
   game.networkSpectate = false;   // …and likewise: lobbyScreen.js's spectateLive re-sets this right after this returns (T-037)
+  game.networkLive = false;       // …and lobbyScreen.js's joinLive re-sets THIS right after this returns (T-034)
   game.groups = {};     // fresh game → fresh control groups (entity ids reset per game, so stale groups would mis-select)
   game.colonyAlerts = {};   // fresh game → fresh starmap alert ledger (a previous game's background-colony alerts are meaningless here)
   game.state = newState;

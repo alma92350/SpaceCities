@@ -146,6 +146,11 @@ async function joinLive(matchId, owner, token, statusEl) {
   const closeTransport = transport.close.bind(transport);
   transport.close = () => { clearLiveMatch(); closeTransport(); };
   bootState(firstState, { intro: true, transport });
+  // AFTER bootState, which clears it — the same ordering (and the same reason) as
+  // spectateLive's own game.networkSpectate below. Read only by saveShape.js's resumableMode,
+  // which must refuse to checkpoint a live match: this state is a reassembled projection with no
+  // fog structures for engine/persist.js to serialize.
+  game.networkLive = true;
   initChatPanel();   // T-038 — after bootState, same as everywhere else here: game.transport must already be this one
   transport.onEvent(e => {
     if (e.type !== "state") return;

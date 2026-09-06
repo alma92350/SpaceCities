@@ -240,6 +240,11 @@ When cutting a release:
    things, failing on any uncaught error (`tools/smoke.js`; CI runs it as the *browser smoke test*
    job). It is shallow on purpose. Still worth ten minutes by hand for anything the script does not
    cover — an Odyssey run, and a save/reload of both modes.
+2b. `npm run smoke:mp` is green — two browsers, one server, a real shared link: host, join, both in
+   one live match (`tools/smokeMultiplayer.js`, run as a second step of the same CI job). This is
+   the only automated thing that sees the path a real player takes; everything multiplayer is
+   otherwise tested one layer down in Node, and the gap between those two is where a live-match
+   autosave crash sat unnoticed in every match anyone played.
 3. Bump `APP_VERSION` in `version.js` **and** `version` in `package.json` to the new semver, and
    keep `version.json` in sync (the auto-update check compares them). (`test/release-manifest.test.js`,
    `test/version.test.js`.)

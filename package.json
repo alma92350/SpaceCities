@@ -9,7 +9,8 @@
     "test": "node --test test/*.test.js",
     "test:slow": "node --test test/slow/*.test.js",
     "typecheck": "tsc -p jsconfig.json",
-    "smoke": "node tools/smoke.js"
+    "smoke": "node tools/smoke.js",
+    "smoke:mp": "node tools/smokeMultiplayer.js"
   },
   "engines": {
     "node": ">=22"
