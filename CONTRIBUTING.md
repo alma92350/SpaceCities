@@ -8,7 +8,7 @@ change that breaks one fails `npm test` rather than shipping.
 ## Getting set up
 
 ```
-node --version      # must be >= 20
+node --version      # must be >= 22 (the global WebSocket the multiplayer client needs)
 npm start           # serve the game at http://localhost:8080  (zero-dep static server)
 npm test            # the suite you run on every change (node --test) — ~50s
 npm run test:slow   # the long bench guards (test/slow/) — ~4 minutes
@@ -175,13 +175,17 @@ This is a repository setting, so it cannot live in a file here. It takes about t
 - Target branch: `main`
 - ☑ **Require status checks to pass before merging**, and add all four by name — **confirmed
   present and correctly named in `.github/workflows/test.yml`**:
-  - `tests (node 20)`
   - `tests (node 22)`
   - `browser smoke test`
   - `slow tests (ailab sweeps)`
 
-  All four must be listed. The matrix produces one check per Node version, and requiring only one
-  lets a version-specific regression through — which is the whole reason the matrix exists. The
+  All three must be listed. There used to be a fourth, `tests (node 20)`, and its removal is worth
+  understanding rather than copying: `package.json` claimed `">=20"` while the multiplayer client
+  uses the global `WebSocket`, which Node only exposes from 22. That leg could never pass, and it
+  did not fail cleanly either — it hung awaiting connections that could not open, for 36 minutes
+  against 72 seconds on the Node 22 leg, so the whole gate read as broken. The matrix now names
+  exactly the versions actually supported, and `test/runtime-floor.test.js` keeps `package.json`,
+  the Dockerfile and this matrix agreeing. The
   smoke job is the only check that can see a page which parses cleanly and then throws on load.
   And the slow job is where the 72 long-running bench guards live since they were split out of
   `npm test` — they are not optional, they are just off the inner loop, so leaving them out of
@@ -194,7 +198,8 @@ Leave "Require a pull request before merging" to taste; it is orthogonal to the 
 which was about a red check rather than an unreviewed one.
 
 The check names come from `.github/workflows/test.yml`'s job name
-(`name: tests (node ${{ matrix.node-version }})`). If that line is ever edited, the required
+(`name: tests (node ${{ matrix.node-version }})`), so adding a Node version to the matrix adds a
+check that must be added here too. If that line is ever edited, the required
 checks silently stop matching and the gate goes quiet — so change the two together.
 
 ## Release checklist
