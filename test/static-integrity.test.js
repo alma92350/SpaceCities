@@ -592,3 +592,49 @@ test("T-032: camera.js has zero imports — camera movement is structurally unab
   const specs = [...src.matchAll(IMPORT_SPEC)].map(specPath);
   assert.deepEqual(specs, [], `camera.js must import nothing at all — found: ${specs.join(", ")}`);
 });
+
+
+/* ---------------------------------------------------------------
+   A CLI entry guard must work on Windows too.
+
+   Every tool under tools/ ends with a "run main() only when executed directly, not when imported"
+   guard. Four of them spelled it `new URL(import.meta.url).pathname === process.argv[1]`, which is
+   false on EVERY Windows machine: the pathname of a file: URL there is "/C:/Users/.../foo.js"
+   (leading slash, forward slashes) and process.argv[1] is "C:\\Users\\...\\foo.js". The guard never
+   fired, so main() never ran and the process exited immediately having done nothing — for
+   tools/mcpStdioBridge.js, spawned over stdio by an MCP client, that surfaces as a bare
+   "CONNECTION_CLOSED" that reads exactly like the game server being down.
+
+   Pinned as a static check rather than a behavioural one because the bug is invisible on the
+   POSIX machines this suite runs on: there the two forms are identical, so no amount of executing
+   these tools here would ever catch a regression.
+   --------------------------------------------------------------- */
+
+test("no CLI entry guard compares a file: URL pathname against process.argv[1] — that never matches on Windows", () => {
+  const offenders = [];
+  // shippedJs(), not walkJs(root): this file's own regex literal above would otherwise match
+  // itself. test/ is excluded there for the reason its own comment gives — node --test already
+  // covers it — and no CLI entry guard lives under test/ anyway.
+  for (const file of shippedJs()) {
+    const src = readFileSync(file, "utf8");
+    if (/new URL\(import\.meta\.url\)\.pathname\s*===\s*process\.argv\[1\]/.test(src)) {
+      offenders.push(relative(root, file));
+    }
+  }
+  assert.deepEqual(offenders, [],
+    "use fileURLToPath(import.meta.url) === process.argv[1] instead — the URL-pathname form is false on Windows, so main() never runs");
+});
+
+test("every tools/ entry guard that runs main() resolves its own path with fileURLToPath", () => {
+  const guarded = [];
+  for (const file of walkJs(join(root, "tools"))) {
+    const src = readFileSync(file, "utf8");
+    if (!/process\.argv\[1\]/.test(src)) continue;
+    guarded.push(relative(root, file));
+    assert.match(src, /fileURLToPath\(import\.meta\.url\)/,
+      `${relative(root, file)} guards on process.argv[1] but never converts import.meta.url with fileURLToPath`);
+    assert.match(src, /from "node:url"/,
+      `${relative(root, file)} uses fileURLToPath without importing it`);
+  }
+  assert.ok(guarded.length >= 4, `expected several guarded CLI tools, found ${guarded.length}`);
+});

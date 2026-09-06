@@ -28,6 +28,7 @@
 
 "use strict";
 
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
 import { PROTOCOL_VERSION } from "../net/mcp.js";
 
@@ -147,4 +148,14 @@ function main(argv) {
 
 // Same entry-guard idiom as tools/ailab.js and tools/referenceAgent.js: importing this module (as
 // the tests do) must not attach a listener to stdin or read process.argv.
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) main(process.argv.slice(2));
+//
+// fileURLToPath, NOT `new URL(import.meta.url).pathname` — that comparison is false on EVERY
+// Windows machine, because the pathname of a file: URL there is "/C:/Users/.../tools/foo.js"
+// (leading slash, forward slashes) while process.argv[1] is "C:\Users\...\tools\foo.js". The
+// guard therefore never fired, main() never ran, and this process exited immediately without
+// reading a byte of stdin — which a client spawning it reports as "CONNECTION_CLOSED", a message
+// that reads exactly like the game server being down and sends you looking at the wrong end.
+// fileURLToPath does the platform-correct conversion (it is what tools/serve.js, tools/smoke.js
+// and tools/smokeMultiplayer.js already used); POSIX behaviour is unchanged, since there the two
+// forms were already identical.
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) main(process.argv.slice(2));
