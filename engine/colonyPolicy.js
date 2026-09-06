@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    Colony standing orders — the second half of the Phase 6 colony-economy rework
    (the first half is engine/galaxy.js's Freight Lanes; the roadmap explicitly calls
@@ -53,6 +54,10 @@ export const MAX_WORKER_TARGET = 20;
 // — an unknown commodity or a negative/NaN floor is dropped rather than trusted, and workerTarget
 // is clamped into range. A missing/garbage `p` (no policy set yet, or a corrupt save entry)
 // resolves to the fully-off default: autoSell disabled, no floors, no sustain target.
+/**
+ * @param {Object} p an untrusted policy object (a save, or a UI edit)
+ * @returns {Object} a policy with every field coerced into range
+ */
 export function sanitizePolicy(p) {
   const src = (p && typeof p === "object") ? p : {};
   const autoSellSrc = (src.autoSell && typeof src.autoSell === "object") ? src.autoSell : {};
@@ -70,6 +75,11 @@ export function sanitizePolicy(p) {
 
 // The policy for `planetId`, or the off-default when none has been set. Never returns a live
 // reference into the store — callers get their own sanitized copy.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} planetId
+ * @returns {Object} that planet's policy, defaulted if it has none yet
+ */
 export function getColonyPolicy(galaxy, planetId) {
   const policies = galaxy.colonyPolicies;
   return sanitizePolicy(policies ? policies.get(planetId) : null);
@@ -79,6 +89,12 @@ export function getColonyPolicy(galaxy, planetId) {
 // into the existing floor set (a UI editing one commodity's floor shouldn't blow away every other
 // commodity's), while `patch.autoSell.enabled`/`patch.workerTarget` simply override when present.
 // Returns the resulting sanitized policy.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} planetId
+ * @param {Object} [patch] fields to merge into the planet's current policy
+ * @returns {Object} the resulting sanitized policy
+ */
 export function setColonyPolicy(galaxy, planetId, patch = {}) {
   const policies = galaxy.colonyPolicies || (galaxy.colonyPolicies = new Map());
   const current = sanitizePolicy(policies.get(planetId));
@@ -146,6 +162,10 @@ function runWorkerSustain(state, policy) {
 // on the exact same PROGRESS_CHECK_EVERY schedule — so this is already an integer-tick-keyed,
 // ~1/sec cadence, not a per-frame one. BACKGROUND worlds only: the active/rendered seat is the
 // player's own hands-on orders, not a standing policy acting on their behalf.
+/**
+ * @param {Galaxy} galaxy
+ * @returns {void}
+ */
 export function runColonyPolicies(galaxy) {
   const policies = galaxy.colonyPolicies;
   if (!policies || !policies.size) return;
