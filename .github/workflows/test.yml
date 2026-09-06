@@ -4,6 +4,22 @@ on:
   push:
   pull_request:
 
+# Cancel a run that a newer push has already superseded — but ONLY on a branch that is not the
+# default one.
+#
+# The asymmetry is the point. On a feature branch, an in-flight run for a commit you have already
+# replaced is answering a question nobody is asking any more, and cancelling it frees the runner
+# for the commit you actually care about. On main it is the opposite: this project pushes directly
+# to main, several times a day, and a cancelled run leaves a commit on the permanent history with
+# no verdict — so a later bisect cannot say which of five commits turned the suite red, which is
+# exactly when you most want to know. Every commit on main gets its own answer.
+#
+# This is about runner queueing and feedback latency, not cost: Actions minutes are free and
+# unlimited for a public repository, so there is nothing here to save by skipping a main run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     runs-on: ubuntu-latest
