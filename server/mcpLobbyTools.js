@@ -27,6 +27,18 @@
    inside server/lobby.js's own publicMatch() — that file is a deliberate zero-import leaf (its
    own header), and importing net/agentApm.js into it would break that property for a field that
    isn't really part of a match record at all.
+
+   Bugfix: join_match's optional second constructor argument, `onSeatsFilled(match) =>
+   Promise<boolean>`, lets tools/serve.js — the only real caller — hook a successful join into its
+   own "does every seat now have someone, and if so start it" decision (mirroring the HTTP join
+   endpoint's own long-standing `seatsFilled(match) ? await startAndSpawnIfReady(match) : false`),
+   without this file ever needing to know what "started" even means. Before this, join_match never
+   started anything on its own — tolerable when a human host always held seat 0 and could click
+   Start, a genuine dead end once a match can exist with NO seat held by anyone able to click
+   anything (tools/serve.js's own hostJoins:false) — two agents' own join_match calls become the
+   ONLY thing that will ever fill those seats, so they have to be able to start it too. Optional and
+   defaulted to a no-op so every existing caller (this file's own tests included) that predates
+   this parameter keeps working unchanged.
    ============================================================ */
 
 "use strict";
@@ -35,8 +47,13 @@ import { publicMatch } from "./lobby.js";
 import { mintSeatHandle, withSeat, rejection } from "./mcpSeatHandle.js";
 import { AGENT_APM } from "../net/agentApm.js";
 
-/** @param {Object} lobby a createLobby() instance (server/lobby.js) */
-export function createLobbyTools(lobby) {
+/**
+ * @param {Object} lobby a createLobby() instance (server/lobby.js)
+ * @param {(match: Object) => Promise<boolean>} [onSeatsFilled] called after every successful join
+ *   (whether or not it happened to be the LAST open seat) — see this file's own header for why the
+ *   "is the match actually ready to start" decision lives in the caller, not here.
+ */
+export function createLobbyTools(lobby, onSeatsFilled) {
   return [
     {
       name: "list_matches",
@@ -54,7 +71,7 @@ export function createLobbyTools(lobby) {
     {
       name: "join_match",
       title: "Join a match",
-      description: "Joins an open seat in the named match, returning a seat_handle — pass this SAME string as the seat_handle argument to every later tool call made as this seat (leave_match, and every observation/action tool once they exist). If seat_index is omitted, the first still-open seat is claimed automatically.",
+      description: "Joins an open seat in the named match, returning a seat_handle — pass this SAME string as the seat_handle argument to every later tool call made as this seat (leave_match, and every observation/action tool once they exist). If seat_index is omitted, the first still-open seat is claimed automatically. If this join fills every seat in the match, it starts automatically — check the returned `started` flag rather than assuming a separate start step is still needed.",
       inputSchema: {
         type: "object",
         properties: {
@@ -63,7 +80,7 @@ export function createLobbyTools(lobby) {
         },
         required: ["match_id"],
       },
-      handler: ({ match_id, seat_index }) => {
+      handler: async ({ match_id, seat_index }) => {
         let seatIndex = seat_index;
         if (seatIndex === undefined) {
           const match = lobby.getMatch(match_id);
@@ -74,9 +91,10 @@ export function createLobbyTools(lobby) {
         const joined = lobby.joinMatch(match_id, seatIndex);
         if (!joined.ok) return rejection(joined.code);
         const seat_handle = mintSeatHandle(match_id, seatIndex, joined.token);
+        const started = onSeatsFilled ? await onSeatsFilled(lobby.getMatch(match_id)) : false;
         return {
-          content: [{ type: "text", text: `Joined match ${match_id} as seat ${seatIndex} (${joined.owner}). Keep this seat_handle for every later call.` }],
-          structuredContent: { seat_handle, match_id, seat_index: seatIndex, owner: joined.owner },
+          content: [{ type: "text", text: `Joined match ${match_id} as seat ${seatIndex} (${joined.owner}).${started ? " Every seat is now filled — the match has started." : " Keep this seat_handle for every later call."}` }],
+          structuredContent: { seat_handle, match_id, seat_index: seatIndex, owner: joined.owner, started },
         };
       },
     },

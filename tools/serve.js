@@ -250,7 +250,24 @@ export async function createAppServer() {
   const mcpServer = createMcpServer({
     serverInfo: { name: "SpaceCities", version: "1.1.0" },
     tools: [
-      ...createLobbyTools(lobby),
+      // Bugfix: join_match used to never start a match on its own (docs/agent-guide.md's own §2
+      // told an agent to expect this gap: "the host still has to start the match separately"),
+      // unlike the HTTP join endpoint below, which always has via FR-4's own "automatically when
+      // all seats are filled" clause — an asymmetry that was a tolerable inconvenience when a
+      // human host always held seat 0 and could just click Start, but became a genuine dead end
+      // once hostJoins:false (above) lets a match exist with NO seat holder able to start it at
+      // all: two agents' own join_match calls were the only way anything would ever fill those
+      // seats, so THEY have to be what starts it too. Passed by reference (hoisted function
+      // declarations, defined further down this same closure) — mirrors handleCreateMatch's and
+      // handleJoinMatch's own `seatsFilled(match) ? await startAndSpawnIfReady(match) : false`
+      // exactly, so join_match and the HTTP endpoints can never disagree about when a match is
+      // ready to start.
+      ...createLobbyTools(lobby, async match => {
+        if (!seatsFilled(match)) return false;
+        const startedNow = await startAndSpawnIfReady(match);
+        if (dataDir) writeLobbySnapshot(dataDir, lobby);
+        return startedNow;
+      }),
       ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
       ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null, matchId => liveMatches.get(matchId)?.apmGuard ?? null),
       ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
@@ -372,13 +389,27 @@ export async function createAppServer() {
       });
     } catch (err) { respondJson(res, 400, { error: "bad-config", message: err.message }); return; }
     // The host auto-claims seat 0 in the SAME request that creates the match — a stranger opening
-    // a shareable link should never find a match that exists but has nobody in it yet.
-    const joined = lobby.joinMatch(match.id, 0);
-    // Auto-starts ONLY when seat 1 needed no human to begin with (seatKinds:["open","ai"]) — an
-    // ordinary ["open","open"] host still waits, per FR-4, for a second join or their own /start.
+    // a shareable link should never find a match that exists but has nobody in it yet. Bugfix:
+    // opt-outable via hostJoins:false (default true, so every existing caller is byte-for-byte
+    // unaffected — the same "omitted preserves prior behavior" contract spectatorsEnabled already
+    // has) for a creator who wants to watch rather than play — e.g. two separate MCP agents each
+    // filling a real seat via join_match, with the creator only ever spectating. Without this, a
+    // host could never set up that match at all: creating it always consumed the ONE seat a second
+    // agent would otherwise need.
+    const hostJoins = body.hostJoins !== false;
+    const joined = hostJoins ? lobby.joinMatch(match.id, 0) : null;
+    // Auto-starts ONLY when every seat is already filled — an ordinary ["open","open"] host still
+    // waits, per FR-4, for a second join or their own /start; a hostJoins:false creation starts only
+    // once something else has claimed BOTH seats (e.g. two agents' own join_match calls).
     const started = seatsFilled(match) ? await startAndSpawnIfReady(match) : false;
     if (dataDir) writeLobbySnapshot(dataDir, lobby);
-    respondJson(res, 201, { matchId: match.id, seatIndex: 0, owner: joined.owner, token: joined.token, started });
+    respondJson(res, 201, {
+      matchId: match.id,
+      seatIndex: joined ? 0 : null,
+      owner: joined ? joined.owner : null,
+      token: joined ? joined.token : null,
+      started,
+    });
   }
 
   function handleListMatches(req, res) {

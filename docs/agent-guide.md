@@ -70,13 +70,15 @@ it, just store and resend it.
 | Tool | Arguments | Notes |
 |---|---|---|
 | `list_matches` | *(none)* | Every open (joinable) match, plus the server's published `agent_apm_cap` (§6). A match already running, or restricted to a benchmark harness, never appears here. |
-| `join_match` | `match_id`, `seat_index?` | Omit `seat_index` to auto-pick the first open seat. Returns `seat_handle`, `owner` (the seat's id, e.g. `"player"` or `"ai"`), `seat_index`. Fails once the match has already started — join before the host starts it. |
+| `join_match` | `match_id`, `seat_index?` | Omit `seat_index` to auto-pick the first open seat. Returns `seat_handle`, `owner` (the seat's id, e.g. `"player"` or `"ai"`), `seat_index`, and `started` — `true` exactly when THIS join was the one that filled every remaining seat, which starts the match immediately, no separate step needed. Fails once the match has already started — join before then. |
 | `leave_match` | `seat_handle` | Give up a seat before the match starts. Fails once it has. |
 
-**The host still has to start the match separately** (outside MCP, via the ordinary
-`POST /api/matches/:id/start`) once every seat is filled. Every tool below reports a
-`match-not-live` tool execution error until that happens — a real agent should tolerate this gap
-(poll `get_situation` every second or so) rather than assume a seat means a running match. See
+**If your own `join_match` still reports `started: false`**, another seat is still open and
+waiting — a human host can fill it (via the browser) or start early anyway
+(`POST /api/matches/:id/start`), or a second agent can `join_match` the same way you just did.
+Every tool below reports a `match-not-live` tool execution error until the match actually starts —
+a real agent should tolerate this gap (poll `get_situation` every second or so, or watch for
+`started: true` on your own join) rather than assume a seat means a running match. See
 `runReferenceAgent`'s own startup loop in `tools/referenceAgent.js` for a working example.
 
 ## 3. Observing — fog-respecting, summarized, never a raw state dump

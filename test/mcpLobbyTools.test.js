@@ -133,6 +133,57 @@ test("join_match reports a clear tool execution error when every seat is already
   assert.match(body.result.content[0].text, /no-open-seat/);
 });
 
+/* ============================================================
+   Bugfix: join_match used to never start a match on its own — docs/agent-guide.md's own §2 told an
+   agent to expect this ("the host still has to start the match separately"). Tolerable when a
+   human host always held seat 0 and could click Start, a genuine dead end once a match can exist
+   with NO seat held by anyone (tools/serve.js's own hostJoins:false, reported live by a user
+   trying to seat two independent MCP agents with themselves only spectating) — two agents' own
+   join_match calls become the ONLY thing that will ever fill those seats, so they have to be able
+   to start it too. onSeatsFilled (createLobbyTools's new optional 2nd argument) is how
+   tools/serve.js hooks this in for real; these tests use a fake callback, exactly this file's own
+   established style for every dependency lobby tools don't own themselves.
+   ============================================================ */
+
+test("createLobbyTools without a second argument still works exactly as before — onSeatsFilled is optional, every pre-existing caller unaffected", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const mcp = mcpFor(lobby);   // mcpFor's own helper calls createLobbyTools(lobby) with no 2nd arg
+
+  const { body } = await callTool(mcp, "join_match", { match_id: match.id });
+  assert.equal(body.result.isError, undefined);
+  assert.equal(body.result.structuredContent.started, false, "no callback provided — must default to false, never throw for a missing one");
+});
+
+test("bugfix: join_match calls onSeatsFilled after every successful join, and reports its own `started` result", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seenMatches = [];
+  const mcp = createMcpServer({
+    tools: createLobbyTools(lobby, async m => { seenMatches.push(m.id); return false; }),
+  });
+
+  const { body } = await callTool(mcp, "join_match", { match_id: match.id });
+  assert.equal(body.result.structuredContent.started, false, "the callback's own return value is reported verbatim");
+  assert.deepEqual(seenMatches, [match.id], "called exactly once, with the match this join actually happened in");
+});
+
+test("bugfix: when onSeatsFilled reports true (the join that filled the last seat), join_match reports started:true — proving the exact scenario a hostJoins:false match needs: two agents, no host, and nothing else that could ever start it", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const mcp = createMcpServer({
+    // A real caller's own callback checks seatsFilled itself (tools/serve.js) — this fake mirrors
+    // that exact shape rather than hardcoding true, so it only fires once BOTH seats are real.
+    tools: createLobbyTools(lobby, async m => m.seats.every(s => s.owner)),
+  });
+
+  const first = await callTool(mcp, "join_match", { match_id: match.id });
+  assert.equal(first.body.result.structuredContent.started, false, "one seat filled, one still open");
+
+  const second = await callTool(mcp, "join_match", { match_id: match.id });
+  assert.equal(second.body.result.structuredContent.started, true, "the LAST open seat filling must report started:true — no human host exists to call /start in this scenario");
+});
+
 test("leave_match: a real join followed by leave_match frees the seat, and the OLD handle no longer works for anything", async () => {
   const lobby = createLobby();
   const match = lobby.createMatch({ seatKinds: ["open", "open"] });
