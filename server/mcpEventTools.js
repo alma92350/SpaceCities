@@ -45,7 +45,9 @@ export function createEventTools(lobby, getCache) {
       description:
         `Blocks until something new becomes visible to the calling seat (combat, a kill, a completed build, ` +
         `research finishing, and the like) or ${DEFAULT_TIMEOUT_MS}ms passes, whichever comes first — call this ` +
-        `in a loop instead of polling get_situation/list_entities. A timeout is reported as a normal result ` +
+        `in a loop instead of polling get_situation/list_entities. Events that fired while NO call was in ` +
+        `flight are buffered and delivered by the NEXT call immediately, so nothing is lost between polls. ` +
+        `A timeout is reported as a normal result ` +
         `(timed_out:true, no events), never an error; just call it again. Optionally request a shorter ` +
         `timeout_ms for tighter polling — requests above ${MAX_TIMEOUT_MS}ms are capped.`,
       inputSchema: {

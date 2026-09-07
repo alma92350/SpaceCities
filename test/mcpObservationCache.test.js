@@ -111,9 +111,90 @@ test("an event already present at call time never causes an immediate resolve �
 
   // The exact same event, re-sent unchanged (as a real tick push naturally would while nothing
   // new has happened) — must NOT resolve early just because a "state" message arrived at all.
+  // (Still true with the undelivered buffer below: an event the latest proj still carries is
+  // baseline, not a lost event.)
   const result = await cache.waitForEvent("player", 80).then(r => r, () => { throw new Error("must not reject"); });
   worker.emit("message", { type: "state", seat: "player", proj: { tick: 2, events: [{ type: "unitSpawned", x: 1, y: 1 }] } });
   assert.equal(result.timedOut, true);
+});
+
+// Post-T-054 gap, observed in real agent play: events firing while NO wait_for_event call is in
+// flight used to be lost forever (the worker drains state.events every tick and nothing kept
+// them) — three recorded match losses happened exactly this way. The buffer delivers them on the
+// NEXT call — but only the ones the latest projection no longer carries: an event still visible
+// in the latest proj is baseline (the fog-scroll contract), while one that already scrolled out
+// happened and is gone, and no future push will ever carry it again.
+test("events that fired while NO waiter was in flight are delivered by the NEXT waitForEvent, not lost", async () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  worker.emit("message", {
+    type: "state", seat: "player",
+    proj: { tick: 7, events: [{ type: "entityKilled", id: "u8", owner: "ai" }, { type: "attackHit", x: 5, y: 5 }] },
+  });
+  // Later ticks move the latest proj on (as real 20Hz pushes always do) — the events are now
+  // nowhere the agent can see, which is exactly what made them lost before.
+  worker.emit("message", { type: "state", seat: "player", proj: { tick: 8, events: [] } });
+
+  const result = await cache.waitForEvent("player", 2000);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.tick, 7);
+  assert.deepEqual(result.events, [{ type: "entityKilled", id: "u8", owner: "ai" }, { type: "attackHit", x: 5, y: 5 }]);
+});
+
+test("buffered events are delivered exactly ONCE — the next call waits again instead of re-delivering", async () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  worker.emit("message", { type: "state", seat: "player", proj: { tick: 7, events: [{ type: "attackHit", x: 5, y: 5 }] } });
+  worker.emit("message", { type: "state", seat: "player", proj: { tick: 8, events: [] } });
+
+  const first = await cache.waitForEvent("player", 2000);
+  assert.equal(first.timedOut, false);
+
+  const second = await cache.waitForEvent("player", 50);
+  assert.equal(second.timedOut, true);
+  assert.deepEqual(second.events, []);
+});
+
+test("an event the latest proj STILL carries is baseline even though no waiter was registered when it fired", async () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  worker.emit("message", { type: "state", seat: "player", proj: { tick: 7, events: [{ type: "attackHit", x: 5, y: 5 }] } });
+
+  // No later push — the event is still inside the latest proj, so it is baseline, not lost.
+  const result = await cache.waitForEvent("player", 50);
+  assert.equal(result.timedOut, true);
+  assert.deepEqual(result.events, []);
+});
+
+test("events delivered to a registered waiter are NOT also buffered for the next call", async () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  worker.emit("message", { type: "state", seat: "player", proj: { tick: 1, events: [] } });
+
+  const pending = cache.waitForEvent("player", 2000);
+  worker.emit("message", { type: "state", seat: "player", proj: { tick: 2, events: [{ type: "attackHit", x: 1, y: 1 }] } });
+  const result = await pending;
+  assert.equal(result.timedOut, false);
+
+  const next = await cache.waitForEvent("player", 50);
+  assert.equal(next.timedOut, true);
+});
+
+test("the undelivered buffer is bounded — a flood of events between polls delivers the newest, drops the oldest", async () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  // 300 distinct events across pushes with no waiter registered; cap is 256 pushes. The last
+  // push's own event is baseline (still in the latest proj), so 255 deliver.
+  for (let tick = 1; tick <= 300; tick++) {
+    worker.emit("message", { type: "state", seat: "player", proj: { tick, events: [{ type: "attackHit", seq: tick }] } });
+  }
+
+  const result = await cache.waitForEvent("player", 2000);
+  assert.equal(result.timedOut, false);
+  assert.equal(result.events.length, 255);
+  assert.equal(result.events[0].seq, 45);          // oldest survivor
+  assert.equal(result.events[254].seq, 299);       // newest NOT still in the latest proj
+  assert.equal(result.tick, 299);
 });
 
 test("an event that scrolls out of fog and back in UNCHANGED is not reported twice — the baseline stays fixed for the whole wait, not the immediately-prior tick", async () => {
