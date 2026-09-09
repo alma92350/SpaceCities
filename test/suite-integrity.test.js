@@ -38,6 +38,26 @@ test("npm test discovers its files explicitly, not by implicit globbing", () => 
     `package.json's test script should name the test files explicitly, got: ${pkg.scripts.test}`);
 });
 
+test("every test/slow/ file is still run by SOMETHING — the tier is a schedule, not an exemption", () => {
+  // test/ailab.test.js was 196s of a 216s suite: 91% of the wall clock for 3.4% of the tests, which
+  // is how a suite stops being run before every commit. Moving it to test/slow/ makes `npm test` a
+  // ~20s pre-commit tool again. The DANGER is that the same move is indistinguishable from deleting
+  // a guard — this file's own header calls that out ("CI stays green with a smaller test count
+  // nobody reads"). So the tier only holds if the slow files stay wired to a script AND that script
+  // stays wired to CI. Both are asserted here, by reading the real package.json and workflow rather
+  // than trusting the convention.
+  const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+  const slowDir = join(root, "test", "slow");
+  const slowFiles = existsSync(slowDir) ? walkJs(slowDir).filter(f => f.endsWith(".test.js")) : [];
+  if (slowFiles.length === 0) return;   // the tier is empty — nothing to keep honest
+
+  assert.match(pkg.scripts["test:slow"] ?? "", /(^|\s)test\/slow\//,
+    "test/slow/ has files but package.json has no test:slow script naming them");
+  const workflow = readFileSync(join(root, ".github", "workflows", "test.yml"), "utf8");
+  assert.match(workflow, /npm run test:(slow|all)/,
+    "test/slow/ files run in no CI job — a slow tier nobody runs is a deleted guard with extra steps");
+});
+
 test("the DOM test double lives in exactly one place", () => {
   // Eight test files each grew their own `class FakeElement extends EventTarget`, and the parts
   // that differed between them were not considered differences — they were whichever subset of

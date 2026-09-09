@@ -28,13 +28,13 @@ import {
   runDuel, runRoundRobin, pinnedDuelDials, runSwappedDuel, runDuelBrackets, runRoundRobinSwapped, runSearch,
   runSwissTournament, pairRound, rankStandings, buildSwissBracket, snapshotTables, restoreTables,
   runEvolution, runArchive, ARCHIVE_DIMS, binOf,
-} from "../tools/ailab.js";
-import { toCandidate } from "../tools/genome.js";
-import { STRATEGIES } from "../engine/aiStrategy.js";
-import { ARCHETYPES } from "../engine/aiArchetypes.js";
-import { DIFFICULTY_OPTIONS } from "../engine/aiDifficulty.js";
-import { tick } from "../engine/sim.js";
-import { hashStr } from "../engine/rng.js";
+} from "../../tools/ailab.js";
+import { toCandidate } from "../../tools/genome.js";
+import { STRATEGIES } from "../../engine/aiStrategy.js";
+import { ARCHETYPES } from "../../engine/aiArchetypes.js";
+import { DIFFICULTY_OPTIONS } from "../../engine/aiDifficulty.js";
+import { tick } from "../../engine/sim.js";
+import { hashStr } from "../../engine/rng.js";
 
 const short = extra => ({ world: "ferros", strategy: "default", difficulty: "medium",
                           opponent: "passive", minutes: 4, sample: 2, seed: 7, ...extra });

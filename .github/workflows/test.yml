@@ -12,7 +12,9 @@ jobs:
       matrix:
         # The game targets Node >=20 (see package.json engines); run the suite on
         # the current LTS lines so a version-specific regression can't slip through.
-        node-version: [20, 22]
+        # 24 is here because contributors already develop on it: a suite that is green in CI
+        # but red on the machine writing the code teaches people to stop trusting CI.
+        node-version: [20, 22, 24]
     name: tests (node ${{ matrix.node-version }})
     steps:
       - uses: actions/checkout@v5
@@ -40,6 +42,29 @@ jobs:
       # deliberately, in its own commit, so a compiler upgrade is reviewable on its own.
       - name: Type-check the annotated files
         run: npx --yes --package typescript@5.7.2 -- tsc -p jsconfig.json
+
+  # test/slow/ — files whose wall clock makes them unusable as a pre-commit tool. Today that is
+  # test/ailab.test.js alone: 196s of what was a 216s suite, 91% of the wall clock for 3.4% of the
+  # tests, which is how a suite stops being run before every commit at all. `npm test` is now ~20s
+  # and stays that way; these still run on every push, just not in anyone's edit loop.
+  #
+  # A SEPARATE JOB, not a step in the matrix above, for two reasons: it runs concurrently so it costs
+  # no added latency on the critical path, and running the same AI bench on three Node versions would
+  # spend nine minutes to learn one thing. Node 22 because these guard a dev tool, not the shipped
+  # game's version compatibility.
+  #
+  # test/suite-integrity.test.js asserts this job exists. A slow tier nobody runs is a deleted guard
+  # with extra steps, and that failure mode is invisible — it looks exactly like a faster suite.
+  slow:
+    runs-on: ubuntu-latest
+    name: slow tests (AI bench)
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+      - name: Run the slow test tier
+        run: npm run test:slow
 
   # The suite above is headless and dependency-free, which is the whole point of it — and it means
   # nothing in it can see a page that parses, imports cleanly, and then throws on load. With no

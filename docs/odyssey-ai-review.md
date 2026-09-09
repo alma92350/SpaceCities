@@ -114,7 +114,7 @@ metric, because the tuning loop optimises against it.
 
 §2.12 turns that recurring lesson into a rule with a test behind it: a detector must pair its
 symptom with a **non-resolution term**, and must not carry an absolute threshold calibrated
-against one size of economy. `test/ailab.test.js` asserts the whole list stays silent on a healthy
+against one size of economy. `test/slow/ailab.test.js` asserts the whole list stays silent on a healthy
 curve scaled from 1× to 100×.
 
 ### 2.1 Half the galaxy's neighbours can never attack you
@@ -415,7 +415,7 @@ node tools/ailab.js probe --world ferros --opponent skirmisher --minutes 40 --sa
 **Update, 2026-07-31 — the bar moved, unintentionally.** The "Doctrine research develops over
 time" change (`docs/improvement-proposals.md`) is unrelated to this section by design — it's a T1
 telegraphing/pacing fix, not an AI-survivability change — but `git bisect` on a freshly-red
-`test/ailab.test.js` traced a real regression to it (commit `4b95948`): on
+`test/slow/ailab.test.js` traced a real regression to it (commit `4b95948`): on
 `ferros/economic/skirmisher/seed=7`, the AI now loses every worker and building before it ever
 fields a single combat unit, where before it still lost — per this section's own table — but got a
 worker and an army unit out first. Isolating the cause (research-time duration, `aiResearch`
@@ -423,7 +423,7 @@ disabled outright, gating on `ctx.threats`) each changed the trajectory without 
 outcome, so this reads as the already-described fragility interacting with the new economy
 pressure of a paid-up-front, no-longer-instant Refinery purchase, not a one-line bug in the new
 feature itself. Left as-is per this section's own verdict (a difficulty-curve call, not a defect-fix
-one) — `test/ailab.test.js` now asserts on `buildings`, not `army`, so it once again documents
+one) — `test/slow/ailab.test.js` now asserts on `buildings`, not `army`, so it once again documents
 reality instead of drifting red. Repro: `node tools/ailab.js probe --world ferros --strategy
 economic --opponent skirmisher --minutes 25 --sample 2 --seed 7` against commit `4b95948`'s parent
 vs. itself.
@@ -630,7 +630,7 @@ plateau case §2.3's ledger already describes) and `dev-flatline` 5/44. Nothing 
 
 **Both rewritten detectors are silent on the whole roster, and that is worth stating plainly**
 rather than presenting as a clean sweep. They are regression guards now, not live findings. What
-keeps them honest is that their liveness is asserted directly: `test/ailab.test.js` builds a
+keeps them honest is that their liveness is asserted directly: `test/slow/ailab.test.js` builds a
 genuinely stuck curve for each and requires it to fire, at 1× and 20× scale, so "detects nothing"
 can never quietly become "detects nothing, ever".
 
@@ -712,7 +712,7 @@ printed because a total nobody can decompose is a number nobody should trust.
 (`supply-deadlock`, `hoarding`, `dev-flatline`, `hostile-but-idle`, `production-stall`) so it
 is a reproducible list that shrinks as the AI improves, rather than a paragraph that rots.
 
-`test/ailab.test.js` guards the bench itself: that runs are deterministic (or a "+0.04
+`test/slow/ailab.test.js` guards the bench itself: that runs are deterministic (or a "+0.04
 improvement" is indistinguishable from noise) and that the override seam actually reaches the
 sim (or every search measures the baseline against itself).
 
@@ -760,7 +760,7 @@ optimizing for is beating another strategy, not a scripted bot.
 
 Candidate files are identical in shape to `leaderboard`'s. All of it lives in `tools/ailab.js` and
 `tools/selfplay.js`; see `test/ai-selfplay.test.js` and the duel/swiss tests in
-`test/ailab.test.js` for the fairness guarantees pinned as tests, not just comments.
+`test/slow/ailab.test.js` for the fairness guarantees pinned as tests, not just comments.
 
 ### 3.3 The loop to run with Claude Code
 
@@ -846,7 +846,7 @@ re-run.
 | 2026-08-05 | the `supply-deadlock` regression §2.11 handed back is the DETECTOR, not the AI — and the same flaw should be visible in the other detectors' history | sort all five by the shape of the predicate | **Confirmed, and it explains every rewrite this table records.** The two written as a pure instantaneous fraction (`supply-deadlock`, `production-stall`) are exactly the two that have ever needed rescuing; the three carrying a growth/non-resolution term (`dev-flatline`, `hoarding`, and `hostile-but-idle` since its entitlement gate) have survived two separate scale-ups of the AI untouched | n/a — this is §2.12's diagnosis |
 | 2026-08-05 | pair each broken detector's symptom with a non-resolution term, and replace the absolute ore gates with "could it afford the purchase that would have resolved this?" | `supply-deadlock` += `supplyCapGrowthTail <= 0`; `production-stall` += `armyGrowthTail <= 0`; `banked > 400`/`banked > 1000` → `canAffordUnblock`/`canAffordNext` (new `sample()` fields) | Re-baselined properly (a `git worktree` at `7890096` with today's bench copied in, so BOTH columns use one build). Full 2×2 in §2.12. The three untouched detectors reproduce **exactly** across the metric change (2, 10, 4) — the procedure validating itself. `supply-deadlock` is **0/44 on both engines** under the new predicate, so §2.11's 1→6 was entirely the metric. Suite 2056→2061 | **yes** |
 | 2026-08-05 | …and the incidental finding, which is the biggest one: `production-stall` 18/44 was never real | — | **`production-stall` is 0/44 on the PRE-FIX engine under the new predicate.** That row has sat in this document since 2026-07-30, was attacked twice (parallel Habitats; then written off as "the Rusher doing what it is designed to do"), and every one of those 18 runs had a growing army in the last third. The AI was never stalled — the detector was counting a Barracks caught between jobs. Two paragraphs of §2 that explained the residue are now marked superseded rather than left standing (the Rusher's "six workers" is nine since §2.11, on top of it) | **yes** |
-| 2026-08-05 | a property test can stop a fourth round of this, where three rounds of human scoreboard-reading did not | `test/ailab.test.js`: a synthetic HEALTHY curve, every magnitude scaled 1×/5×/20×/100×, must fire NO detector — plus its converse, that a genuinely stuck curve still fires the right one at 1× and 20× | Verified adversarially rather than assumed: run against the OLD predicates the invariance test fails immediately (`supply-deadlock` fires on the healthy curve even at 1×, blocked 0.33 while the ceiling climbed +72), which is what makes it a real guard rather than one that happens to pass. Both halves needed — invariance alone is satisfiable by a detector that never fires | **yes** |
+| 2026-08-05 | a property test can stop a fourth round of this, where three rounds of human scoreboard-reading did not | `test/slow/ailab.test.js`: a synthetic HEALTHY curve, every magnitude scaled 1×/5×/20×/100×, must fire NO detector — plus its converse, that a genuinely stuck curve still fires the right one at 1× and 20× | Verified adversarially rather than assumed: run against the OLD predicates the invariance test fails immediately (`supply-deadlock` fires on the healthy curve even at 1×, blocked 0.33 while the ceiling climbed +72), which is what makes it a real guard rather than one that happens to pass. Both halves needed — invariance alone is satisfiable by a detector that never fires | **yes** |
 | 2026-08-05 | (noted, not built) `production-stall`'s new "the army never grew" term would be satisfied by an AI legitimately pinned at a configured Population cap | — | The bench never sets `popCap`, so it cannot arise in `check` today. Recorded in §2.12 as a known boundary rather than discovered later: a future sweep that sets one should exclude those samples the way `armyCapped` already excludes a self-capping strategy | — |
 | 2026-08-06 | the three AI dial tables are already a genome — plain data read through `\|\| 1` accessors, so any mutation is a runnable AI rather than a crash — and a population with mutation plus module-wise crossover can search regions a coordinate scan structurally cannot (a valley where two dials must move *together*, which is exactly the shape of this ledger's own 2026-08-04 "Aggressive needs Economic's `workerTargetMult`" result) | `tools/genome.js` (GENOME_SCHEMA: 28 genes over 2 chromosomes and 6 linkage groups, one operator per gene KIND) + `ailab evolve` (Swiss-scheduled duel-Elo fitness, the four shipped baselines as a fixed rating anchor, per-bracket `min` aggregation). Two pre-existing bench bugs fixed to make it measurable: `runDuel` never forwarded a candidate's own archetype to `runDuelMatch` (so every CLI duel gave BOTH seats the world's temperament and silently ignored the candidate files), and `duelSeed` hashes the candidate names (so generated per-individual names drew their own map set each generation) — now an optional `seedKey`, byte-identical when omitted | Suite 2401 → 2433, zero regressions. **Zero files under `engine/` changed** (`git diff --name-only` against the merge base: only `tools/`, `test/`, `docs/`), so `check` is unchanged by construction — confirmed anyway rather than assumed: mean **0.714** over 44 runs, `supply-deadlock`/`hostile-but-idle`/`production-stall` all clean, `hoarding` 2/44 at exactly the `korrath/matching` + `oort/matching` residual the 2026-08-01 row already records, `dev-flatline` 5/44. The defect list did not grow | **yes (tooling)** |
 | 2026-08-06 | a 12 × 6 GA on the strategy chromosome finds something the four hand-tuned strategies don't have | 12 genomes × 6 generations, korrath/ferros/vesper, Medium+Hard, 1 seed, 30-min matches (3 h 21 m wall clock) | **Champion is generation 3's `g3i0`; generations 4–6 never beat it.** Stripped of inert genes it is three dials — `neverInitiates: true`, `workerTargetMult: 2` (the schema CEILING, a binding bound), `turretCountMult: 1.05` — with no standing-army cap at all: *max economy, uncapped army, never attack*. Eight of the eleven dials it emits are junk DNA (`attackTimeoutMult`/`armyAttackSizeMult`/`garrisonMult` dead under `neverInitiates` per `aiMilitary.js`'s `readyToAttack` gate; `warFooting*` dead without a `standingArmyCap`; `matchBuffer`/`matchFloor` dead without `matchEnemyForce`) | candidate only — see the two rows below |

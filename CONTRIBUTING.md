@@ -10,8 +10,16 @@ change that breaks one fails `npm test` rather than shipping.
 ```
 node --version      # must be >= 20
 npm start           # serve the game at http://localhost:8080  (zero-dep static server)
-npm test            # run the full suite (node --test)
+npm test            # the pre-commit suite: ~27s, 3173 tests (node --test)
+npm run test:slow   # the slow tier — test/slow/, ~200s, AI-bench guards only
+npm run test:all    # both, i.e. what CI covers between its two jobs
 ```
+
+`npm test` is the one you run in your edit loop, so it is kept fast enough to actually run.
+`test/slow/` holds files whose wall clock would otherwise stop that happening — today just
+`test/slow/ailab.test.js`, which was 91% of the old suite's runtime for 3.4% of its tests. The tier
+is a *schedule*, not an exemption: CI runs it on every push, and `test/suite-integrity.test.js`
+fails if a slow file is ever left wired to no script or no CI job.
 
 There is nothing to install — no `npm install`, no bundler, no transpiler.
 
