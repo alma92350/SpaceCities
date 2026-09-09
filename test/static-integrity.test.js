@@ -280,8 +280,11 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // from any browser-side import chain).
     "net/agentApm.js",
   ]);
+  // Separator normalized to "/" so these compare against the EXEMPT literals above: node:path
+  // yields "server\mcpResources.js" on Windows, which matches none of them, so every exempted
+  // module reported as an orphan and this guard failed for a reason unrelated to what it checks.
   const orphans = browserJs()
-    .map(f => relative(root, f))
+    .map(f => relative(root, f).split(sep).join("/"))
     .filter(f => !EXEMPT.has(f) && !reached.has(join(root, f)));
   assert.deepEqual(orphans, [],
     "shipped module(s) no import chain reaches from index.html — their code never runs in the browser:\n" +
