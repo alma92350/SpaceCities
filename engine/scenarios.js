@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    Scenario / mission mode — a real-time layer over the skirmish engine that
    swaps the "raze the enemy Command Center" objective for a scripted mission.
@@ -84,6 +85,10 @@ export const BOUNTY_DIFFICULTY = {
 // Build a Convoy Escort game state on `planetId`. Reuses createGameState for the
 // map / fog / players scaffold, then strips the skirmish seeding (no CCs, no
 // economy) and lays out the route, the freighters, and the player's escort.
+/**
+ * @param {{planetId?: string, seed?: number, difficulty?: string, sizeMult?: number}} [opts]
+ * @returns {State} a mission-mode state — `scenario` set, no buildings, no economy
+ */
 export function setupEscort({ planetId = "ferros", seed = 1, difficulty = "medium", sizeMult = 1 } = {}) {
   const diff = ESCORT_DIFFICULTY[difficulty] || ESCORT_DIFFICULTY.medium;
   const state = createGameState({ planetId, seed, rng: mulberry32(seed >>> 0), sizeMult });
@@ -146,6 +151,11 @@ export function setupEscort({ planetId = "ferros", seed = 1, difficulty = "mediu
 // Dispatch the live scenario to its own updater. Both drive the *non-player*
 // side of the convoy and settle the objective themselves; combat/movement/fog
 // are the shared skirmish sim.
+/**
+ * @param {State} state
+ * @param {number} dt seconds since the last tick
+ * @returns {void}
+ */
 export function updateScenario(state, dt) {
   const sc = state.scenario;
   if (!sc || sc.outcome) return;
@@ -323,6 +333,10 @@ function steerPirates(state, freighters, dt) {
 // Build a Pirate Raider game state on `planetId`. Same route scaffold as Escort,
 // but the convoy is the enemy and the player starts with a raider fleet lying in
 // wait off the convoy lane near mid-route.
+/**
+ * @param {{planetId?: string, seed?: number, difficulty?: string, sizeMult?: number}} [opts]
+ * @returns {State}
+ */
 export function setupRaider({ planetId = "ferros", seed = 1, difficulty = "medium", sizeMult = 1 } = {}) {
   const diff = RAIDER_DIFFICULTY[difficulty] || RAIDER_DIFFICULTY.medium;
   const state = createGameState({ planetId, seed, rng: mulberry32(seed >>> 0), sizeMult });
@@ -508,6 +522,10 @@ function computeRaiderScore(state, sc) {
 
 // Build a Bounty Marshal game state on `planetId`. The posse musters at the
 // centre of the map; pirate camps are scattered around it, each with a bounty.
+/**
+ * @param {{planetId?: string, seed?: number, difficulty?: string, sizeMult?: number}} [opts]
+ * @returns {State}
+ */
 export function setupBounty({ planetId = "ferros", seed = 1, difficulty = "medium", sizeMult = 1 } = {}) {
   const diff = BOUNTY_DIFFICULTY[difficulty] || BOUNTY_DIFFICULTY.medium;
   const state = createGameState({ planetId, seed, rng: mulberry32(seed >>> 0), sizeMult });
@@ -656,6 +674,10 @@ function computeBountyScore(state, sc) {
 /* ---------- player actions (wired to the HUD) ---------- */
 
 // Credits to fully repair every surviving player ship right now.
+/**
+ * @param {State} state
+ * @returns {number} credits, rounded up; 0 when nothing is damaged
+ */
 export function repairCost(state) {
   let missing = 0;
   for (const u of playerShips(state)) missing += Math.max(0, u.maxHp - u.hp);
@@ -663,6 +685,11 @@ export function repairCost(state) {
 }
 
 // Repair the whole convoy + escort to full, once per stop, if the budget covers it.
+/**
+ * @param {State} state
+ * @returns {boolean} true if a repair actually happened — false when not docked, already
+ *   repaired at this stop, nothing damaged, or the budget won't cover it
+ */
 export function repairConvoy(state) {
   const sc = state.scenario;
   if (!sc || sc.phase !== "docked" || sc.repairedThisStop) return false;
@@ -675,6 +702,10 @@ export function repairConvoy(state) {
 }
 
 // Skip the rest of the dock timer and set off on the next leg.
+/**
+ * @param {State} state
+ * @returns {void} a no-op unless the convoy is actually docked
+ */
 export function departNow(state) {
   const sc = state.scenario;
   if (sc && sc.phase === "docked") sc.phaseTimer = 0;

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { setupEscort, setupRaider, setupBounty, ESCORT_DIFFICULTY, RAIDER_DIFFICULTY, BOUNTY_DIFFICULTY, repairCost, repairConvoy } from "../engine/scenarios.js";
+import { setupEscort, setupRaider, setupBounty, ESCORT_DIFFICULTY, RAIDER_DIFFICULTY, BOUNTY_DIFFICULTY, repairCost, repairConvoy, departNow } from "../engine/scenarios.js";
 import { tick } from "../engine/sim.js";
 import { UNITS } from "../engine/entities.js";
 
@@ -158,6 +158,45 @@ test("losing every raider ends the raid in defeat", () => {
   tick(s, 0.1);
   assert.equal(s.scenario.outcome, "loss", "no raiders left = a lost raid");
   assert.match(s.scenario.banner, /wiped out/);
+});
+
+test("a raid that runs out the clock is a loss, even with raiders still alive and kills on the board", () => {
+  // The raider mission's TIMEOUT branch. Its two sibling loss paths (every raider dead; the whole
+  // convoy delivered) were both covered and this one was not, which is the easiest of the three to
+  // break silently: a raid that stalls just short of quota has live ships and real progress, so
+  // anything that fails to end it leaves the mission running forever rather than visibly wrong.
+  const s = setupRaider({ planetId: "ferros", seed: 8, difficulty: "easy" });
+  // Sink ONE freighter, then stop — real progress, deliberately short of targetKills.
+  const first = convoy(s).sort((a, b) => (a.id < b.id ? -1 : 1))[0];
+  s.units.delete(first.id);
+  s.scenario.destroyed = 1;
+  assert.ok(s.scenario.targetKills > 1, "fixture sanity: the quota must need more than the one kill above");
+  s.scenario.timeLimit = s.time + 0.5;   // the clock is about to expire, nothing else has resolved
+
+  runToEnd(s, 200);
+  assert.equal(s.over, true, "an expired clock must actually end the mission");
+  assert.equal(s.scenario.outcome, "loss", "short of quota when time runs out is a loss");
+  assert.ok(raiders(s).length > 0, "this is the timeout path, not the wiped-out path");
+  assert.match(s.scenario.banner, /Out of time/);
+});
+
+test("departNow skips the remaining dock timer, and is a no-op in every other phase", () => {
+  // departNow is the UI's "set off early" button. Both halves matter: it has to actually cut the
+  // wait (or the button lies), and it must not fire mid-leg (or a convoy teleports out of a phase
+  // its own logic assumes it is in). Nothing exercised it at all.
+  const s = setupEscort({ planetId: "ferros", seed: 7, difficulty: "medium" });
+  s.scenario.phase = "docked";
+  s.scenario.phaseTimer = 25;
+  departNow(s);
+  assert.equal(s.scenario.phaseTimer, 0, "docked: the remaining wait is cleared");
+
+  s.scenario.phase = "travel";
+  s.scenario.phaseTimer = 25;
+  departNow(s);
+  assert.equal(s.scenario.phaseTimer, 25, "not docked: the timer must be left completely alone");
+
+  // And with no scenario at all (a plain skirmish state) it must not throw.
+  assert.doesNotThrow(() => departNow({ scenario: null }));
 });
 
 /* ---------- Bounty Marshal ---------- */

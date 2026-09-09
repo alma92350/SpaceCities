@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    The Odyssey galaxy — the open-world meta-layer over the per-planet sim. A
    galaxy holds one engine game state per planet (each a normal createGameState);
@@ -72,6 +73,12 @@ export const BACKGROUND_WORLDS = 3;
 // each world's roster index and every galaxy-wide scan walks `galaxy.worlds`, so keeping the
 // creation order roster-ordered leaves those paths reading exactly as they did when every world
 // was instantiated.
+/**
+ * @param {number} seed
+ * @param {string} startId the world to exclude — the player's own seat
+ * @param {number} [count]
+ * @returns {string[]} `count` distinct world ids, in roster order
+ */
 export function backgroundWorldIds(seed, startId, count = BACKGROUND_WORLDS) {
   const pool = ODYSSEY_WORLDS.filter(id => id !== startId);
   const n = Math.max(0, Math.min(count | 0, pool.length));
@@ -94,6 +101,11 @@ export function backgroundWorldIds(seed, startId, count = BACKGROUND_WORLDS) {
 // world: exploring is how you learn a neighbour's temperament, not a settings screen.
 // aiApm/aiMicro are read off the SAME resolved difficulty entry, never left mismatched with a
 // different world's dials (addPlanet threads all four through together).
+/**
+ * @param {number} seed
+ * @param {string} planetId
+ * @returns {{difficulty: string, aiApm: number, aiMicro: boolean, aiStrategy: string}}
+ */
 export function neighbourAiProfile(seed, planetId) {
   const pick = mulberry32(planetSeed(seed, planetId + ":neighbourProfile"));
   const diffOpt = DIFFICULTY_OPTIONS[Math.floor(pick() * DIFFICULTY_OPTIONS.length)];
@@ -105,6 +117,12 @@ export function neighbourAiProfile(seed, planetId) {
 // Create an Odyssey galaxy. Phase 1: a single active planet (the player's
 // randomly-chosen — or explicitly PICKED — starting world) plus the meta-fields
 // (credits, activeId, the world roster) the later phases grow into.
+/**
+ * @param {{seed?: number, difficulty?: string, sizeMult?: number, resourceMult?: number,
+ *   playerFaction?: string, aiApm?: number, aiMicro?: boolean, aiStrategy?: string,
+ *   startId?: string, popCap?: number|null}} [opts]
+ * @returns {Galaxy}
+ */
 export function createGalaxy({ seed = 1, difficulty = "medium", sizeMult = 1,
   resourceMult = 1, playerFaction = "frontier", aiApm, aiMicro, aiStrategy, startId: startIdOpt, popCap = null } = {}) {
   seed = seed >>> 0;
@@ -208,6 +226,12 @@ const incomeBuildingCount = state => {
 // only to the start seat (planetId === galaxy.activeId, true for every world at the point
 // createGalaxy calls this). Every other world resolves its own varied profile instead
 // (neighbourAiProfile, above) — a distribution across the galaxy, not one setting everywhere.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} planetId
+ * @param {{unsettled?: boolean}} [opts] `unsettled` strips the auto-seeded player presence
+ * @returns {State} the world's freshly-built state, now registered on the galaxy
+ */
 export function addPlanet(galaxy, planetId, { unsettled = false } = {}) {
   const state = buildPlanetState(galaxy, planetId, unsettled);
   galaxy.planets.set(planetId, state);
@@ -222,6 +246,11 @@ export function addPlanet(galaxy, planetId, { unsettled = false } = {}) {
 // (galaxy seed, planetId) inputs addPlanet uses and never ticked, so the state the jump really
 // creates on arrival is identical to the one previewed. A world that's already up IS its own
 // preview and is returned as-is.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} planetId
+ * @returns {State} the world as it would be on arrival — NOT registered, never ticked
+ */
 export function previewPlanet(galaxy, planetId) {
   const live = galaxy.planets.get(planetId);
   if (live) return live;
@@ -295,6 +324,11 @@ function bumpEntityCounterPastGalaxy(galaxy) {
 // player building razed), each at most once per state transition. The "already
 // notified" flags live on the galaxy (colonyNotes), not on the deterministic
 // engine state — they're transient UI bookkeeping, re-derived harmlessly on load.
+/**
+ * @param {Galaxy} galaxy
+ * @param {number} [dt] seconds of galaxy time to bank income for
+ * @returns {{type: string, planetId: string}[]} UI notifications raised this sweep
+ */
 export function sweepColonies(galaxy, dt = 0) {
   const out = [];
   for (const [id, state] of galaxy.planets) {
@@ -329,6 +363,10 @@ export function sweepColonies(galaxy, dt = 0) {
 }
 
 // The game state the player is currently on — what boot.js renders and drives.
+/**
+ * @param {Galaxy} galaxy
+ * @returns {State|undefined}
+ */
 export function activeState(galaxy) {
   return galaxy.planets.get(galaxy.activeId);
 }
@@ -361,6 +399,11 @@ function worldIndexMap(worlds) {
 // galaxy tick and the world's roster position (no wall-clock, no Map-order
 // dependence), and each background tick uses the exact constant dtBg so total sim
 // time is conserved regardless of cadence.
+/**
+ * @param {Galaxy} galaxy
+ * @param {number} dt the fixed sim step, in seconds
+ * @returns {void}
+ */
 export function stepGalaxy(galaxy, dt) {
   const t = (galaxy.tick = (galaxy.tick | 0) + 1);
   galaxy.time = (galaxy.time || 0) + dt;             // galaxy-wide clock (deterministic: dt is the fixed step)
@@ -407,6 +450,7 @@ const PROGRESS_CHECK_EVERY = 20;   // galaxy-wide scans run ~once per second (20
 // bound and could dead-end the no-defeat guarantee. galaxy.time is monotonic across the whole run.
 // Pure + deterministic (galaxy.time accumulates the fixed dt in stepGalaxy).
 export const RELIEF_COOLDOWN = 20;   // sim seconds between relief drops (anti-farm)
+/** @param {Galaxy} galaxy @returns {void} */
 export function checkGalaxyRescue(galaxy) {
   const active = activeState(galaxy);
   if (active.over) return;                                         // a surrender already ended it
@@ -428,6 +472,7 @@ export function checkGalaxyRescue(galaxy) {
 // The one terminal state: the player voluntarily gives up. Ends the run on the active seat (the
 // boot.js over-poll then shows the game-over screen with the surrender copy). A wipeout alone
 // never triggers this — only an explicit surrender does.
+/** @param {Galaxy} galaxy @returns {void} */
 export function surrenderGalaxy(galaxy) {
   const active = activeState(galaxy);
   if (active.over) return;
@@ -443,7 +488,8 @@ export function surrenderGalaxy(galaxy) {
 // hand-edited save inject junk, and — more importantly — filtering against the WORLD roster instead
 // would silently drop every real milestone and replay its fireworks on the next load.
 export const MILESTONE_IDS = ["capital", "gate", "domination", "domination:all", "rival-gate"];
-/** True for any id reachMilestone can produce, including the per-world `world:N` family. */
+/** True for any id reachMilestone can produce, including the per-world `world:N` family.
+ *  @param {*} id @returns {boolean} */
 export function isMilestoneId(id) {
   return typeof id === "string" && (MILESTONE_IDS.includes(id) || /^world:\d+$/.test(id));
 }
@@ -461,6 +507,7 @@ function reachMilestone(galaxy, id) {
 // online anywhere ("gate" — the former economic victory, now a triumph you keep playing past).
 // Conquest milestones live in checkDomination. Pure — reads only entity state; the firework
 // itself is fired UI-side (boot.js), keeping the engine DOM-free.
+/** @param {Galaxy} galaxy @returns {void} */
 export function checkGalaxyProgress(galaxy) {
   let settledWorlds = 0, hasCapital = false, gateOnline = false;
   for (const state of galaxy.planets.values()) {
@@ -526,6 +573,7 @@ function worldFaction(galaxy, id, state) {
 // already holds it at Neutral-or-better, so a further hit would only fight that floor for no
 // visible effect; a domination spree instead snowballs resistance across whichever of the
 // faction's worlds AREN'T yet conquered.
+/** @param {Galaxy} galaxy @returns {void} */
 export function checkDomination(galaxy) {
   const active = activeState(galaxy);
   if (active.over) return;
@@ -570,6 +618,7 @@ export function checkDomination(galaxy) {
 export const CLAIM_DEV = 3;    // industrial development at which a world's AI faction claims its homeworld
 export const EXPAND_DEV = 6;   // ...and at which a thriving world reaches out to colonise a neighbour
 
+/** @param {Galaxy} galaxy @returns {void} */
 export function checkExpansion(galaxy) {
   const claims = galaxy.claims || (galaxy.claims = new Map());
   const notes = galaxy.expansionNotes || (galaxy.expansionNotes = []);
@@ -626,6 +675,7 @@ export function checkExpansion(galaxy) {
 // per-unit weight and cap at the point of use, exactly like aiDevelopment's own
 // DEV_SOFT_PER/DEV_SOFT_CAP. Pure (reads only persisted galaxy/diplomacy state) and deterministic
 // (fixed roster order, no RNG, no wall clock).
+/** @param {Galaxy} galaxy @returns {void} */
 export function updateFactionWarmth(galaxy) {
   const alliedByFaction = new Map();   // faction -> how many of its worlds are currently Allied
   for (const id of galaxy.worlds) {
@@ -732,6 +782,7 @@ function applyRivalAscension(galaxy, worldId, state) {
 //     live (charging, not yet ascended) Gate to surface as THE Rival Gate (galaxyStatus below).
 // Iterates `galaxy.worlds` (the fixed roster order), never the Map, so neither insertion order nor
 // Map iteration can affect the outcome — only aiDevelopment values and the id tie-break can.
+/** @param {Galaxy} galaxy @returns {void} */
 export function checkRivalGate(galaxy) {
   const ascended = galaxy.rivalAscended || (galaxy.rivalAscended = new Set());
   const notes = galaxy.rivalGateNotes || (galaxy.rivalGateNotes = []);
@@ -800,6 +851,10 @@ function rivalGateStatus(galaxy) {
 // A pure snapshot of the galaxy for the starmap: per-world status (your active
 // seat / a colony you hold / unexplored) and, for worlds you've been to, the
 // neighbour's stance. Plus the visited count and credits.
+/**
+ * @param {Galaxy} galaxy
+ * @returns {Object} a pure starmap snapshot — credits, progress counters, and a per-world row
+ */
 export function galaxyStatus(galaxy) {
   // Every world simulates, but the player only SEES one they've REACHED (`discovered`). An
   // undiscovered world reads "unexplored" and hides its neighbour's stance, exactly as before the
@@ -862,6 +917,11 @@ export const CAPITAL_HP_MULT = 2;
 // (and current HP, preserving any battle damage as a fraction) by CAPITAL_HP_MULT.
 // Odyssey-only, one Capital per owner, not on a still-constructing CC. Deterministic —
 // pure state mutation, no clock/RNG. Returns whether the upgrade happened.
+/**
+ * @param {State} state
+ * @param {Building} building
+ * @returns {boolean} whether the upgrade happened
+ */
 export function upgradeToCapital(state, building) {
   if (!building || building.type !== "command" || building.constructing || building.capital) return false;
   const owner = building.owner;
@@ -893,6 +953,11 @@ export const jumpCapacity = b => SPACEPORT_CAPACITY[spaceportTier(b)];
 // capacity. Odyssey-only, deterministic (pure state mutation — no clock/RNG), like the
 // Capital fortification. Returns whether it happened (refused when already max, still
 // under construction, or unaffordable).
+/**
+ * @param {State} state
+ * @param {Building} building
+ * @returns {boolean} whether the upgrade happened — false at max tier, unbuilt, or unaffordable
+ */
 export function upgradeSpaceport(state, building) {
   if (!building || building.type !== "spaceport" || building.constructing) return false;
   const tier = spaceportTier(building);
@@ -923,6 +988,7 @@ export const playerSpaceports = state => [...state.buildings.values()].filter(is
 // Command Centers are permanent: the world you leave keeps them and becomes a background
 // colony. Deploy the ship at the destination to found your new base there. Null when no ship
 // is on any pad.
+/** @param {State} state @returns {Unit|null} the staged colony ship, or null */
 export function jumpVessel(state) {
   const spaceports = playerSpaceports(state);
   if (!spaceports.length) return null;
@@ -936,6 +1002,7 @@ export function jumpVessel(state) {
 // ship is required: a jump can carry one (to settle a new world), or an army (to reinforce
 // a colony), or nothing (to hop back and control a world you already hold). jumpVessel
 // stays as an informational helper (is a ship loaded?) for the HUD, not a gate.
+/** @param {State} state @returns {boolean} */
 export function canJump(state) {
   return playerSpaceports(state).length > 0;
 }
@@ -952,6 +1019,7 @@ const playerFoothold = state => !!state && ([...state.buildings.values()]
 // (e.g. you hopped an army over and forgot the colony ship) is never trapped: it can always
 // retreat to a base it holds and bring the ship back. Only opening a NEW frontier needs a
 // Spaceport here.
+/** @param {Galaxy} galaxy @param {string} destId @returns {boolean} */
 export function canJumpTo(galaxy, destId) {
   if (destId === galaxy.activeId) return false;
   return canJump(activeState(galaxy)) || playerFoothold(galaxy.planets.get(destId));
@@ -974,6 +1042,7 @@ export const FUEL_DISCOUNT_BY_TIER = [1, 1, 0.85, 0.7];
 // The origin's best COMPLETED Spaceport tier (playerSpaceports(from), not the jump's actual
 // destination pad — this is about YOUR launch infrastructure) cuts that distance-scaled fuel by
 // FUEL_DISCOUNT_BY_TIER, so upgrading the pad is a real economic choice, not just a capacity knob.
+/** @param {Galaxy} galaxy @param {string} destId @returns {number} credits; 0 to a world you hold */
 export function jumpCost(galaxy, destId) {
   // Free to a world you've already REACHED (a colony you're returning to, reinforcing, or
   // re-settling). Since the living galaxy instantiates every world up front, "reached" is the
@@ -990,6 +1059,7 @@ export function jumpCost(galaxy, destId) {
 // The player units staged near a Spaceport — the expedition that rides along on a
 // jump. One definition, so the HUD's preview count and the jump's actual move can
 // never disagree about what leaves.
+/** @param {State} state @param {Building} spaceport @returns {Unit[]} */
 export function stagedRiders(state, spaceport) {
   const out = [];
   for (const u of state.units.values())
@@ -1007,6 +1077,12 @@ export function stagedRiders(state, spaceport) {
 // are supply 1, so a fleet always makes progress and nothing softlocks). The overflow
 // waits at the pad for the next jump. Pure + deterministic: closest-first, ties broken by
 // entity id. One definition, so the HUD preview and the jump's actual move always agree.
+/**
+ * @param {State} state
+ * @param {Building} spaceport
+ * @returns {{riders: Unit[], capacity: number, used: number, stagedSupply: number,
+ *   staged: number, leftBehind: number}}
+ */
 export function jumpManifest(state, spaceport) {
   const capacity = jumpCapacity(spaceport);
   const staged = stagedRiders(state, spaceport)
@@ -1033,6 +1109,11 @@ export function jumpManifest(state, spaceport) {
 // count every completed pad, not just one — a second Spaceport's staged units used to be
 // silently ignored on every jump, because only the first Spaceport found (Map iteration
 // order) was ever consulted.
+/**
+ * @param {State} state
+ * @returns {{riders: Unit[], capacity: number, used: number, stagedSupply: number,
+ *   staged: number, leftBehind: number}} every completed pad's riders, combined
+ */
 export function jumpManifestAll(state) {
   const spaceports = playerSpaceports(state);
   if (!spaceports.length) return { riders: [], capacity: 0, used: 0, stagedSupply: 0, staged: 0, leftBehind: 0 };
@@ -1087,6 +1168,7 @@ export const CARGO_GOODS = ["machinery", "electronics", "alloys", "spice", "meta
 
 // The freight capacity a set of riders provides — the summed cargoHold of the cargo ships among
 // them (anything without a cargoHold carries nothing). Pure.
+/** @param {Unit[]} riders @returns {number} summed cargoHold of the cargo ships among them */
 export function freightCapacity(riders) {
   let cap = 0;
   for (const u of riders) cap += UNITS[u.type]?.cargoHold || 0;
@@ -1098,10 +1180,16 @@ export function freightCapacity(riders) {
 // disagree). capacity 0 (no cargo ship staged) → an empty hold. `goods` lets a caller restrict the
 // pick to a subset (runLanes' commodity filter, below) while walking CARGO_GOODS' own
 // most-valuable-first order; omitted, it's the exact same list every existing caller already got.
+/**
+ * @param {State} from
+ * @param {number} [capacity]
+ * @param {string[]} [goods] restrict the pick to a subset, walked in CARGO_GOODS order
+ * @returns {Resources} what that much hold would haul, most-valuable-first
+ */
 export function cargoManifest(from, capacity = 0, goods = CARGO_GOODS) {
   let room = Math.max(0, capacity | 0);
   const src = from.players.player.resources;
-  const manifest = {};
+  /** @type {Resources} */ const manifest = {};
   for (const com of goods) {
     if (room <= 0) break;
     const move = Math.min(Math.floor(src[com] || 0), room);
@@ -1123,6 +1211,14 @@ export const LANE_PERIOD = 200;   // ~10 sim-seconds at 20Hz
 // CARGO_GOODS commodity, most-valuable-first — see runLanes). Refused for a same-world "lane" or
 // an unrecognised world on either end. Returns the new lane (also pushed onto galaxy.lanes), or
 // null on refusal.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} from
+ * @param {string} to
+ * @param {string[]} [commodities] empty = every CARGO_GOODS commodity
+ * @returns {?{id: string, from: string, to: string, commodities: string[], shipIds: string[]}}
+ *   the new lane, or null on refusal
+ */
 export function createLane(galaxy, from, to, commodities = []) {
   if (from === to || !galaxy.planets.has(from) || !galaxy.planets.has(to)) return null;
   const lanes = galaxy.lanes || (galaxy.lanes = []);
@@ -1133,6 +1229,7 @@ export function createLane(galaxy, from, to, commodities = []) {
 
 // Disband a lane and free every ship it held busy (clears their laneId flag). Returns whether a
 // lane with that id existed.
+/** @param {Galaxy} galaxy @param {string} laneId @returns {boolean} whether that lane existed */
 export function deleteLane(galaxy, laneId) {
   const lanes = galaxy.lanes;
   if (!lanes) return false;
@@ -1150,6 +1247,12 @@ export function deleteLane(galaxy, laneId) {
 // world's own completed Spaceports (reusing the exact same catchment jumpVessel/stagedRiders use
 // — this is deliberately the same "at the pad" test, not a new one). A ship already on another
 // lane is moved over rather than double-booked. Returns whether the assignment happened.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} laneId
+ * @param {string} unitId
+ * @returns {boolean} whether the assignment happened
+ */
 export function assignShipToLane(galaxy, laneId, unitId) {
   const lane = (galaxy.lanes || []).find(l => l.id === laneId);
   if (!lane) return false;
@@ -1165,6 +1268,12 @@ export function assignShipToLane(galaxy, laneId, unitId) {
 }
 
 // Pull a ship off a lane, freeing it for jumps/other orders again. Returns whether it was found.
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} laneId
+ * @param {string} unitId
+ * @returns {boolean} whether the ship was found on that lane
+ */
 export function unassignShipFromLane(galaxy, laneId, unitId) {
   const lane = (galaxy.lanes || []).find(l => l.id === laneId);
   if (!lane) return false;
@@ -1187,6 +1296,7 @@ export function unassignShipFromLane(galaxy, laneId, unitId) {
 // load/unload cycle. Called from stepGalaxy on the LANE_PERIOD schedule. Deterministic: galaxy.lanes
 // and each lane's shipIds are plain arrays in insertion order, and cargoManifest's own commodity
 // walk is a fixed list — nothing here reads a clock, RNG, or Map/Set iteration order.
+/** @param {Galaxy} galaxy @returns {void} */
 export function runLanes(galaxy) {
   const lanes = galaxy.lanes;
   if (!lanes || !lanes.length) return;
@@ -1227,6 +1337,13 @@ export { freightUsed, freightRoom };
 // hold, clamped to the hold's room and what's actually in stock. Returns the amount loaded (0 if
 // it's not a player freighter, the commodity is unknown, or nothing could move). The goods leave
 // the stockpile immediately — they're aboard the ship now, to ride the next jump.
+/**
+ * @param {State} state
+ * @param {string} unitId
+ * @param {string} com
+ * @param {number} qty
+ * @returns {number} the amount actually loaded
+ */
 export function loadFreighter(state, unitId, com, qty) {
   const u = state.units.get(unitId);
   if (!u || u.owner !== "player" || !u.freight || !COM[com] || !(UNITS[u.type]?.cargoHold)) return 0;
@@ -1241,6 +1358,13 @@ export function loadFreighter(state, unitId, com, qty) {
 // Unload up to `qty` of `com` from a freighter's hold back onto the CURRENT world's player
 // stockpile. Returns the amount unloaded. Works wherever the ship is — the origin (to undo a
 // load) or a world it jumped to (to bank the haul and sell it at that market).
+/**
+ * @param {State} state
+ * @param {string} unitId
+ * @param {string} com
+ * @param {number} qty
+ * @returns {number} the amount actually unloaded
+ */
 export function unloadFreighter(state, unitId, com, qty) {
   const u = state.units.get(unitId);
   if (!u || u.owner !== "player" || !u.freight) return 0;
@@ -1265,7 +1389,7 @@ export function unloadFreighter(state, unitId, com, qty) {
 // non-freighters (no hold) are skipped.
 function loadCargo(from, dest, riders) {
   const dst = dest.players.player.resources;
-  const delivered = {};
+  /** @type {Resources} */ const delivered = {};
   for (const u of riders) {
     if (!u.freight || !(UNITS[u.type]?.cargoHold)) continue;
     for (const com in u.freight) {                               // deliver the hold to the destination colony
@@ -1322,10 +1446,20 @@ function axisLandingSites(span) {
 
 // The allowed landing sites for `map`, as the two axes' independent site lists (any xs × ys pair is
 // a valid landing point). Purely derived — no clock, no RNG, no state.
+/**
+ * @param {{width: number, height: number}} map
+ * @returns {{xs: number[], ys: number[]}} the two axes' site lists — any xs × ys pair is valid
+ */
 export function landingSites(map) {
   return { xs: axisLandingSites(num(map.width)), ys: axisLandingSites(num(map.height)) };
 }
 
+/**
+ * @param {{width: number, height: number}} map
+ * @param {number} x
+ * @param {number} y
+ * @returns {{x: number, y: number}} the nearest allowed landing site — idempotent
+ */
 export function snapLandingPoint(map, x, y) {
   // Nearest site wins; a tie goes to the FARTHER-OUT one, matching the way the old Math.round
   // broke its own half-way ties upward (a click exactly between two sites is arbitrary either way).
@@ -1385,6 +1519,13 @@ function landingZone(dest, landingPoint) {
 //
 // Returns a summary, or null if the jump can't run (no way to reach the destination, same world,
 // or too poor to fuel a new-world jump).
+/**
+ * @param {Galaxy} galaxy
+ * @param {string} destId
+ * @param {{landingPoint?: {x: number, y: number}}} [opts] consulted only when `dest` has no pad
+ * @returns {?{destId: string, riders: number, leftBehind: number, cargo: Resources}}
+ *   a summary, or null when the jump can't run
+ */
 export function jumpCapital(galaxy, destId, opts = {}) {
   const from = activeState(galaxy);
   if (destId === galaxy.activeId) return null;
