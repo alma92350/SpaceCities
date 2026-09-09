@@ -35,17 +35,20 @@ async function listen(server) {
   return server.address().port;
 }
 
-// T-036 side-quest: this sandboxed CI's 4 cores occasionally can't service a real WS handshake
-// promptly under a full-suite run's own worker_threads pressure from ~115+ OTHER files — a real
-// server that's momentarily just slow, not unreachable. net/wsClientTransport.js's own
-// connectTimeoutMs (added for exactly this) turns that from "hangs until the native ~300s default"
-// into a fast, retriable failure; this wraps it into a few short attempts rather than one long one,
-// used only by the one test below that's shown itself exposed to this under full-suite load.
-// 5 attempts, not 3 (T-037's own full-suite run): a single severely CPU-heavy file running
-// concurrently (test/ailab.test.js's own multi-minute AI-strategy search, unrelated to this test)
-// can hold contention long enough that even 3×20s=60s of retries isn't always enough — bumped to
-// 5×20s=100s, still comfortably bounded (never the native ~300s+ default) but with real headroom
-// for a slow neighbor's worst moments rather than merely its typical ones.
+// A few short, bounded connect attempts instead of one long wait: net/wsClientTransport.js's own
+// connectTimeoutMs turns a server that is momentarily just slow (rather than unreachable) into a
+// fast, retriable failure instead of a hang until the native ~300s default.
+//
+// HISTORICAL NOTE, because the escalating attempt count here is misleading on its own: this was
+// grown from 3 to 5 attempts chasing what looked like CPU starvation under full-suite load. It
+// wasn't. The T-034 test below was failing because attachWsMatchWorker could miss the worker's
+// `ready` message entirely and come back with matchId undefined, so every connection to the second
+// match was correctly refused at the upgrade and the retries just burned 5×20s before reporting it
+// as a timeout. That was a real relay defect, since fixed (see the `ready`-handshake test above and
+// server/matchWorker.js's `getReady`) — it reproduced 1-in-3 on a fully idle machine, which no
+// amount of CPU-contention reasoning could have explained. Retrying is kept because the underlying
+// tolerance is still reasonable for a real handshake, but it is no longer load-bearing: the test now
+// passes in ~200ms every run.
 async function connectResilient(url, attempts = 5) {
   let lastErr;
   for (let i = 0; i < attempts; i++) {
@@ -90,6 +93,35 @@ test("T-029b: attachWsMatchWorker() resolves with a real matchId matching the wo
     assert.equal(typeof wsMatch.matchId, "string");
     assert.ok(wsMatch.matchId.length > 0);
     assert.equal(wsMatch.matchId, ready.matchId, "attachWsMatchWorker must expose the SAME matchId the worker itself minted/restored, not a copy or a placeholder");
+  } finally { server.close(); worker.terminate(); }
+});
+
+test("attachWsMatchWorker latches onto the worker's `ready` SPECIFICALLY, even if it arrives before anyone is listening", async () => {
+  // The lobby spawns several workers and attaches them one at a time (`await attach(A); await
+  // attach(B)`), which is what the T-034 test below does too. But a worker_threads message emitted
+  // before ANY "message" listener exists is DROPPED, not queued (measured) — and matchWorker.js
+  // posts `ready` immediately on boot. So worker B's `ready` fires during the await on A, is lost,
+  // and a `worker.once("message", ...)` then latches onto B's first *state* push instead: matchId
+  // and owners come back undefined, and every later connection to B is refused at the upgrade
+  // (`requireMatch` compares against undefined) until the client's connect timeout gives up.
+  //
+  // That presented as flake — 1-in-3 even on an idle machine, which is why the "sandboxed CI is
+  // starved of CPU" comments on connectResilient below misread it — but it is a real defect in the
+  // relay, reachable by any caller that spawns two matches: whether B works depends purely on
+  // whether its boot beat the attach.
+  //
+  // Simulated deterministically by simply waiting before attaching: the worker is definitely past
+  // `ready` and already pushing state by then, which is exactly the losing race, made reliable.
+  const worker = spawnMatchWorker();
+  const server = createServer();
+  try {
+    await new Promise(r => setTimeout(r, 600));   // the `ready` window closes unobserved
+    const wsMatch = await attachWsMatchWorker(server, worker);
+    assert.equal(typeof wsMatch.matchId, "string",
+      "a missed `ready` must not be substituted with whatever message happened to arrive next");
+    assert.ok(wsMatch.matchId.length > 0, "matchId must be the worker's real id, not undefined");
+    assert.deepEqual(wsMatch.owners, ["player", "ai"], "owners must come from `ready`, not a state push");
+    wsMatch.close();
   } finally { server.close(); worker.terminate(); }
 });
 
@@ -185,11 +217,9 @@ test("T-034: two concurrent matches on the SAME server route a connection by ?ma
     // hundreds of test processes fighting 4 cores) ever would be, and buys this test nothing a
     // sequential proof doesn't already give it.
     //
-    // connectResilient, not a bare createWsClientTransport, for the SAME reason taken one step
-    // further: even fully sequential, this test was still observed to occasionally hit the native
-    // WebSocket connect timeout (~300s) under a full-suite run — this real local server was simply
-    // too starved of CPU for a while to answer promptly, not genuinely broken. A few short, bounded
-    // attempts tolerate that transient stall without weakening what the test actually proves.
+    // connectResilient rather than a bare createWsClientTransport bounds a slow handshake — see its
+    // own comment for why the attempt count there is NOT evidence of remaining flakiness (the
+    // failures it was grown to absorb were a real `ready`-handshake defect in the relay, now fixed).
     const tA = await connectResilient(`ws://localhost:${port}/ws?match=${wsA.matchId}&seat=player`);
     const stateA = await new Promise(resolve => tA.onEvent(e => { if (e.type === "state") resolve(e.state); }));
     tA.close();
@@ -229,15 +259,21 @@ test("attachWsMatchWorker(...).close() stops accepting new upgrades and closes e
   const server = createServer();
   const wsMatch = await attachWsMatchWorker(server, worker);
   const port = await listen(server);
+  // Hoisted so the finally can close it. This transport is LIVE when wsMatch.close() drops it from
+  // the server side, which is exactly the case net/wsClientTransport.js is supposed to treat as a
+  // network blip and retry — every 1500ms, forever, until the caller says stop. Only the caller can:
+  // leaving it unclosed held the event loop open and made `node --test` on this file never exit,
+  // long after all 43 tests had passed.
+  let transport;
   try {
-    const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+    transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
     await new Promise(resolve => transport.onEvent(() => {}) || setTimeout(resolve, 50));
     wsMatch.close();
     // Same convention attachWsMatch's own close() already keeps: closing an attachment layer
     // never owns tearing down what it was GIVEN (the worker here, the httpServer in both cases) —
     // only what it itself set up. Proving idempotence is what's left to verify from outside.
     assert.doesNotThrow(() => wsMatch.close(), "closing the ws-worker attachment twice must be harmless");
-  } finally { server.close(); worker.terminate(); }
+  } finally { transport?.close(); server.close(); worker.terminate(); }
 });
 
 // T-036: server/matchWorker.js's own grace-timer/AI-takeover logic is already fully exercised in

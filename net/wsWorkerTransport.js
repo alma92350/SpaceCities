@@ -114,7 +114,17 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
   const { allowedOrigins, path, requireMatch, authorizeSeat, spectatorsEnabled = true } = opts;
 
   return new Promise(resolve => {
-    worker.once("message", readyMsg => {
+    // Wait for the `ready` message SPECIFICALLY, and ask for one. A bare once("message") latched
+    // onto whatever arrived first, which is only `ready` when this attachment wins the race against
+    // the worker's own boot — a caller spawning two matches and attaching them sequentially loses
+    // that race on the second one (worker_threads drops a message posted with no listener attached),
+    // and then read matchId/owners off a *state* push instead, leaving both undefined and every
+    // connection to that match refused at the upgrade. Filtering fixes the mis-latch; `getReady`
+    // (server/matchWorker.js) recovers a copy that was already dropped. Ignoring non-`ready`
+    // messages until then is safe — a state push before any seat has connected has no recipient.
+    const onMessage = readyMsg => {
+      if (!readyMsg || readyMsg.type !== "ready") return;
+      worker.off("message", onMessage);
       const { owners, createGameStateOpts, matchId } = readyMsg;
       const bySeat = new Map();               // owner -> live connection, at most one per seat
       const lastSnapshotBySeat = new Map();    // owner -> last quantized snapshot sent (T-028b)
@@ -278,6 +288,11 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
           chatTimestampsBySeat.clear();
         },
       });
-    });
+    };
+    worker.on("message", onMessage);
+    // Only AFTER the listener is attached, so this request can't lose the same race it exists to
+    // close. Harmless when the original `ready` did arrive — the filter above takes the first copy
+    // and detaches, so the duplicate is never seen.
+    worker.postMessage({ type: "getReady" });
   });
 }

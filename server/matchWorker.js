@@ -193,7 +193,17 @@ match.emitAck = rec => {
   parentPort.postMessage({ type: "commandResult", seat: rec.owner, seq: rec.seq, result: toCommandResult(rec.result) });
 };
 
+// The `ready` handshake, kept so it can be RE-sent on demand. A worker_threads message posted
+// before the parent has attached a "message" listener is dropped, not queued — and this file posts
+// `ready` the moment it boots. A parent that spawns two matches and attaches them one at a time
+// (`await attach(A); await attach(B)`) therefore loses B's `ready` during A's await, which left the
+// relay with an undefined matchId and every later connection to B refused at the upgrade. So the
+// handshake is re-requestable rather than a single unrepeatable event: net/wsWorkerTransport.js asks
+// for it as soon as it starts listening, and whichever copy lands first is the one it uses.
+const readyMessage = { type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId };
+
 parentPort.on("message", msg => {
+  if (msg.type === "getReady") { parentPort.postMessage(readyMessage); return; }
   if (msg.type === "command") {
     const admitted = admit(match, msg.envelope, msg.seat);
     // Mirrors net/wsServerTransport.js's own in-process reasoning exactly: a shape-rejected
@@ -274,7 +284,7 @@ parentPort.on("message", msg => {
   }
 });
 
-parentPort.postMessage({ type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId });
+parentPort.postMessage(readyMessage);
 
 // T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only ever
 // auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this file to do
