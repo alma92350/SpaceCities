@@ -170,8 +170,18 @@ export function createWsClientTransport(url, opts = {}) {
       for (const h of handlers) h(event);
     }
 
+    // Rejecting is TERMINAL. The caller never received a transport, so it holds no handle to call
+    // close() with — if anything re-armed the retry timer after this point, that timer would keep
+    // firing every reconnectDelayMs forever with no way to cancel it, holding the event loop open.
+    // (That was real: it hung `node --test` on three ws test files after every assertion passed.)
+    // So mark the transport dead here, which makes scheduleReconnect's existing `closed` guard bite.
     function fail(err) {
-      if (!settled) { settled = true; reject(err); }
+      if (settled) return;
+      settled = true;
+      closed = true;
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+      reject(err);
     }
 
     function scheduleReconnect() {

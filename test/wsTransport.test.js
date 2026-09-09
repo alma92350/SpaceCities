@@ -324,6 +324,34 @@ test("a connection naming an unknown seat is refused at the upgrade, not silentl
   } finally { server.close(); }
 });
 
+test("a REJECTED initial connect stops trying — it must not leave an endless reconnect loop nobody can cancel", async () => {
+  // The reject path hands the caller NO transport, so there is no .close() to call and no way to
+  // stop anything left running. Any timer still armed after the rejection is therefore unreachable
+  // by construction: it retries every reconnectDelayMs forever, keeps the event loop alive, and
+  // makes `node --test` hang after every assertion in the file has already passed. That is exactly
+  // how this was found — three test files wedged for 22 minutes with the suite reporting green.
+  //
+  // Asserted by COUNTING REAL CONNECTION ATTEMPTS rather than by inspecting timers: the server's
+  // own upgrade listener is the observable ground truth for "the client tried again", so this test
+  // stays honest if the retry is ever rescheduled by some other mechanism than a setTimeout.
+  const match = makeMatch();
+  const server = createServer();
+  let upgradeAttempts = 0;
+  server.on("upgrade", () => { upgradeAttempts++; });
+  attachWsMatch(server, match);
+  const port = await listen(server);
+  try {
+    await assert.rejects(createWsClientTransport(`ws://localhost:${port}/?seat=not-a-real-seat`,
+      { reconnectDelayMs: 40 }));
+    const afterReject = upgradeAttempts;
+    // Well past several reconnectDelayMs windows: a surviving loop shows up as a rising count.
+    await new Promise(r => setTimeout(r, 300));
+    assert.equal(upgradeAttempts, afterReject,
+      `a failed initial connect must not keep reconnecting: saw ${upgradeAttempts - afterReject} ` +
+      `further upgrade attempt(s) after the promise already rejected`);
+  } finally { server.close(); }
+});
+
 test("attachWsMatch's optional `path` restricts which upgrade pathname it accepts — T-027 uses this to keep a reserved /mcp namespace from also being the game socket", async () => {
   const match = makeMatch();
   const server = createServer();
@@ -364,8 +392,9 @@ test("attachWsMatch(...).close() stops accepting new upgrades and closes every l
   const wsMatch = attachWsMatch(server, match);
   const port = await listen(server);
   const stopTicking = startTicking(match, wsMatch);
+  let transport;
   try {
-    const transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
+    transport = await createWsClientTransport(`ws://localhost:${port}/?seat=player`);
     const remoteClosed = new Promise(resolve => transport.onEvent(() => {}) || setTimeout(resolve, 50));
     wsMatch.close();
     await remoteClosed;
@@ -376,5 +405,12 @@ test("attachWsMatch(...).close() stops accepting new upgrades and closes every l
     // timeout to observe that "nothing answers" state, which isn't worth the wall-clock cost here.
     // The one thing this test actually needs is idempotence, which the assertion below proves.
     assert.doesNotThrow(() => wsMatch.close(), "closing the ws match attachment twice must be harmless");
-  } finally { stopTicking(); server.close(); }
+    // The client MUST be closed even though the server already dropped it. wsMatch.close() ends the
+    // socket, which the client reads as a post-success disconnect and answers by arming its
+    // always-on reconnect (net/wsClientTransport.js's scheduleReconnect, 1500ms). Only
+    // transport.close() clears that timer; without it the retry re-arms forever and the test
+    // PROCESS never exits — `node --test` hangs after every assertion here has already passed.
+    // Closed in `finally`, not inline, so a failing assertion above can't skip it and turn one
+    // red test into a wedged run.
+  } finally { transport?.close(); stopTicking(); server.close(); }
 });
