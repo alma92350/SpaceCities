@@ -33,7 +33,7 @@
 
 import { lobbyScreenEl, mapSelectEl } from "./dom.js";
 import { PLANETS } from "./data.js";
-import { MAP_CHOICES, SIZE_OPTIONS, RESOURCE_OPTIONS, MATCH_LENGTH_OPTIONS, renderMapSelect } from "./setup.js";
+import { MAP_CHOICES, SIZE_OPTIONS, RESOURCE_OPTIONS, MATCH_LENGTH_OPTIONS, STRATEGY_OPTIONS, DIFFICULTY_OPTIONS, renderMapSelect } from "./setup.js";
 import { createWsClientTransport } from "./net/wsClientTransport.js";
 import { createWsSpectatorTransport } from "./net/wsSpectatorTransport.js";
 import { bootState } from "./boot.js";
@@ -146,6 +146,11 @@ async function joinLive(matchId, owner, token, statusEl) {
   const closeTransport = transport.close.bind(transport);
   transport.close = () => { clearLiveMatch(); closeTransport(); };
   bootState(firstState, { intro: true, transport });
+  // AFTER bootState, which clears it — the same ordering (and the same reason) as
+  // spectateLive's own game.networkSpectate below. Read only by saveShape.js's resumableMode,
+  // which must refuse to checkpoint a live match: this state is a reassembled projection with no
+  // fog structures for engine/persist.js to serialize.
+  game.networkLive = true;
   initChatPanel();   // T-038 — after bootState, same as everywhere else here: game.transport must already be this one
   transport.onEvent(e => {
     if (e.type !== "state") return;
@@ -220,6 +225,40 @@ function planetOptionsInto(select) {
   }
 }
 
+/**
+ * The host form's two seat dropdowns, reduced to the only two POST /api/matches fields that decide
+ * who can actually play. Exported (and pure) so the seating rules are testable without a DOM.
+ *
+ * Both "an agent plays here" values map to seat kind "open", never to server/lobby.js's own "agent"
+ * kind: joinMatch refuses a non-"open" seat (seat-not-open), which is exactly the call an MCP
+ * agent's join_match makes, AND tools/serve.js's seatsFilled counts a non-"open" seat as already
+ * filled — so an "agent" kind would auto-start the match before the agent ever connected. "open" is
+ * the kind an agent can really claim; the distinction the dropdown draws is who holds seat 0, and
+ * that is hostJoins, not a kind.
+ *
+ * @param {string} seat1 - "me" (host plays) or "agent" (host only watches)
+ * @param {string} seat2 - "agent" (a second joiner) or "ai" (the built-in AI)
+ * @returns {{seatKinds: string[], hostJoins: boolean}}
+ */
+export function hostSeatConfig(seat1, seat2) {
+  return { seatKinds: ["open", seat2 === "ai" ? "ai" : "open"], hostJoins: seat1 !== "agent" };
+}
+
+/**
+ * What the host button becomes once POST /api/matches has replied. A creator who asked not to be
+ * seated (hostSeatConfig's hostJoins:false) gets no token back, and every seat-holder action needs
+ * one: /start authenticates with it (403 not-the-host otherwise) and joinLive connects with it. So
+ * that creator's only honest action is to spectate — including for a match that has not started,
+ * where it must simply wait for the remaining seat to fill rather than try to start it.
+ *
+ * @param {{started?: boolean, token?: string|null}} created - POST /api/matches's own response
+ * @returns {"enter"|"start"|"watch"}
+ */
+export function hostNextAction(created) {
+  if (!created.token) return "watch";
+  return created.started ? "enter" : "start";
+}
+
 function dialSelectInto(container, label, options) {
   const row = document.createElement("label");
   row.className = "lobby-row";
@@ -233,6 +272,10 @@ function dialSelectInto(container, label, options) {
   }
   row.appendChild(select);
   container.appendChild(row);
+  // The row is handed back on the select so a caller that needs to show/hide the whole labelled row
+  // (not just the control) doesn't have to reach for parentElement — which the import-safe fake DOM
+  // this file is unit-tested under does not implement.
+  select.dialRow = row;
   return select;
 }
 
@@ -255,6 +298,36 @@ function renderHostCard(container) {
   const sizeSelect = dialSelectInto(card, "Map size", SIZE_OPTIONS);
   const resourceSelect = dialSelectInto(card, "Resources", RESOURCE_OPTIONS);
   const lengthSelect = dialSelectInto(card, "Match length", MATCH_LENGTH_OPTIONS);
+
+  // Who sits in each seat. Until now the form sent neither seatKinds nor hostJoins, so seat 0 was
+  // always auto-claimed by the creator and the only match reachable from the browser was
+  // host-plus-one-human: setting up two MCP agents against each other, or watching a match rather
+  // than playing it, meant hand-rolling the POST. hostSeatConfig() (above) owns the mapping.
+  //
+  // AFTER the four world/size/resources/length dials, not before them: those four are read
+  // POSITIONALLY by test/lobbyScreen-render.test.js's "built from the shared setup tables" guard,
+  // so inserting a row above them silently breaks it.
+  const seat1Select = dialSelectInto(card, "Seat 1", [
+    { label: "Me (play)", mult: "me", note: "you take this seat" },
+    { label: "Open (agent)", mult: "agent", note: "an MCP agent or another human joins" },
+  ]);
+  const seat2Select = dialSelectInto(card, "Seat 2", [
+    { label: "Open (agent)", mult: "agent", note: "an MCP agent or another human joins" },
+    { label: "Built-in AI", mult: "ai", note: "starts immediately" },
+  ]);
+
+  // Which built-in AI seat 2 plays, in the same tables the single-player setup panel offers — only
+  // meaningful when seat 2 is actually the built-in AI, so the rows hide themselves otherwise
+  // rather than presenting a dial that would be silently ignored.
+  const strategySelect = dialSelectInto(card, "AI strategy", STRATEGY_OPTIONS);
+  const difficultySelect = dialSelectInto(card, "AI difficulty", DIFFICULTY_OPTIONS);
+  difficultySelect.value = "medium";   // the engine's own default, not the table's first row (Easy)
+  const syncAiRows = () => {
+    const on = seat2Select.value === "ai";
+    for (const sel of [strategySelect, difficultySelect]) sel.dialRow.classList.toggle("hidden", !on);
+  };
+  seat2Select.addEventListener("change", syncAiRows);
+  syncAiRows();
 
   // T-037 (FR-7): "unless the host has disabled spectators" — on by default (an unchecked box is
   // the ONE thing that changes today's behavior, so the default matches what every match already
@@ -300,10 +373,17 @@ function renderHostCard(container) {
   hostBtn.addEventListener("click", async () => {
     hostBtn.disabled = true;
     status.textContent = "Creating match…";
+    const seating = hostSeatConfig(seat1Select.value, seat2Select.value);
     const res = await apiPost("/api/matches", {
       planetId: planetSelect.value,
       sizeMult: Number(sizeSelect.value), resourceMult: Number(resourceSelect.value), matchTimeLimit: Number(lengthSelect.value),
       spectatorsEnabled: spectatorsCheckbox.checked,
+      ...seating,
+      // Only sent for a seat that really is the built-in AI — tools/serve.js ignores them otherwise,
+      // but sending a dial the match will never read invites a reader to believe it took effect.
+      ...(seating.seatKinds[1] === "ai"
+        ? { aiStrategy: strategySelect.value, difficulty: difficultySelect.value }
+        : {}),
     });
     if (!res.ok) {
       status.textContent = `Could not create a match (${(res.json && res.json.error) || res.status}).`;
@@ -314,10 +394,25 @@ function renderHostCard(container) {
     linkInput.value = shareLink(created.matchId);
     linkRow.classList.remove("hidden");
     hostBtn.disabled = false;
-    if (created.started) {
-      // Today's host form always requests two open seats, so this path isn't reachable from it yet
-      // — kept honest for a future seatKinds picker (an "open","ai" match auto-starts on creation,
-      // T-035's own FR-4 "all seats filled" clause) rather than assumed away.
+    const next = hostNextAction(created);
+    if (next === "watch") {
+      // The creator holds no seat, so it has nothing to start and nothing to play. Watching a match
+      // that has not filled yet is still the right offer: the click can simply be retried once the
+      // agents arrive, which spectateLive reports for itself if it's early.
+      status.textContent = created.started
+        ? "Match created and already live — you are spectating."
+        : "Match created with both seats open — share the link, then watch once they fill.";
+      hostBtn.textContent = "👁 Watch";
+      hostBtn.onclick = () => {
+        hostBtn.disabled = true;
+        spectateLive(created.matchId, status).catch(() => {
+          status.textContent = "Could not watch yet — the match may not have started. Try again.";
+          hostBtn.disabled = false;
+        });
+      };
+      return;
+    }
+    if (next === "enter") {
       status.textContent = "Match created and already live.";
       hostBtn.textContent = "▶ Enter match";
       hostBtn.onclick = () => {

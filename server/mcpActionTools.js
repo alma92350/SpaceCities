@@ -40,7 +40,10 @@ const COMMAND_SCHEMA = {
     "A WireCommand (net/commandShapes.js). The discriminator field `t` selects the shape; " +
     "common ones: {t:'move',ids,x,y,q?}, {t:'attackMove',ids,x,y,q?}, {t:'attack',ids,target,q?}, " +
     "{t:'gather',ids,node,q?}, {t:'stop',ids}, {t:'hold',ids}, {t:'build',worker,b,x,y}, " +
-    "{t:'queueProduction',building,u,alt?}, {t:'researchTech',building,tech}. " +
+    "{t:'queueProduction',building,u,alt?}, {t:'cancelProduction',building,i}, " +
+    "{t:'setRally',building,x,y} (where a producer's new units walk to — set it before a fight " +
+    "rather than moving each spawn by hand), {t:'researchTech',building,tech}. " +
+    "Workers cannot attack: use {t:'build',...}/{t:'gather',...} for them. " +
     "`ids` is an array of 1-400 unit/building ids you own. Wrap several commands in " +
     "{t:'batch',c:[...]} (max 16) to apply them together at the same tick.",
   properties: { t: { type: "string" } },
@@ -88,7 +91,12 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
         if (result.ok) {
           return { content: [{ type: "text", text: "Command applied." }], structuredContent: result.result ?? {} };
         }
-        return { content: [{ type: "text", text: `Command rejected: ${result.code}` }], isError: true, structuredContent: { code: result.code } };
+        const detail = result.reason ? `${result.code} (${result.reason})` : result.code;
+        return {
+          content: [{ type: "text", text: `Command rejected: ${detail}` }],
+          isError: true,
+          structuredContent: { code: result.code, ...(result.reason ? { reason: result.reason } : {}) },
+        };
       }),
     },
     {

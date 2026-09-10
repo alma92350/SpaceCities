@@ -6,7 +6,46 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **The MCP observation surface now says what things ARE, what they're DOING, and what just
+  happened.** Every item below is a gap a real agent player hit in a played match.
+  - `get_map_overview` reports each discovered node's **commodity, position, max and distance from
+    your nearest base, nearest first**, plus `commodities_available` and the map's bounds. The wire
+    projection still ships `{id, amount}` (a browser client regenerates the rest from the seed);
+    the static half is now merged in from the match worker's own new `describeMap` reply, keyed by
+    the ids in that seat's own fog-filtered projection, so no undiscovered node is ever revealed.
+    Previously the only way to learn a node's commodity was to walk a worker to it and watch which
+    counter moved — which made "gather from the closest ore" an instruction no agent could follow.
+  - `list_entities` reports your own entities' `activity`
+    (idle/gathering/moving/attacking/building/producing/under-construction), `orderTarget`, a
+    producer's `queue` and a site's `buildProgress`, and takes an `activity` filter — so idle
+    workers are findable. An enemy's activity is still never reported: fog doesn't reveal intent.
+  - `get_situation` adds `idle_unit_ids`, `supply`/`supply_cap`, `you`/`opponents` and the map's
+    bounds and tick rate.
+  - `get_tech_options` adds each type's real `stats` (hp, attack, range, speed, build time,
+    supply…), `produced_by`/`buildable`, and `missing_prereqs` — which requirement is missing, by
+    name, instead of a bare `prereqs_met:false`. A scenario-only unit no building can train (the
+    Freighter) now reads `buildable:false` rather than advertising itself as a free unit.
+  - `get_counters` exposes the counter triangle as a TOOL, not only as the `game://counters`
+    resource many MCP clients never surface.
+  - Events carry entity ids: `entityKilled` has the dead entity's `id` (plus `killerId`/
+    `killerOwner`), `attackHit` has `sourceId`/`targetId`, `unitSpawned` has the new unit's `id`
+    and `fromBuildingId`, `buildingComplete` the finished building's `id`. Two new events —
+    `nodeDepleted` and `unitIdle` — announce the quietest way a match rots: a seam running dry and
+    the gatherer that then had nowhere to go.
+
 ### Changed
+
+- **A production or build command now reports whether it actually landed, and why not.**
+  `queueProduction` returned an empty success even when the engine had refused, and since ore is
+  only debited once a job starts, nothing observable distinguished "queued" from "silently
+  dropped" — an agent re-sent the same order. It now returns a receipt
+  (`{building, unit, queueIndex, queueLength, etaSeconds}`) on success, and a real rejection
+  carrying a `reason` (`cannot-afford`, `prereq-not-met`, `supply-capped`,
+  `building-cannot-produce-this-unit`, …) when the engine says no. `build`'s `refused` carries the
+  same kind of `reason` (`invalid-placement`, `cannot-afford`, `prereq-not-met`, …) instead of
+  leaving a caller to probe placement offsets blindly.
 
 - **The Odyssey's living galaxy is now bounded to three background worlds, drawn from the seed.**
   `createGalaxy` used to instantiate and simulate all 11 worlds from turn one; it now brings up

@@ -19,10 +19,14 @@ import {
   buildTournamentJob, seedFieldByRating, tournamentProgressLabel, tournamentStandingsRows,
   shapeTournamentStandings, shapeBracketView,
   SEAT_DISCLOSURE, gauntletEstimate, buildGauntletStart, shapeGauntletFixtures, nextGauntletFixture,
-  humanMatchOutcome, gauntletLadderTrail, shapeGauntletSummary, mostRelevantBracket,
+  humanMatchOutcome, gauntletLadderTrail, shapeGauntletSummary,
   EXHIBITION_NOTE, buildWatchConfig, spectatedMatchOutcome,
   REPLAY_NOTE, replayableMatch, buildReplayConfig, replayVerdict, shapeHistoryMatches,
 } from "../competition.js";
+// mostRelevantBracket reads the live ledger this module caches, so it moved with the screens when
+// competition.js was split into its pure half and competitionScreens.js. Its logic is unchanged
+// and so are the tests below it; only the module it lives in moved.
+import { mostRelevantBracket } from "../competitionScreens.js";
 import { duelSeed, pinnedDuelDials } from "../tools/duelCore.js";
 import { createSelfPlayState, tickSelfPlay, runSelfPlayMatch } from "../tools/selfplay.js";
 import { runCompetitionJob } from "../competitionWorker.js";

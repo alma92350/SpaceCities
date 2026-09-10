@@ -6,6 +6,7 @@ import { projectFor } from "../engine/projection.js";
 import { createMcpServer, PROTOCOL_VERSION } from "../net/mcp.js";
 import { mintSeatHandle } from "../server/mcpSeatHandle.js";
 import { createObservationTools } from "../server/mcpObservationTools.js";
+import { UNITS } from "../engine/entities.js";
 
 /* ============================================================
    T-052 (FR-14): get_situation / list_entities / get_map_overview / get_tech_options — this
@@ -26,8 +27,8 @@ import { createObservationTools } from "../server/mcpObservationTools.js";
    matches, each with its own cache) can never answer one seat with a DIFFERENT match's data.
    ============================================================ */
 
-function fakeCache(projByOwner) {
-  return { latestProjFor: owner => projByOwner[owner] ?? null };
+function fakeCache(projByOwner, mapMeta = null) {
+  return { latestProjFor: owner => projByOwner[owner] ?? null, mapMeta: () => mapMeta };
 }
 
 function joinedSeat(lobby, matchId, seatIndex) {
@@ -57,14 +58,14 @@ function fixture() {
   return { state, hiddenEnemyId: hiddenEnemy.id };
 }
 
-function mcpFor(lobby, matchId, projByOwner) {
-  const cache = fakeCache(projByOwner);
+function mcpFor(lobby, matchId, projByOwner, mapMeta = null) {
+  const cache = fakeCache(projByOwner, mapMeta);
   return createMcpServer({ tools: createObservationTools(lobby, mId => (mId === matchId ? cache : null)) });
 }
 
-test("createObservationTools registers exactly the four named tools", () => {
+test("createObservationTools registers exactly the five named tools", () => {
   const tools = createObservationTools(createLobby(), () => null);
-  assert.deepEqual(tools.map(t => t.name).sort(), ["get_map_overview", "get_situation", "get_tech_options", "list_entities"]);
+  assert.deepEqual(tools.map(t => t.name).sort(), ["get_counters", "get_map_overview", "get_situation", "get_tech_options", "list_entities"]);
 });
 
 test("get_situation on a match id with NO live cache at all (never started) is a distinct, clear tool execution error", async () => {
@@ -181,7 +182,7 @@ test("list_entities: once the SAME enemy unit is actually visible (moved into fo
   assert.ok(body.result.structuredContent.entities.some(e => e.id === hiddenEnemyId), "a genuinely visible enemy unit must appear");
 });
 
-test("list_entities: trims each entity down to id/type/owner/x/y/hp — never the raw engine object's order/orderQueue/homeCC/etc.", async () => {
+test("list_entities: trims each entity down to presence/health plus a curated activity summary — never the raw engine object's order/orderQueue/homeCC/etc.", async () => {
   const { state } = fixture();
   const lobby = createLobby();
   const match = lobby.createMatch({ seatKinds: ["open", "open"] });
@@ -190,7 +191,15 @@ test("list_entities: trims each entity down to id/type/owner/x/y/hp — never th
 
   const { body } = await callTool(mcp, "list_entities", { seat_handle });
   const entity = body.result.structuredContent.entities[0];
-  assert.deepEqual(Object.keys(entity).sort(), ["hp", "id", "owner", "type", "x", "y"]);
+  // `activity`/`orderTarget` are this file's own derived, closed-vocabulary summary of what an OWN
+  // entity is doing (see trimEntity) — the raw engine fields behind them still never ship.
+  assert.deepEqual(Object.keys(entity).sort().filter(k => !["activity", "orderTarget", "queue", "buildProgress"].includes(k)),
+    ["hp", "id", "owner", "type", "x", "y"]);
+  for (const e of body.result.structuredContent.entities) {
+    for (const leaked of ["order", "orderQueue", "homeCC", "targetId", "cargo", "rally"]) {
+      assert.equal(leaked in e, false, `${leaked} must never reach an observer`);
+    }
+  }
 });
 
 test("list_entities: an optional type filter narrows the digest without needing a second tool", async () => {
@@ -253,9 +262,164 @@ test("get_tech_options correctly reports affordable:false when the seat genuinel
 test("every observation tool rejects an invalid seat_handle as a tool execution error, never a crash or a JSON-RPC protocol error", async () => {
   const lobby = createLobby();
   const mcp = mcpFor(lobby, "irrelevant-no-real-match-here", {});
-  for (const name of ["get_situation", "list_entities", "get_map_overview", "get_tech_options"]) {
+  for (const name of ["get_situation", "list_entities", "get_map_overview", "get_tech_options", "get_counters"]) {
     const { status, body } = await callTool(mcp, name, { seat_handle: "garbage" });
     assert.equal(status, 200, `${name}: a bad handle is a tool execution error, not an HTTP-level failure`);
     assert.equal(body.result.isError, true, `${name} must reject a garbage handle`);
   }
+});
+
+
+/* ---------------------------------------------------------------
+   Agent-observability: what a thing IS, what it is DOING, and where.
+   Each case below is a gap a real MCP agent hit in a played match — a node whose commodity was
+   unknowable without walking a worker to it, a worker that silently stopped, combat stats that
+   lived only in an MCP resource many clients never surface.
+   --------------------------------------------------------------- */
+
+// The mapMeta shape server/mcpObservationCache.js builds from server/matchWorker.js's describeMap
+// reply — built here from the SAME state the projection is taken against, so the merge under test
+// is exercised against real node ids rather than invented ones.
+function mapMetaFor(state) {
+  return {
+    map: { width: state.map.width, height: state.map.height, planetId: state.planetId, tickRate: 20 },
+    nodesById: new Map(state.map.nodes.map(n => [n.id, { id: n.id, com: n.com, x: n.x, y: n.y, max: n.max, hidden: !!n.hidden }])),
+  };
+}
+
+test("get_map_overview reports each discovered node's commodity, position and distance from base", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") }, mapMetaFor(state));
+
+  const { body } = await callTool(mcp, "get_map_overview", { seat_handle });
+  const sc = body.result.structuredContent;
+  assert.ok(sc.nodes.every(n => typeof n.com === "string" && typeof n.x === "number" && typeof n.y === "number"),
+    "every node must say WHICH commodity it yields and where it is — the whole point of the merge");
+  assert.ok(sc.commodities_available.includes("ore"), "the home ore doorstep is reachable from the start");
+  const dists = sc.nodes.map(n => n.distance_from_base);
+  assert.deepEqual(dists, [...dists].sort((a, b) => a - b), "nodes come back nearest-first");
+  assert.equal(sc.map.width, state.map.width);
+});
+
+test("get_map_overview's node merge never introduces a node this seat has not discovered", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  // mapMeta deliberately carries EVERY node, hidden caches included — the merge must still be
+  // keyed by the seat's own fog-filtered projection.
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") }, mapMetaFor(state));
+
+  const { body } = await callTool(mcp, "get_map_overview", { seat_handle });
+  const undiscoveredHidden = state.map.nodes.find(n => n.hidden);
+  assert.ok(undiscoveredHidden, "the fixture must actually contain a hidden cache for this to prove anything");
+  assert.equal(JSON.stringify(body).includes(undiscoveredHidden.id), false);
+});
+
+test("get_map_overview degrades to the plain {id, amount} shape when the map reference hasn't arrived yet", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") });   // no mapMeta
+
+  const { body } = await callTool(mcp, "get_map_overview", { seat_handle });
+  assert.equal(body.result.isError, undefined);
+  assert.ok(body.result.structuredContent.nodes.every(n => n.com === null));
+});
+
+test("list_entities reports what your OWN units are doing, and can filter to just the idle ones", async () => {
+  const { state } = fixture();
+  const worker = [...state.units.values()].find(u => u.owner === "player" && u.type === "worker");
+  assert.ok(worker, "the fixture must start the player with a worker");
+  worker.order = null;   // exactly the shape a drained node leaves behind
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "list_entities", { seat_handle, activity: "idle" });
+  const ids = body.result.structuredContent.entities.map(e => e.id);
+  assert.ok(ids.includes(worker.id), "an order-less worker must be findable as idle");
+
+  const all = await callTool(mcp, "list_entities", { seat_handle });
+  const mine = all.body.result.structuredContent.entities.filter(e => e.owner === "player");
+  assert.ok(mine.every(e => typeof e.activity === "string"), "own entities carry an activity");
+});
+
+test("list_entities never reports an enemy's activity — fog does not reveal intent", async () => {
+  const { state } = fixture();
+  // Put an enemy unit right next to the player's base so it IS visible, order and all.
+  const seen = makeUnit("skiff", "ai", state.map.bases.player.x + 20, state.map.bases.player.y + 20);
+  seen.order = { type: "move", x: 1, y: 1 };
+  state.units.set(seen.id, seen);
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "list_entities", { seat_handle, owner: "ai" });
+  const enemy = body.result.structuredContent.entities.find(e => e.id === seen.id);
+  assert.ok(enemy, "the adjacent enemy must be visible at all for this to prove anything");
+  assert.equal(enemy.activity, undefined);
+  assert.equal(enemy.orderTarget, undefined);
+});
+
+test("get_situation names the seat, its opponents and its idle units", async () => {
+  const { state } = fixture();
+  for (const u of state.units.values()) if (u.owner === "player") u.order = null;
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") }, mapMetaFor(state));
+
+  const { body } = await callTool(mcp, "get_situation", { seat_handle });
+  const sc = body.result.structuredContent;
+  assert.equal(sc.you, "player");
+  assert.deepEqual(sc.opponents, ["ai"]);
+  assert.ok(sc.idle_unit_ids.length > 0);
+  assert.equal(sc.map.tickRate, 20);
+});
+
+test("get_tech_options carries combat stats, the missing prereq by name, and where a unit is produced", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle });
+  const sc = body.result.structuredContent;
+  const skiff = sc.units.find(u => u.type === "skiff");
+  assert.ok(skiff.stats.hp > 0 && skiff.stats.attack > 0, "combat math needs real stats, not a hand-kept table");
+  assert.deepEqual(skiff.produced_by, ["barracks"]);
+  assert.deepEqual(skiff.missing_prereqs, [], "the Skiff has no prerequisite of its own");
+
+  // The Lancer does: its Foundry doesn't exist at match start, and "prereqs_met:false" alone left a
+  // caller with no way to find out what to build first.
+  const lancer = sc.units.find(u => u.type === "lancer");
+  assert.equal(lancer.prereqs_met, false);
+  assert.deepEqual(lancer.missing_prereqs, ["foundry"]);
+
+  // The scenario-only Freighter advertises no cost and no producer — it must read as unbuildable
+  // rather than as a free unit an out-of-ore agent can go looking for.
+  const freighter = sc.units.find(u => u.type === "freighter");
+  assert.deepEqual(freighter.produced_by, []);
+  assert.equal(freighter.buildable, false);
+});
+
+test("get_counters exposes the same real bonusVs table the engine's combat math reads", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, {});
+
+  const { body } = await callTool(mcp, "get_counters", { seat_handle });
+  const counters = body.result.structuredContent.counters;
+  assert.ok(counters.length > 0);
+  assert.ok(counters.every(c => UNITS[c.attacker] && c.bonus > 0));
+  for (const c of counters) assert.equal(UNITS[c.attacker].bonusVs[c.target], c.bonus);
 });

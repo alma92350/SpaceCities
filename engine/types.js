@@ -150,6 +150,8 @@
  * @property {Unit} [squadLeader]     transient, NEVER persisted: the leader this unit is following, if any (engine/commands.js setSquadLeader) — a live object reference
  * @property {Unit[]} [squadFollowers]  transient, NEVER persisted: the units following THIS unit as their leader (engine/commands.js dispatchFormation)
  * @property {number} [facing]  a player-set facing angle (radians), from a click-and-drag move/attack-move (engine/commands.js applyFacing) — overrides the movement-inferred angle a STATIONARY unit would otherwise freeze at (renderShared.js updateFacing); a plain (non-drag) move/attack-move clears it, so it never lingers stale after a later un-aimed order
+ * @property {string} [laneId]  the Freight Lane this ship is assigned to (engine/galaxy.js assignShipToLane) — a standing investment, so stagedRiders excludes it from jumps
+ * @property {number} [packId]  which bandit pack a Bounty-scenario pirate belongs to (engine/scenarios.js setupBounty) — packs are cleared as whole units, so updateBounty groups survivors by this to decide which camps are still standing; absent on every non-scenario unit
  * @property {number} [kills]  confirmed kills this unit has landed (engine/combat.js performAttack's target-died branch, unit-kind attackers only) — feeds entities.js rankMults for the veterancy damage-dealt/damage-taken multipliers and renderUnits.js's chevron overlay; absent reads as 0 (fresh off the line)
  */
 
@@ -172,12 +174,16 @@
  * @property {number} attackTimer
  * @property {string|null} targetId
  * @property {{x:number, y:number, nodeId?:string|null}} rally   rally-to-resource: a rally dropped on a live node carries its id, and a unit produced there spawns already mining (engine/production.js)
+ * @property {boolean} [capital]      Command Center fortified into the Capital — double HP, one per owner (engine/galaxy.js upgradeToCapital)
  * @property {number} [tier]          Spaceport upgrade tier (engine/galaxy.js)
  * @property {number} [lastLanding]   Spaceport: galaxy.time it last received a jump (engine/galaxy.js landingZone)
  * @property {Array<{techId:string, progress:number}>} [researchQueue]  Datacenter (TECHS) or Refinery (UPGRADES) — engine/techtree.js updateResearch resolves the right table by building.type
  * @property {boolean} [paused]       player-paused factory / rig / Combustion Generator / Reactor (frees its Power, or — for a source — takes it off the grid, engine/industry.js sourceActive)
  * @property {boolean} [electrified]  Odyssey: a non-power building wired into the grid for +30% (engine/industry.js)
  * @property {number} [charge]        wonder charge 0..1 (engine/wonder.js)
+ * @property {boolean} [capital]      an Odyssey homeworld Command Center promoted by engine/galaxy.js's
+ *                                   upgradeToCapital — permanent, and the reason engine/colony.js
+ *                                   refuses to pack it back into a colony ship
  * @property {boolean} [rivalAscended] per-BUILDING idempotency latch stamped by engine/victory.js
  *   checkEndlessWin so a finished rival Gate emits its `rivalGateComplete` event once. Distinct
  *   from galaxy.rivalAscended, which is the campaign-level Set of ascended WORLD ids
@@ -208,6 +214,10 @@
  * @property {number} y
  * @property {boolean} [hidden]   a cache, invisible until scouted
  * @property {number} [miners]    workers currently assigned (engine/gather.js saturation)
+ * @property {boolean} [depletedAnnounced]  this node's own one-shot "it ran dry" latch — set when
+ *   engine/gather.js pushes its nodeDepleted event, so several miners landing the finishing tick
+ *   together announce it once between them rather than once each. Transient, never persisted (a
+ *   reloaded dry node simply never announces again, which is the same outcome).
  * @property {boolean} [crater]   spawned by a Helium Bomb detonation (engine/bomb.js), not
  *   engine/map.js generation — needs its whole shape saved/restored, not just its amount
  *   (engine/persist.js)
@@ -467,4 +477,6 @@
  * @property {Set<string>} [rivalAscended] worlds whose Gate has completed — the idempotency latch that
  *   keeps the permanent stance ceiling applied. Created lazily by checkRivalGate
  * @property {Object[]} [rivalGateNotes]   transient UI queue of rival-Gate events; created lazily
+ * @property {boolean} [reliefNote]   transient UI flag: a relief colony ship just arrived (checkGalaxyRescue), drained by boot.js
+ * @property {boolean} [surrendered]  the one terminal state — the player gave up (surrenderGalaxy)
  */

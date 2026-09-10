@@ -25,7 +25,7 @@ import { serializeGame, serializeGameString, deserializeGame, serializeGalaxy, s
 import { bootState, bootGalaxy, restartToMapSelect, pauseLoop, resumeLoop } from "./boot.js";
 import { isGalaxySave, resumableMode } from "./saveShape.js";
 import { showGalaxyToast } from "./overlays.js";
-import { liveCompetitionFixture, forfeitLiveCompetitionMatch } from "./competition.js";
+import { liveCompetitionFixture, forfeitLiveCompetitionMatch } from "./competitionScreens.js";
 import * as sound from "./sound.js";
 // ADR-0003/ADR-0004 (T-012): a resumed skirmish runs behind a real session too, exactly like a
 // freshly started one (boot.js's startGame) — createSession({state}) wraps the ALREADY-

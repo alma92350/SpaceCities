@@ -974,3 +974,29 @@ test("T-061: deliberation mode's own batched ticks never log a tickOverrun — N
     assert.equal(lines.filter(e => e.type === "tickOverrun").length, 0);
   } finally { await worker.terminate(); }
 });
+
+
+/* ---------- describeMap: the static map reference (agent-observability) ----------
+   engine/projection.js reduces an ordinary node to {id, amount} because a browser client
+   regenerates the rest from the seed. An MCP agent has no map generator, so it could only learn a
+   node's commodity by walking a worker to it — the gap that makes "mine the closest ore"
+   unanswerable over MCP. Request/response, not a one-shot post at boot, because the consumer
+   attaches its listener after an await in tools/serve.js. */
+
+test("a worker answers describeMap with every node's commodity and position, plus the map's bounds and tick rate", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "ready");
+    const reply = waitFor(worker, m => m.type === "mapMeta");
+    worker.postMessage({ type: "describeMap" });
+    const meta = await reply;
+
+    assert.ok(meta.map.width > 0 && meta.map.height > 0);
+    assert.equal(meta.map.tickRate, 20);
+    assert.ok(meta.nodes.length > 0);
+    assert.ok(meta.nodes.every(n => typeof n.id === "string" && typeof n.com === "string"
+      && typeof n.x === "number" && typeof n.y === "number"),
+      "a node with no commodity or position is exactly the gap this closes");
+    assert.ok(meta.nodes.some(n => n.hidden), "hidden caches are reported too — the consumer, not this reply, applies fog");
+  } finally { await worker.terminate(); }
+});

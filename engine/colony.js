@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    COLONY SHIP (Odyssey) — the mobile seed of a base. In the open world both sides
    START with a colony ship instead of a placed Command Center, and found every new
@@ -28,6 +29,11 @@ export const COLONY_SHIP_WORKERS = 3;
 // so move to clear ground and retry rather than sliding), consume the ship, spawn the
 // finished CC (fresh id) and its disembarking workers. Instant + pure — no clock/RNG,
 // so it replays identically. Returns the new CC's id, or null if it couldn't deploy.
+/**
+ * @param {State} state
+ * @param {string} shipId
+ * @returns {string|null} the new Command Center's id, or null if nothing was deployed
+ */
 export function deployColonyShip(state, shipId) {
   const ship = state.units.get(shipId);
   if (!ship || ship.type !== "colonyship") return null;
@@ -51,6 +57,11 @@ export function deployColonyShip(state, shipId) {
 // Does this owner still hold a colony ship? The single source of truth for the
 // "a side with only an undeployed colony ship still has a foothold" rule shared by
 // checkEndlessLoss (engine/victory.js) and checkDomination (engine/galaxy.js).
+/**
+ * @param {State} state
+ * @param {string} owner
+ * @returns {boolean}
+ */
 export function hasColonyShip(state, owner) {
   for (const u of state.units.values())
     if (u.owner === owner && u.type === "colonyship") return true;
@@ -67,6 +78,11 @@ export function hasColonyShip(state, owner) {
 // checkEndlessLoss already cover, so there's no transient "0 CC" loss-condition gap to guard.
 export const PACK_COST = { ore: 200 };
 
+/**
+ * @param {State} state
+ * @param {string} buildingId
+ * @returns {string|null} the new colony ship's id, or null if nothing was packed
+ */
 export function packCommandCenter(state, buildingId) {
   // Odyssey-only, the same hard guarantee issueBuild makes for every odysseyOnly building/unit
   // (engine/commands.js): colonyship is odysseyOnly and skirmish's checkWinCondition has no

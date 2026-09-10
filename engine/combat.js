@@ -203,7 +203,12 @@ function performAttack(state, attacker, def, target) {
   // stamp on splash damage.
   target.lastHitAt = state.time;
   state.events.push({
-    type: "attackHit", x: target.x, y: target.y,
+    // sourceId/targetId (agent-observability): an MCP agent reading this event off the wire has
+    // no way to diff two list_entities calls fast enough to tell WHICH of its units is under fire
+    // when several fights overlap — coordinates alone forced it to reconstruct the battle. Purely
+    // additive alongside the pre-existing x/y/fromX/fromY the renderer already draws tracers from.
+    type: "attackHit", x: target.x, y: target.y, sourceId: attacker.id, targetId: target.id,
+    targetType: target.type, targetOwner: target.owner,
     fromX: attacker.x, fromY: attacker.y, unitType: attacker.type, owner: attacker.owner,
     heavy: !!(def.bonusVsBuildings && target.kind === "building"),
     bonus: !!(def.bonusVs && def.bonusVs[target.type]),
@@ -228,7 +233,7 @@ function performAttack(state, attacker, def, target) {
     // unitType/kind (docs/improvement-proposals.md "Tiered destruction"): purely additive on top
     // of the pre-existing x/y/owner — boot.js/effects.js/renderEffects.js/sound.js scale the
     // death's visuals and audio by what actually died (a Worker pops, a Dreadnought booms).
-    state.events.push({ type: "entityKilled", x: target.x, y: target.y, owner: target.owner, unitType: target.type, kind: target.kind });
+    state.events.push({ type: "entityKilled", id: target.id, x: target.x, y: target.y, owner: target.owner, unitType: target.type, kind: target.kind, killerId: attacker.id, killerOwner: attacker.owner });
     return true;
   }
   return false;
@@ -271,7 +276,7 @@ function applySplash(state, attacker, target, dmg, splash) {
     removeEntity(state, e.id);
     // Same unitType/kind addition as performAttack's own entityKilled push above — a splash
     // kill gets the same tiered destruction feedback as a direct one.
-    state.events.push({ type: "entityKilled", x: e.x, y: e.y, owner: e.owner, unitType: e.type, kind: e.kind });
+    state.events.push({ type: "entityKilled", id: e.id, x: e.x, y: e.y, owner: e.owner, unitType: e.type, kind: e.kind, killerId: attacker.id, killerOwner: attacker.owner });
   }
 }
 

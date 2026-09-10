@@ -1,3 +1,4 @@
+// @ts-check
 /* ============================================================
    Playable factions. A faction is a small bundle of PASSIVE trait
    multipliers — nothing more — so it changes how a side plays without
@@ -58,6 +59,12 @@ export const PLAYABLE_FACTIONS = ["frontier", "miners", "syndicate"];
 // trait / no faction / no players on the state (map-less test stubs). Pure and
 // state-reading; folded into sideMod so every existing modifier consumer picks
 // it up automatically.
+/**
+ * @param {State} state
+ * @param {string} owner
+ * @param {string} key the trait to read off this owner's faction
+ * @returns {number}
+ */
 export function factionTrait(state, owner, key) {
   const fid = state && state.players && state.players[owner] && state.players[owner].faction;
   const traits = fid && FACTIONS[fid] && FACTIONS[fid].traits;

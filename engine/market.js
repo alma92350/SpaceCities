@@ -90,8 +90,12 @@ function effectiveBuySpread(state, com) {
 // strategic goods (AI cores, antimatter, plasma torpedoes).
 const PRODUCED = new Set(TRADEABLE.filter(c => COM[c].tier !== "Raw"));
 
+/**
+ * @param {State} state
+ * @returns {Market} a fresh price book — equilibrium `base`, zeroed `pressure` and `glut`
+ */
 export function createMarket(state) {
-  const total = {}; let sum = 0;
+  /** @type {Resources} */ const total = {}; let sum = 0;
   // SEED DEPOSITS ONLY — battlefield debris is not part of a world's price book. Wreck
   // (engine/wreckage.js) and crater (engine/bomb.js) nodes are pushed onto state.map.nodes
   // DURING play, and this function runs exactly twice in a world's life: once at creation
@@ -111,7 +115,9 @@ export function createMarket(state) {
     total[n.com] = (total[n.com] || 0) + n.max; sum += n.max;
   }
   const industry = PLANETS.find(p => p.id === state.planetId)?.industry ?? 5;
-  const base = {}, pressure = {}, glut = {};
+  /** @type {Resources} */ const base = {};
+  /** @type {Resources} */ const pressure = {};
+  /** @type {Resources} */ const glut = {};
   for (const com of TRADEABLE) {
     let mult;
     if (PRODUCED.has(com)) {

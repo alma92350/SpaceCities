@@ -148,7 +148,7 @@ found no overstatements.
 | | |
 |---|---|
 | Test suite | **1,897 tests, 0 failures**, 4,723 `assert.*` calls across 101 `*.test.js` files (31,711 lines) |
-| Wall clock | **145 s** here; measured separately at 150.4 s full vs. **20.5 s without `test/ailab.test.js`** — that one file is **87% of the suite's wall clock** for 3.4% of its tests |
+| Wall clock | **145 s** here; measured separately at 150.4 s full vs. **20.5 s without `test/slow/ailab.test.js`** — that one file is **87% of the suite's wall clock** for 3.4% of its tests |
 | `npm run typecheck` | exits 0, zero output |
 | Production code | 58,701 lines; 76 shipped modules; largest is `hudSelection.js` at 2,201 lines / 131 KB |
 | Type coverage | `// @ts-check` on **10 of 76 modules (13%)** — all in `engine/`, **0 of 29 root modules** |
@@ -392,7 +392,7 @@ surface.
   are already exported and simply not imported. **S**
 
 **Speed and structure**
-- **`test/ailab.test.js` is 87% of the suite's wall clock** — ~130 s for 65 tests, all guarding a dev
+- **`test/slow/ailab.test.js` is 87% of the suite's wall clock** — ~130 s for 65 tests, all guarding a dev
   bench. Roughly 51 s is spent simulating real matches to assert *pure combinatorics* (pairing counts, bye
   rotation, sort order, `ceil(log2(n))`). The file already demonstrates the fast idiom once, at `:834`, and
   its own comment explains why it's better. Dropping the loop from ~150 s to ~20 s is the difference
