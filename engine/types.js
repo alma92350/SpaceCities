@@ -181,6 +181,9 @@
  * @property {boolean} [paused]       player-paused factory / rig / Combustion Generator / Reactor (frees its Power, or — for a source — takes it off the grid, engine/industry.js sourceActive)
  * @property {boolean} [electrified]  Odyssey: a non-power building wired into the grid for +30% (engine/industry.js)
  * @property {number} [charge]        wonder charge 0..1 (engine/wonder.js)
+ * @property {boolean} [capital]      an Odyssey homeworld Command Center promoted by engine/galaxy.js's
+ *                                   upgradeToCapital — permanent, and the reason engine/colony.js
+ *                                   refuses to pack it back into a colony ship
  * @property {boolean} [rivalAscended] per-BUILDING idempotency latch stamped by engine/victory.js
  *   checkEndlessWin so a finished rival Gate emits its `rivalGateComplete` event once. Distinct
  *   from galaxy.rivalAscended, which is the campaign-level Set of ascended WORLD ids
@@ -211,6 +214,10 @@
  * @property {number} y
  * @property {boolean} [hidden]   a cache, invisible until scouted
  * @property {number} [miners]    workers currently assigned (engine/gather.js saturation)
+ * @property {boolean} [depletedAnnounced]  this node's own one-shot "it ran dry" latch — set when
+ *   engine/gather.js pushes its nodeDepleted event, so several miners landing the finishing tick
+ *   together announce it once between them rather than once each. Transient, never persisted (a
+ *   reloaded dry node simply never announces again, which is the same outcome).
  * @property {boolean} [crater]   spawned by a Helium Bomb detonation (engine/bomb.js), not
  *   engine/map.js generation — needs its whole shape saved/restored, not just its amount
  *   (engine/persist.js)

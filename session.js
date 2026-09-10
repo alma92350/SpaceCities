@@ -162,6 +162,19 @@ export const game = {
   // already funnels through. Never part of the sim or the persisted save, same reasoning as
   // spectateMatch: it says which VIEW this state belongs to, not anything about the state itself.
   networkSpectate: false,
+  // T-034: true while PLAYING a real live network match (as opposed to networkSpectate above,
+  // which is watching one). Set by lobbyScreen.js's joinLive right after bootState — which clears
+  // it, exactly like networkSpectate and spectateMatch — and cleared by boot.js's
+  // restartToMapSelect, the one choke point every "leave" path already funnels through.
+  //
+  // Its only consumer is saveShape.js's resumableMode, and the reason is the same one that rule
+  // already gives for a spectator: this seat's state is a reassembled projection, which carries no
+  // per-owner fog structures or controllers, so engine/persist.js cannot serialize it. A live
+  // match is resumed by RECONNECTING (liveMatchStorage.js), never from a local checkpoint.
+  //
+  // Never part of the sim or the persisted save, same reasoning as the two flags above: it says
+  // which VIEW this state belongs to, not anything about the state itself.
+  networkLive: false,
 };
 
 // T-031: the ONE place a seat's owner id (`"player"`/`"ai"`, or a future third+ seat's own id)

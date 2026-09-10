@@ -61,6 +61,15 @@
                                                     opened (first join OR a reconnect) — cancels any
                                                     pending grace timer and hands control back if the
                                                     AI had already taken over
+       {type:"describeMap"}                       (agents) ask for this match's own STATIC map
+                                                    reference — every node's commodity/position/max,
+                                                    the map bounds, the tick rate — answered with one
+                                                    {type:"mapMeta", map, nodes} message. Exists
+                                                    because engine/projection.js ships a node as
+                                                    {id, amount} only (a browser client regenerates
+                                                    the rest from the seed; an MCP agent cannot).
+                                                    Request/response, not a post at boot: the
+                                                    consumer attaches its listener after an await.
        {type:"fingerprint", seat, tick, fp}  (T-040)  a seat's own periodic self-check
                                                     (net/fingerprint.js's seatFingerprint, computed
                                                     client-side) — compared against this worker's own
@@ -193,17 +202,14 @@ match.emitAck = rec => {
   parentPort.postMessage({ type: "commandResult", seat: rec.owner, seq: rec.seq, result: toCommandResult(rec.result) });
 };
 
-// The `ready` handshake, kept so it can be RE-sent on demand. A worker_threads message posted
-// before the parent has attached a "message" listener is dropped, not queued — and this file posts
-// `ready` the moment it boots. A parent that spawns two matches and attaches them one at a time
-// (`await attach(A); await attach(B)`) therefore loses B's `ready` during A's await, which left the
-// relay with an undefined matchId and every later connection to B refused at the upgrade. So the
-// handshake is re-requestable rather than a single unrepeatable event: net/wsWorkerTransport.js asks
-// for it as soon as it starts listening, and whichever copy lands first is the one it uses.
-const readyMessage = { type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId };
-
 parentPort.on("message", msg => {
-  if (msg.type === "getReady") { parentPort.postMessage(readyMessage); return; }
+  // "Say that again": re-answers the ready message above for a parent that attached too late to
+  // hear it the first time. Idempotent and read-only — it reports what this worker already is, and
+  // starts nothing — so it is safe to ask at any point in a match's life, and safe to ask twice.
+  if (msg.type === "ready?") {
+    parentPort.postMessage(readyMessage());
+    return;
+  }
   if (msg.type === "command") {
     const admitted = admit(match, msg.envelope, msg.seat);
     // Mirrors net/wsServerTransport.js's own in-process reasoning exactly: a shape-rejected
@@ -214,6 +220,27 @@ parentPort.on("message", msg => {
       const seq = msg.envelope && Number.isInteger(msg.envelope.seq) ? msg.envelope.seq : null;
       if (seq !== null) parentPort.postMessage({ type: "commandResult", seat: msg.seat, seq, result: { ok: false, code: admitted.code } });
     }
+    return;
+  }
+  if (msg.type === "describeMap") {
+    // Agent-observability: the STATIC half of this match's map — what each resource node actually
+    // is and where, plus map bounds and tick rate. engine/projection.js deliberately ships only
+    // {id, amount} per node, because a browser client regenerates the rest deterministically from
+    // the seed it already has; an MCP agent has no map generator and so had no way to learn a
+    // node's commodity except by walking a worker to it and watching which counter moved — the
+    // single gap that makes "mine the closest ore" an unanswerable instruction over MCP.
+    // Request/response rather than an unprompted post at boot, because a consumer
+    // (server/mcpObservationCache.js) attaches its listener AFTER an await in tools/serve.js and
+    // would miss a one-shot message sent before that.
+    // No fog is bypassed by answering this in full: the merge on the other side is keyed by the
+    // ids in that seat's OWN fog-filtered proj.nodes, so an undiscovered node stays invisible —
+    // this adds detail to nodes a seat can already see, never nodes. Node positions are in any
+    // case already public to any client that can regenerate the map from the seed.
+    parentPort.postMessage({
+      type: "mapMeta",
+      map: { width: match.state.map.width, height: match.state.map.height, planetId: match.state.planetId, tickRate: Math.round(1000 / TICK_MS) },
+      nodes: match.state.map.nodes.map(n => ({ id: n.id, com: n.com, x: n.x, y: n.y, max: n.max, hidden: !!n.hidden })),
+    });
     return;
   }
   if (msg.type === "surrender") {
@@ -284,7 +311,18 @@ parentPort.on("message", msg => {
   }
 });
 
-parentPort.postMessage(readyMessage);
+// The one message every attachment needs before it can route anything (net/wsWorkerTransport.js's
+// attachWsMatchWorker resolves on it). It is posted EAGERLY, as it always was, so the ordinary
+// attach-immediately path costs nothing — but a Worker's port is flowing from construction, so this
+// is DROPPED, not queued, if the parent has not attached its listener yet. That is an ordinary
+// shape (spawn several workers, attach to each in turn) and it used to leave the parent bound to
+// `matchId: undefined`, rejecting every upgrade in silence. So the same answer is also available on
+// REQUEST below: a parent that missed this one asks for it, rather than waiting forever for a
+// message that has already been and gone.
+function readyMessage() {
+  return { type: "ready", owners: match.state.owners, createGameStateOpts: workerData.createGameStateOpts, restored: !!restored, matchId };
+}
+parentPort.postMessage(readyMessage());
 
 // T-036: state.playerAi driven explicitly, BEFORE stepMatch — engine/sim.js's own tick() only ever
 // auto-drives "ai" (its own hardcoded default), so a disconnected HOST's seat needs this file to do

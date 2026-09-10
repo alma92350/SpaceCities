@@ -523,7 +523,13 @@ test("the shipped module graph has no import cycle outside the known UI cluster 
   // bootState — reused rather than redefined, the same CONTRIBUTING.md reason competition.js's own
   // paragraph above already gives, and every one of those calls also lives inside a function
   // (renderLobbyScreen/joinLive), never at this file's own module-evaluation time either.
-  const KNOWN = ["boot.js", "competition.js", "hud.js", "hudSelection.js", "lobbyScreen.js", "overlays.js", "saveload.js", "setup.js"];
+  // competitionScreens.js joins the cluster for exactly the reason competition.js used to be in it:
+  // it is the half of that module that renders, so it is the half that imports setup.js's
+  // renderMapSelect and boot.js's startCompetitionMatch, and setup.js imports its renderCompetition
+  // back. The pure half (competition.js) stays in the list only because the screens import ITS
+  // shaping functions — it no longer imports the DOM, or setup.js's renderMapSelect, at all.
+  const KNOWN = ["boot.js", "competition.js", "competitionScreens.js", "hud.js", "hudSelection.js",
+                 "lobbyScreen.js", "overlays.js", "saveload.js", "setup.js"];
   assert.deepEqual(sccs.map(c => c.join(" ")), [KNOWN.join(" ")],
     "import cycle(s) other than the documented UI cluster (see overlays.js's note on live bindings):\n" +
     sccs.map(c => c.join(", ")).join("\n"));
@@ -588,4 +594,50 @@ test("T-032: camera.js has zero imports — camera movement is structurally unab
   const src = readFileSync(join(root, "camera.js"), "utf8");
   const specs = [...src.matchAll(IMPORT_SPEC)].map(specPath);
   assert.deepEqual(specs, [], `camera.js must import nothing at all — found: ${specs.join(", ")}`);
+});
+
+
+/* ---------------------------------------------------------------
+   A CLI entry guard must work on Windows too.
+
+   Every tool under tools/ ends with a "run main() only when executed directly, not when imported"
+   guard. Four of them spelled it `new URL(import.meta.url).pathname === process.argv[1]`, which is
+   false on EVERY Windows machine: the pathname of a file: URL there is "/C:/Users/.../foo.js"
+   (leading slash, forward slashes) and process.argv[1] is "C:\\Users\\...\\foo.js". The guard never
+   fired, so main() never ran and the process exited immediately having done nothing — for
+   tools/mcpStdioBridge.js, spawned over stdio by an MCP client, that surfaces as a bare
+   "CONNECTION_CLOSED" that reads exactly like the game server being down.
+
+   Pinned as a static check rather than a behavioural one because the bug is invisible on the
+   POSIX machines this suite runs on: there the two forms are identical, so no amount of executing
+   these tools here would ever catch a regression.
+   --------------------------------------------------------------- */
+
+test("no CLI entry guard compares a file: URL pathname against process.argv[1] — that never matches on Windows", () => {
+  const offenders = [];
+  // shippedJs(), not walkJs(root): this file's own regex literal above would otherwise match
+  // itself. test/ is excluded there for the reason its own comment gives — node --test already
+  // covers it — and no CLI entry guard lives under test/ anyway.
+  for (const file of shippedJs()) {
+    const src = readFileSync(file, "utf8");
+    if (/new URL\(import\.meta\.url\)\.pathname\s*===\s*process\.argv\[1\]/.test(src)) {
+      offenders.push(relative(root, file));
+    }
+  }
+  assert.deepEqual(offenders, [],
+    "use fileURLToPath(import.meta.url) === process.argv[1] instead — the URL-pathname form is false on Windows, so main() never runs");
+});
+
+test("every tools/ entry guard that runs main() resolves its own path with fileURLToPath", () => {
+  const guarded = [];
+  for (const file of walkJs(join(root, "tools"))) {
+    const src = readFileSync(file, "utf8");
+    if (!/process\.argv\[1\]/.test(src)) continue;
+    guarded.push(relative(root, file));
+    assert.match(src, /fileURLToPath\(import\.meta\.url\)/,
+      `${relative(root, file)} guards on process.argv[1] but never converts import.meta.url with fileURLToPath`);
+    assert.match(src, /from "node:url"/,
+      `${relative(root, file)} uses fileURLToPath without importing it`);
+  }
+  assert.ok(guarded.length >= 4, `expected several guarded CLI tools, found ${guarded.length}`);
 });

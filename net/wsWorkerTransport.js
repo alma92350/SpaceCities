@@ -114,17 +114,30 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
   const { allowedOrigins, path, requireMatch, authorizeSeat, spectatorsEnabled = true } = opts;
 
   return new Promise(resolve => {
-    // Wait for the `ready` message SPECIFICALLY, and ask for one. A bare once("message") latched
-    // onto whatever arrived first, which is only `ready` when this attachment wins the race against
-    // the worker's own boot — a caller spawning two matches and attaching them sequentially loses
-    // that race on the second one (worker_threads drops a message posted with no listener attached),
-    // and then read matchId/owners off a *state* push instead, leaving both undefined and every
-    // connection to that match refused at the upgrade. Filtering fixes the mis-latch; `getReady`
-    // (server/matchWorker.js) recovers a copy that was already dropped. Ignoring non-`ready`
-    // messages until then is safe — a state push before any seat has connected has no recipient.
-    const onMessage = readyMsg => {
-      if (!readyMsg || readyMsg.type !== "ready") return;
+    // WAIT FOR "ready" BY TYPE, never for merely the FIRST message.
+    //
+    // A Worker's port is flowing from construction, so a message posted while nothing is listening
+    // is DROPPED, not queued. This used to be `worker.once("message", ...)`, which was correct only
+    // while every caller attached before the worker got a word in — and server/matchWorker.js posts
+    // "ready" and then starts pushing state on every tick. An attach that landed even slightly late
+    // therefore read a "state" push as its ready message and bound owners/createGameStateOpts/
+    // matchId to undefined. Nothing threw: the attachment came up looking healthy, and then
+    // rejected every upgrade (`url.searchParams.get("match") !== undefined`) while deliberately
+    // leaving the socket UNCLAIMED for a sibling attachment that did not exist — so a client hung
+    // until its own connect timeout, with no error on either side.
+    //
+    // That is an ordinary deployment shape, not a rare one: spawn several match workers and attach
+    // to them in turn, as any server hosting more than one match does, and the later attaches are
+    // exactly the ones that lose the race. It was diagnosed twice as CPU flakiness in
+    // test/wsWorkerTransport.test.js before being read correctly — the two tests at the bottom of
+    // that file now reproduce it deterministically, by delaying the attach on purpose.
+    //
+    // Ignoring the state pushes that arrive before "ready" is safe and always was: no connection
+    // exists yet, so there is nobody they could have been sent to.
+    function onMessage(msg) {
+      if (!msg || msg.type !== "ready") return;
       worker.off("message", onMessage);
+      const readyMsg = msg;
       const { owners, createGameStateOpts, matchId } = readyMsg;
       const bySeat = new Map();               // owner -> live connection, at most one per seat
       const lastSnapshotBySeat = new Map();    // owner -> last quantized snapshot sent (T-028b)
@@ -288,11 +301,13 @@ export function attachWsMatchWorker(httpServer, worker, opts = {}) {
           chatTimestampsBySeat.clear();
         },
       });
-    };
+    }
     worker.on("message", onMessage);
-    // Only AFTER the listener is attached, so this request can't lose the same race it exists to
-    // close. Harmless when the original `ready` did arrive — the filter above takes the first copy
-    // and detaches, so the duplicate is never seen.
-    worker.postMessage({ type: "getReady" });
+    // …and ASK, having attached. The eager "ready" the worker posts on startup is dropped rather
+    // than queued if it beat the listener above, so waiting alone is only correct when the attach
+    // wins the race. server/matchWorker.js answers "ready?" with the same message; whichever
+    // arrives first resolves this promise and onMessage removes itself, so the duplicate that may
+    // follow is ignored.
+    worker.postMessage({ type: "ready?" });
   });
 }

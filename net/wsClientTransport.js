@@ -148,6 +148,17 @@ export function createWsClientTransport(url, opts = {}) {
     let seq = 0;
     let closed = false;      // true only once the CALLER explicitly calls transport.close()
     let settled = false;     // has the OUTER promise resolved/rejected yet (the very first handshake)?
+    // DISTINCT FROM `settled`, and the distinction is load-bearing. `settled` answers "has the
+    // caller's promise been answered", which is true whether that answer was a transport or an
+    // error. `live` answers "did this transport ever actually come up", which is only ever true
+    // via the welcome handshake below. The reconnect decision needs the second question, and used
+    // to ask the first: after a REJECTED first connect, `settled` was true, so the socket's own
+    // "close" event concluded "the transport was live and just dropped" and scheduled a reconnect
+    // — every reconnectDelayMs, forever, with no way to stop it, since the caller never received a
+    // transport to close. Whether that happened at all depended on which of "error" and "close"
+    // arrived first for the failed attempt, which is why it surfaced as four test files that hung
+    // on one Node version and not another. See test/wsReconnect.test.js's own block on it.
+    let live = false;        // did the welcome handshake ever complete on this transport?
     let announcedDisconnected = false;   // avoid re-emitting "disconnected" on every failed retry
     let reconnectTimer = null;
     let initialAttempt = 0;   // T-060: how many FIRST-handshake attempts have already failed
@@ -265,7 +276,10 @@ export function createWsClientTransport(url, opts = {}) {
         // mistaken for "the transport was live and just dropped", or it would schedule a SECOND,
         // competing retry/reconnect nothing asked for.
         if (connectTimedOut) return;
-        if (!settled) {
+        // NOT `settled`: a rejected first connect has settled the promise without ever coming up,
+        // and must fall in here (harmlessly, its failure already handled) rather than out into the
+        // reconnect below.
+        if (!live) {
           if (!initialFailureHandled) { initialFailureHandled = true; retryOrFailInitial(new Error("WebSocket closed before the welcome handshake completed")); }
           return;
         }
@@ -291,7 +305,7 @@ export function createWsClientTransport(url, opts = {}) {
           // instead of setting them.
           const { planetId: welcomePlanetId, seed: welcomeSeed, sizeMult, resourceMult, swapAsym } = msg.createGameState;
           map = generateMap(welcomePlanetId, mulberry32(welcomeSeed), { sizeMult, resourceMult, swapAsym });
-          const isReconnect = settled;   // the outer promise already resolved once before -> this welcome is from a RETRY, not the original connect
+          const isReconnect = live;   // this transport has come up before -> this welcome is from a RETRY, not the original connect
           const sameMatch = isReconnect && matchId === msg.matchId;
           if (!sameMatch) fog = createFog(map);   // no exploration memory worth preserving for a genuinely different match (or the very first connect)
           matchId = msg.matchId;
@@ -302,6 +316,7 @@ export function createWsClientTransport(url, opts = {}) {
 
           if (!isReconnect) {
             settled = true;
+            live = true;
             resolve(makeTransport());
           } else {
             announcedDisconnected = false;

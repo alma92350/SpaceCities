@@ -1763,3 +1763,33 @@ test("a plain move order clears a stale auto-acquired target — a retreating un
   assert.equal(mine.autoTarget, null,
     "a plain move order must clear the stale target rather than leaving the unit flagged combat-mode");
 });
+
+
+/* ---------- events name the entities involved (agent-observability) ----------
+   attackHit/entityKilled used to carry coordinates only, so an observer with three overlapping
+   fights could only work out WHICH of its units had died by diffing two entity listings. */
+
+test("attackHit and entityKilled carry the ids of everything involved, not just coordinates", () => {
+  const state = createGameState({ planetId: "ferros" });
+  const [a, b] = faceOff(state);
+  state.events.length = 0;
+
+  updateCombat(state, a, 0);
+  const hit = state.events.find(e => e.type === "attackHit");
+  assert.ok(hit, "the skiff must actually land a hit for this to prove anything");
+  assert.equal(hit.sourceId, a.id);
+  assert.equal(hit.targetId, b.id);
+  assert.equal(hit.targetType, b.type);
+  assert.equal(hit.targetOwner, "ai");
+
+  // Same fight, carried through to the kill.
+  b.hp = 1;
+  state.events.length = 0;
+  a.attackTimer = 0;
+  updateCombat(state, a, 0);
+  const killed = state.events.find(e => e.type === "entityKilled");
+  assert.ok(killed, "the target must actually die for this to prove anything");
+  assert.equal(killed.id, b.id, "which entity died is the whole question");
+  assert.equal(killed.killerId, a.id);
+  assert.equal(killed.killerOwner, "player");
+});

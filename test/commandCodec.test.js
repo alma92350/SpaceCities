@@ -528,3 +528,61 @@ test("parity: identical orders applied via the codec vs. directly via issue*/eng
 
   assert.equal(snapshotCodec, snapshotDirect);
 });
+
+
+/* ---------- refusal reasons and receipts (agent-observability) ----------
+   `refused` alone told a caller nothing about WHICH check said no, and queueProduction used to
+   report success even when the engine had declined — with the ore only debited once the job
+   starts, an agent had no observable difference between "queued" and "silently dropped" and
+   re-sent the same order. Both cases below are exactly that. */
+
+test("queueProduction returns a real receipt — the queue slot it landed in and how long the queue takes", () => {
+  const state = makeState();
+  const pCC = findBuilding(state, "player", "command");
+  state.players.player.resources.ore = 10000;
+
+  const first = apply(state, "player", { t: "queueProduction", building: pCC.id, u: "worker" });
+  assert.equal(first.ok, true);
+  assert.equal(first.result.queueIndex, 0);
+  assert.equal(first.result.queueLength, 1);
+  assert.equal(first.result.unit, "worker");
+  assert.ok(first.result.etaSeconds > 0, "a caller must be able to WAIT rather than re-order");
+
+  const second = apply(state, "player", { t: "queueProduction", building: pCC.id, u: "worker" });
+  assert.equal(second.result.queueIndex, 1);
+  assert.ok(second.result.etaSeconds > first.result.etaSeconds, "the eta covers the whole queue ahead of the job");
+});
+
+test("a refused queueProduction reports WHY, and no longer reads as a success", () => {
+  const state = makeState();
+  const pCC = findBuilding(state, "player", "command");
+  for (const com of Object.keys(state.players.player.resources)) state.players.player.resources[com] = 0;
+
+  const broke = apply(state, "player", { t: "queueProduction", building: pCC.id, u: "worker" });
+  assert.equal(broke.ok, false, "an engine refusal must not report success");
+  assert.equal(broke.code, REJECT.REFUSED);
+  assert.equal(broke.reason, "cannot-afford");
+  assert.equal(pCC.queue.length, 0);
+
+  // A unit this building simply cannot train is a different, equally actionable reason.
+  const wrongBuilding = apply(state, "player", { t: "queueProduction", building: pCC.id, u: "skiff" });
+  assert.equal(wrongBuilding.code, REJECT.REFUSED);
+  assert.equal(wrongBuilding.reason, "building-cannot-produce-this-unit");
+});
+
+test("a refused build reports which check said no, instead of leaving a caller to probe offsets", () => {
+  const state = makeState();
+  const worker = playerUnits(state).find(u => u.type === "worker");
+  const cc = findBuilding(state, "player", "command");
+
+  // Right on top of the seat's own Command Center: a placement refusal, nothing else.
+  const onTop = apply(state, "player", { t: "build", worker: worker.id, b: "barracks", x: cc.x, y: cc.y });
+  assert.equal(onTop.ok, false);
+  assert.equal(onTop.code, REJECT.REFUSED);
+  assert.equal(onTop.reason, "invalid-placement");
+
+  for (const com of Object.keys(state.players.player.resources)) state.players.player.resources[com] = 0;
+  const broke = apply(state, "player", { t: "build", worker: worker.id, b: "barracks", x: cc.x + 200, y: cc.y + 200 });
+  assert.equal(broke.code, REJECT.REFUSED);
+  assert.equal(broke.reason, "cannot-afford");
+});

@@ -16,33 +16,59 @@ import { encode } from "../net/commandEnvelope.js";
 
 /**
  * @param {import("node:worker_threads").Worker} worker
+ * @param {number} [ackTimeoutMs] how long sendCommand waits for the worker's commandResult before
+ *   giving up on THIS call (default 5000 — a realtime ack is due INPUT_DELAY_TICKS=3 after
+ *   admission, ~150ms at 20Hz, so 5s is ~30x headroom while staying two orders of magnitude under
+ *   the ~120s tool-call timeout a real MCP client enforces; an agent observed that client timeout
+ *   three matches running when a result ever failed to arrive).
  * @returns {{
  *   sendCommand: (seat: string, cmd: Object) => Promise<{ok:boolean, code?:string, result?:Object}>,
  *   surrender: (seat: string) => void,
  * }}
  */
-export function attachCommandBridge(worker) {
+export function attachCommandBridge(worker, ackTimeoutMs = 5000) {
   let nextSeq = 1;
   /** @type {Map<number, {seat: string, resolve: (result: Object) => void}>} */
   const pending = new Map();
 
+  const COMMAND_TIMEOUT_RESULT = { ok: false, code: "command-timeout" };
+
+  // A pending call whose worker can never reply must not pend forever: the MCP client itself
+  // enforces a ~120s tool-call timeout, and a call that hangs that long costs an agent an entire
+  // blind window (three observed match losses). Two cases a real worker can still produce:
+  //   - the commandResult message is simply lost (worker mid-step, admit() threw, match just ended
+  //     so its own stepMatch loop stopped draining the rec), so THIS timeout fires per call; and
+  //   - the worker exits entirely (crash, lobby teardown), after which NO pending call can ever
+  //     resolve — the exit handler below settles all of them at once.
+  function settle(seq, result) {
+    const waiting = pending.get(seq);
+    if (!waiting) return;
+    pending.delete(seq);
+    clearTimeout(waiting.timer);
+    waiting.resolve(result);
+  }
+
   worker.on("message", msg => {
     if (!msg || msg.type !== "commandResult" || !pending.has(msg.seq)) return;
-    const waiting = pending.get(msg.seq);
     // Defense in depth, not a case a real worker ever actually produces: this bridge only ever
     // resolves a pending call with a reply for the SAME seat it was sent for, even though seq
     // alone (globally unique per bridge instance, never reused) would already be enough in
     // practice — see this file's own test for the adversarial shape this guards.
+    const waiting = pending.get(msg.seq);
     if (msg.seat !== waiting.seat) return;
-    pending.delete(msg.seq);
-    waiting.resolve(msg.result);
+    settle(msg.seq, msg.result);
+  });
+
+  worker.on("exit", () => {
+    for (const seq of [...pending.keys()]) settle(seq, COMMAND_TIMEOUT_RESULT);
   });
 
   function sendCommand(seat, cmd) {
     const seq = nextSeq++;
     const envelope = encode(cmd, seq, null);
     return new Promise(resolve => {
-      pending.set(seq, { seat, resolve });
+      const timer = setTimeout(() => settle(seq, COMMAND_TIMEOUT_RESULT), ackTimeoutMs);
+      pending.set(seq, { seat, resolve, timer });
       worker.postMessage({ type: "command", seat, envelope });
     });
   }

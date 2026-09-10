@@ -34,7 +34,19 @@ export function isGalaxySave(parsed) {
 // autoSave's beforeunload/hidden handler threw a real page error the instant a spectator closed
 // the tab or switched away — this file's own job is exactly to stop that class of mismatch before
 // it reaches the serializer at all, the same as the scenario/spectateMatch checks already do.
-export function resumableMode({ state, galaxy, spectateMatch, networkSpectate } = {}) {
-  if (!state || state.over || state.scenario || spectateMatch || networkSpectate) return null;
+// T-034 (networkLive) is the SAME refusal for the same reason, one step wider: a live network
+// PLAYER's state is a reassembled projection too (engine/projection.js sends entities and
+// resources, never the per-owner fog structures or controllers a save needs), so serPlanet threw
+// `Cannot read properties of undefined (reading 'player')` on state.fogs[id] the moment autoSave's
+// 12s timer fired — in every live match, in both clients, for as long as multiplayer has existed.
+// The spectator half of this rule was found by a real browser; this half was found by a real
+// SECOND browser (tools/smokeMultiplayer.js), which is the only thing that can see it.
+//
+// It is also the semantically right answer rather than merely the safe one. A live match lives on
+// the server, and rejoining one already has its own mechanism: liveMatchStorage.js's
+// {matchId, owner, token} and lobbyScreen.js's rejoinLiveMatch. A localStorage skirmish checkpoint
+// of a live match would offer "Continue" into a half-state single-player game that never existed.
+export function resumableMode({ state, galaxy, spectateMatch, networkSpectate, networkLive } = {}) {
+  if (!state || state.over || state.scenario || spectateMatch || networkSpectate || networkLive) return null;
   return galaxy ? "galaxy" : "skirmish";
 }

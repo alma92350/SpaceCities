@@ -83,3 +83,41 @@ test("non-commandResult messages (ready, state) are ignored by the bridge, never
 
   assert.deepEqual(await pending, { ok: true });
 });
+
+// A lost commandResult (worker mid-step, admit() threw, match ended so its stepMatch loop stopped
+// draining the rec) used to pend this promise FOREVER — the MCP client's own ~120s tool-call
+// timeout was the only backstop, and an agent loses a whole blind window to it. The bridge now
+// settles the call itself after ackTimeoutMs.
+test("a command whose commandResult never arrives settles with {ok:false, code:'command-timeout'} after the ack timeout", async () => {
+  const { emitter } = fakeWorker();
+  const bridge = attachCommandBridge(emitter, 20);
+  const pending = bridge.sendCommand("player", { t: "stop", ids: ["u1"] });
+
+  assert.deepEqual(await pending, { ok: false, code: "command-timeout" });
+});
+
+test("a commandResult arriving AFTER the timeout fires is ignored — the call is already settled, no unhandled rejection", async () => {
+  const { emitter, sent } = fakeWorker();
+  const bridge = attachCommandBridge(emitter, 20);
+  const pending = bridge.sendCommand("player", { t: "stop", ids: ["u1"] });
+
+  assert.deepEqual(await pending, { ok: false, code: "command-timeout" });
+
+  // The late reply must be a no-op, and the bridge must keep working for the NEXT call.
+  emitter.emit("message", { type: "commandResult", seat: "player", seq: sent[0].envelope.seq, result: { ok: true } });
+  const next = bridge.sendCommand("player", { t: "hold", ids: ["u2"] });
+  emitter.emit("message", { type: "commandResult", seat: "player", seq: sent[1].envelope.seq, result: { ok: true } });
+  assert.deepEqual(await next, { ok: true });
+});
+
+test("worker exit settles every pending call with command-timeout — after exit NO reply can ever come", async () => {
+  const { emitter } = fakeWorker();
+  const bridge = attachCommandBridge(emitter);
+  const p1 = bridge.sendCommand("player", { t: "stop", ids: ["u1"] });
+  const p2 = bridge.sendCommand("ai", { t: "stop", ids: ["u2"] });
+
+  emitter.emit("exit");
+
+  assert.deepEqual(await p1, { ok: false, code: "command-timeout" });
+  assert.deepEqual(await p2, { ok: false, code: "command-timeout" });
+});

@@ -88,13 +88,15 @@ reveals: its own units/buildings unconditionally, an opponent's only if currentl
 
 | Tool | Returns |
 |---|---|
-| `get_situation` | `tick`, `time`, `over`, `winner`, this seat's `resources`, and its own `units_by_type`/`buildings_by_type` counts — a compact status line. |
-| `list_entities` | Every visible entity, trimmed to `{id, type, owner, x, y, hp}`. Optional `owner`/`type` arguments narrow a large list. |
-| `get_map_overview` | Discovered resource nodes (`{id, amount}`) and every currently-visible base's `{owner, x, y}`. |
-| `get_tech_options` | Every unit/building type, each tagged `prereqs_met`/`affordable` for THIS seat right now — the input to any build decision. |
+| `get_situation` | `tick`, `time`, `over`, `winner`, this seat's `resources`, `supply`/`supply_cap`, its own `units_by_type`/`buildings_by_type` counts, `idle_unit_ids`, who you are (`you`) and who you're playing (`opponents`), plus the map's `width`/`height`/`tickRate`. |
+| `list_entities` | Every visible entity as `{id, type, owner, x, y, hp}`; your OWN entities also carry `activity` (`idle`/`gathering`/`moving`/`attacking`/`building`/`producing`/`under-construction`), `orderTarget`, a producer's `queue` and a site's `buildProgress`. Optional `owner`/`type`/`activity` arguments narrow a large list — `activity: "idle"` is how you find units that have stopped working. |
+| `get_map_overview` | Every discovered resource node as `{id, com, amount, max, x, y, distance_from_base}`, **nearest first**, plus `commodities_available`, every visible base's `{owner, x, y}`, and the map bounds. `com` is the commodity the node actually yields — you never have to scout a node to learn what it is. |
+| `get_tech_options` | Every unit/building type with `cost`, full `stats` (hp, attack, range, cooldown, speed, sight, buildTime, supplyCost, bonusVs…), `produced_by`/`buildable`, `prereqs_met` **and `missing_prereqs`** (which requirement is missing, by name), and `affordable` for THIS seat right now. |
+| `get_counters` | The real counter table — every `{attacker, target, bonus}` matchup, derived from the same `bonusVs` data the engine's combat math reads. Static; read it once. |
 
 None of these ever include an enemy's internal `order`/`orderQueue` — intent isn't something fog
-reveals, only position, type, and hp.
+reveals, only position, type, and hp. That's why `activity`/`orderTarget` appear on your own
+entities only.
 
 ## 4. Acting — one flexible tool over the same codec a human's click uses
 
@@ -107,6 +109,12 @@ same shape the browser client sends for a human, validated by the identical serv
 `too-many` · `out-of-bounds` · `refused` (the engine itself said no — cost or prerequisite unmet,
 bad placement).
 
+A `refused` from `build` or `queueProduction` also carries a `reason` in
+`result.structuredContent`, naming the check that actually failed rather than leaving you to probe
+for it: `cannot-afford` · `prereq-not-met` · `invalid-placement` · `supply-capped` ·
+`unit-cannot-build-this-category` · `building-cannot-produce-this-unit` ·
+`building-under-construction` · `odyssey-only-unit` / `odyssey-only-building`.
+
 Common command shapes (`ids` is an array of 1–400 unit/building ids you own):
 
 ```
@@ -118,8 +126,17 @@ Common command shapes (`ids` is an array of 1–400 unit/building ids you own):
 { t: "hold",        ids }
 { t: "build",       worker, b, x, y }
 { t: "queueProduction", building, u, alt? }
+{ t: "cancelProduction", building, i }
+{ t: "setRally",    building, x, y }
 { t: "researchTech", building, tech }
 ```
+
+A successful `queueProduction` returns a receipt — `{building, unit, queueIndex, queueLength,
+etaSeconds}` — so you never have to guess whether it landed. (Ore is debited when the job *starts*,
+not when it's queued, so an immediate `get_situation` showing unchanged ore is not evidence the
+order was dropped. Read the receipt, or the building's own `queue` in `list_entities`, instead of
+re-sending.) `setRally` decides where a producer's new units walk to — set it before a fight rather
+than moving every spawn by hand.
 
 Wrap several into `{ t: "batch", c: [...] }` (max 16) to apply them together at the same tick —
 this, plus `ids` already holding up to 400 entries, is what "batched, group-oriented" means: you
@@ -151,7 +168,13 @@ Before a match has started, use `leave_match` (§2) instead — `surrender` only
 
 `wait_for_event` blocks (up to a bounded timeout, default 8s, capped at 20s server-side — always
 comfortably under a real client's own tool-call timeout) until something new becomes visible to
-your seat — combat, a kill, a completed build, research finishing — or the timeout elapses. A
+your seat — combat, a kill, a completed build, research finishing — or the timeout elapses.
+Events carry entity ids, not just coordinates, so you never have to reconstruct a fight by diffing
+two `list_entities` calls: `entityKilled` has the dead entity's `id` (plus `killerId`/`killerOwner`),
+`attackHit` has `sourceId`/`targetId`, `unitSpawned` has the new unit's `id` and `fromBuildingId`,
+and `buildingComplete` has the finished building's `id`. Two events exist specifically to stop an
+economy rotting unnoticed: `nodeDepleted` (a node just ran dry) and `unitIdle` (a gatherer stopped
+because there was nothing left to retarget to). A
 timeout is a normal, successful result (`timed_out: true`, `events: []`), never an error: just
 call it again. Call this in your main loop instead of `get_situation`-polling in a tight loop.
 

@@ -63,7 +63,7 @@ export function updateBuildingConstruction(state, building, dt) {
   building.hp = Math.min(building.hp + gain, def.hp * building.buildProgress);
   if (building.buildProgress >= 1) {
     building.constructing = false;
-    state.events.push({ type: "buildingComplete", x: building.x, y: building.y, owner: building.owner });
+    state.events.push({ type: "buildingComplete", id: building.id, buildingType: building.type, x: building.x, y: building.y, owner: building.owner });
   }
 }
 
@@ -110,8 +110,35 @@ export function updateProductionQueue(state, building, dt) {
       ? { type: "gather", nodeId: building.rally.nodeId }
       : { type: "move", x: building.rally.x, y: building.rally.y };
     state.units.set(u.id, u);
-    state.events.push({ type: "unitSpawned", x: u.x, y: u.y, owner: u.owner });
+    state.events.push({ type: "unitSpawned", id: u.id, unitType: u.type, fromBuildingId: building.id, x: u.x, y: u.y, owner: u.owner });
   }
+}
+
+/**
+ * Why queueProduction(state, buildingId, unitType, alt) would refuse — the SAME checks, in the same
+ * order, expressed as a machine-readable reason instead of a bare `false`. Exists because
+ * queueProduction's own boolean is all a human's click needs (the UI already shows the price and
+ * the lock icon), while an agent driving the match over MCP gets only that boolean back and has no
+ * way to tell "too expensive" from "not unlocked" from "supply-capped" — net/commandCodec.js calls
+ * this on refusal to fill in the reject reason. Deliberately a separate, read-only function rather
+ * than a changed return type: every existing caller (engine/aiIndustry.js, inputCommands.js, the
+ * save-path tests) keeps reading the boolean it always did.
+ * @param {State} state @param {string} buildingId @param {string} unitType @param {boolean} [alt]
+ * @returns {string|null} null when the queue would actually succeed
+ */
+export function productionRefusalReason(state, buildingId, unitType, alt = false) {
+  const building = state.buildings.get(buildingId);
+  if (!building) return "no-such-building";
+  if (building.constructing) return "building-under-construction";
+  const def = UNITS[unitType];
+  if (!def) return "unknown-unit-type";
+  if (!BUILDINGS[building.type].produces?.includes(unitType)) return "building-cannot-produce-this-unit";
+  if (def.odysseyOnly && !state.endless) return "odyssey-only-unit";
+  if (!prereqsMet(state, building.owner, def)) return "prereq-not-met";
+  const cost = (alt && def.altCost) ? def.altCost : def.cost;
+  if (!canAfford(state.players[building.owner].resources, cost)) return "cannot-afford";
+  if (supplyUsed(state, building.owner) + (def.supplyCost || 0) > supplyCap(state, building.owner)) return "supply-capped";
+  return null;
 }
 
 /** @param {State} state @param {string} buildingId @param {string} unitType @param {boolean} [alt] @returns {boolean} */
@@ -133,7 +160,7 @@ export function queueProduction(state, buildingId, unitType, alt = false) {
   // Tech gate: a locked unit (its prereq building not yet completed) can't be
   // queued. Checked before affordability so "locked" outranks "too expensive".
   if (!prereqsMet(state, building.owner, def)) {
-    state.events.push({ type: "productionBlocked", reason: "prereq",
+    state.events.push({ type: "productionBlocked", reason: "prereq", id: building.id, unitType,
                         x: building.x, y: building.y, owner: building.owner });
     return false;
   }
@@ -145,7 +172,7 @@ export function queueProduction(state, buildingId, unitType, alt = false) {
   // refund). All queued jobs already count toward supplyUsed, so this
   // is what actually caps queue-stuffing.
   if (supplyUsed(state, building.owner) + (def.supplyCost || 0) > supplyCap(state, building.owner)) {
-    state.events.push({ type: "productionBlocked", reason: "supply",
+    state.events.push({ type: "productionBlocked", reason: "supply", id: building.id, unitType,
                         x: building.x, y: building.y, owner: building.owner });
     return false;
   }

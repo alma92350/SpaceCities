@@ -5,12 +5,12 @@ description: Play a SpaceCities match as an agent over the MCP interface — joi
 
 # Playing SpaceCities over MCP
 
-The server exposes a live RTS match to an agent as **10 MCP tools + 4 resources**. An agent
+The server exposes a live RTS match to an agent as **11 MCP tools + 4 resources**. An agent
 sees a fog-respecting summary and acts through the same server-side validation a human's
 click goes through — there is no privileged access and no direct `engine/` import.
 
-Full protocol reference: `docs/agent-guide.md`. Worked client: `tools/referenceAgent.js`
-(but see *Known bug* below before running its CLI).
+Full protocol reference: `docs/agent-guide.md`. Worked client: `tools/referenceAgent.js` — run it
+with no arguments for its usage banner.
 
 ## Start a server
 
@@ -101,9 +101,10 @@ signal, so check for it rather than assuming success.
 | `join_match` | `{seat_handle, owner, seat_index, started}` — `match_id` required, `seat_index` optional |
 | `leave_match` | frees a seat, **only before start** — after start use `surrender` |
 | `get_situation` | `{tick, time, over, winner, resources, units_by_type, buildings_by_type}` |
-| `list_entities` | `{entities:[{id,type,owner,x,y,hp}]}` — fog-limited; filter with `owner`/`type` |
+| `list_entities` | `{entities:[{id,type,owner,x,y,hp}]}` — fog-limited; filter with `owner`/`type`/`activity`. Your OWN entities also carry `activity` (idle/gathering/moving/attacking/building/producing/under-construction), `orderTarget`, a producer's queue and a site's `buildProgress`; an enemy's never do, since fog does not reveal intent. `activity:"idle"` is the cheap way to find units that have stopped working. |
 | `get_map_overview` | `{nodes:[{id,amount}], bases:[...]}` |
 | `get_tech_options` | `{units:[{type,cost,prereqs_met,affordable}], ...}` — per-seat, right now |
+| `get_counters` | `{counters:[{attacker,target,bonus}]}` — what beats what. Static: read once, not per round. |
 | `issue_command` | applies a `WireCommand` (below) |
 | `surrender` | concedes the match |
 | `wait_for_event` | blocks up to `timeout_ms`, returns `{tick, events, timed_out}` |
@@ -151,23 +152,6 @@ rather than firing them individually.
 - **Fog is real.** `list_entities` shows only what your seat can see; early on that is your
   own 3 workers and 1 command center and nothing else. An empty enemy list means *not
   visible*, not *not present*.
-
-## Known bug — the reference agent CLI does not run on Windows
-
-`tools/referenceAgent.js:159` guards its entry point with:
-
-```js
-if (process.argv[1] && new URL(import.meta.url).pathname === process.argv[1]) main(...)
-```
-
-On Windows `pathname` is `/C:/Users/.../referenceAgent.js` while `process.argv[1]` is
-`C:\Users\...\referenceAgent.js`. They never match, so `main()` never runs: the process
-prints nothing and **exits 0**, which looks exactly like success. Same idiom appears in other
-`tools/` CLIs.
-
-Until fixed, drive the loop from your own script using the `rpc` helper above, or import
-`runReferenceAgent` / `decide` directly (both are real exports and work fine). A fix would use
-`fileURLToPath(import.meta.url)` against `resolve(process.argv[1])`, or `import.meta.filename`.
 
 ## Verifying it works
 

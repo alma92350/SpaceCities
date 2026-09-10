@@ -1,21 +1,23 @@
 /* ============================================================
-   Guards for tools/ailab.js — the headless AI bench (see docs/odyssey-ai-review.md).
+   The SLOW half of the tools/ailab.js guards — every test in here drives real matches.
 
-   The bench exists to answer "did this AI change help?", so the bench itself has to be
-   trustworthy in exactly two ways, and these tests pin both:
+   Split out of test/ailab.test.js, unchanged. That file used to run 307s while the whole
+   rest of the suite ran in under 25s, which put an AI-tuning sweep on the critical path of
+   the command CONTRIBUTING.md asks you to run on every change. These tests are not
+   optional and nothing here is skipped: they run under `npm run test:slow`, and CI runs
+   that as its own job on every push and pull request. See test/ailab.test.js for the
+   fast half and for what the bench is guarding in the first place.
 
-     1. DETERMINISM. Two runs of the same configuration must produce identical numbers,
-        or a "+0.04 improvement" is indistinguishable from noise and the whole loop is
-        theatre. The engine is already deterministic; what this guards is that the lab
-        (its sparring bots, its sampling cadence, its seed derivation) doesn't smuggle in
-        a wall-clock or an unseeded pick.
-     2. THE OVERRIDE SEAM. A candidate AI is injected as data into the ARCHETYPES /
-        STRATEGIES / DIFFICULTY_OPTIONS tables. If that injection silently no-ops, every
-        search result is a measurement of the baseline against itself.
+   What lives here is anything that starts a sim: determinism of a lab run, the override
+   seam reaching the engine end-to-end, the sparring bots actually behaving as advertised,
+   leaderboard/duel/round-robin/Swiss/search/evolution/archive. What stayed behind is
+   everything pure — scoring, the health detectors against hand-written curves, and the
+   Swiss pairing combinatorics against fake results.
 
-   Runs are short (a few sim-minutes) — this suite guards the harness, not the AI. The
-   long soak lives behind `node tools/ailab.js check`, which is a tool you run, not a test
-   that runs you: several of its findings fire today on purpose.
+   NOTE ON PATHS: this file sits one directory deeper than the rest of the suite, so its
+   imports are `../../`. `npm test` globs `test/*.test.js` and so does NOT pick it up —
+   that is the whole mechanism, and test/suite-integrity.test.js pins both halves so
+   neither can quietly stop running.
    ============================================================ */
 
 import { test } from "node:test";
@@ -24,9 +26,9 @@ import { writeFileSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  run, labWorld, summarise, score, applyOverrides, CHECKS, OPPONENTS, WORLDS, WEIGHTS, runLeaderboard,
+  run, labWorld, summarise, score, applyOverrides, CHECKS, OPPONENTS, WEIGHTS, runLeaderboard,
   runDuel, runRoundRobin, pinnedDuelDials, runSwappedDuel, runDuelBrackets, runRoundRobinSwapped, runSearch,
-  runSwissTournament, pairRound, rankStandings, buildSwissBracket, snapshotTables, restoreTables,
+  runSwissTournament, pairRound, buildSwissBracket, snapshotTables, restoreTables,
   runEvolution, runArchive, ARCHIVE_DIMS, binOf,
 } from "../../tools/ailab.js";
 import { toCandidate } from "../../tools/genome.js";
@@ -153,23 +155,6 @@ test("an overrides row reaches the sim — a strategy that never initiates commi
   }
 });
 
-test("applyOverrides merges into an existing row rather than replacing it", () => {
-  // Restored afterwards. applyOverrides writes straight into the LIVE shipped table with no undo,
-  // and this test had none — so `aggressive.garrisonMult` stayed at 0.9 instead of its shipped 0.4
-  // for the rest of the file, and the 21 later tests that select `strategy: "aggressive"` measured a
-  // variant the game never ships. Worse, the three "overrides never leak into the next run" tests
-  // capture their baseline AFTER this point, so the suite's own leak detector was calibrated
-  // against the leaked state. snapshotTables/restoreTables were already exported and simply unused.
-  const snap = snapshotTables();
-  try {
-    applyOverrides({ strategies: { aggressive: { garrisonMult: 0.9 } } });
-    assert.equal(STRATEGIES.aggressive.garrisonMult, 0.9, "the overridden field is applied");
-    assert.equal(STRATEGIES.aggressive.attackTimeoutMult, 0.55, "…and the untouched fields survive");
-  } finally {
-    restoreTables(snap);
-  }
-});
-
 test("score components stay in 0..1 and the total is their weighted mean", () => {
   const r = run(short({ minutes: 3 }));
   const s = score(r);
@@ -186,16 +171,6 @@ test("scoring an opponent-less run drops the pressure component instead of scori
   const s = score(run(short({ opponent: "none", minutes: 3 })));
   assert.ok(!("pressure" in s.parts), "pressure must be dropped when there is no player at all");
   assert.ok(s.total > 0, "the remaining components still produce a usable score");
-});
-
-test("every health check is well-formed and covers the whole Odyssey roster", () => {
-  const ids = CHECKS.map(c => c.id);
-  assert.equal(new Set(ids).size, ids.length, "check ids must be unique — they name findings in reports");
-  for (const c of CHECKS) {
-    assert.equal(typeof c.hit, "function");
-    assert.ok(c.why && c.why.length > 20, `check ${c.id} needs a why: line explaining the mechanism`);
-  }
-  assert.equal(WORLDS.length, 11, "the lab sweeps the full Odyssey roster (nine skirmish worlds + two extras)");
 });
 
 /* ---------- SCALE INVARIANCE: the property that keeps this list honest ----------
@@ -215,56 +190,6 @@ test("every health check is well-formed and covers the whole Odyssey roster", ()
 // A curve for an AI that is plainly healthy: developing, growing its army, spending what it earns,
 // producing continuously, and never wedged. `k` scales every magnitude — a 1x AI and a 20x AI are
 // the SAME behaviour at different sizes, so no detector may distinguish them.
-function healthyCurve(k = 1, samples = 30) {
-  return Array.from({ length: samples }, (_, i) => ({
-    t: i * 60,
-    dev: Math.round(2 + i * 0.6),                 // still climbing at the end
-    army: Math.round(k * (5 + i * 2)),            // …and still growing
-    armyValue: Math.round(k * (5 + i * 2) * 120),
-    workers: Math.round(k * 12),
-    buildings: Math.round(k * (4 + i)),
-    banked: Math.round(k * 900),                  // a working balance, in transit
-    stance: -0.2, hostility: 0.3, waves: Math.floor(i / 4),
-    rax: Math.max(1, Math.round(k)), idleRax: 0,  // the line is busy
-    armyCapped: false,
-    canAffordNext: true,                          // …and it could buy more if it wanted
-    supplyBlocked: i % 3 === 0,                   // brushes its ceiling constantly, like any busy AI
-    habitatPending: false,
-    canAffordUnblock: true,
-    supplyCapNow: 20 + i * 8,                     // …and keeps raising it — this is what "resolving" looks like
-    supplyFree: 6, playerBuildings: 3, entitled: true, aiAlive: true,
-  }));
-}
-
-test("SCALE INVARIANCE: no health check fires on a healthy AI, at any size", () => {
-  for (const k of [1, 5, 20, 100]) {
-    const r = summarise(healthyCurve(k));
-    const fired = CHECKS.filter(c => c.hit(r)).map(c => c.id);
-    assert.deepEqual(fired, [],
-      `a healthy AI scaled ${k}x must fire nothing; fired: ${fired.join(", ")} ` +
-      `(dev ${r.devFinal}/+${r.devGrowthTail}, army ${r.armyFinal}/+${r.armyGrowthTail}, ` +
-      `banked ${r.bankedFinal}, idle ${r.idleRichFrac}, blocked ${r.supplyDeadlockFrac}, ` +
-      `cap +${r.supplyCapGrowthTail})`);
-  }
-});
-
-test("SCALE INVARIANCE: the detectors still catch each real defect, at any size", () => {
-  // The other half, and the reason the test above is not just "make everything pass": a genuinely
-  // stuck AI must still be caught, and caught for the SAME reason, however big it is.
-  const broken = {
-    "dev-flatline":     c => c.map(x => ({ ...x, dev: 3 })),                                    // climb stopped
-    "hoarding":         c => c.map(x => ({ ...x, banked: 60000, army: 9 })),                    // bank never converted
-    "production-stall": c => c.map(x => ({ ...x, idleRax: x.rax, army: 9 })),                   // line stopped on affordable money
-    "supply-deadlock":  c => c.map(x => ({ ...x, supplyBlocked: true, supplyCapNow: 40 })),     // ceiling frozen
-  };
-  for (const k of [1, 20]) {
-    for (const [id, breakIt] of Object.entries(broken)) {
-      const r = summarise(breakIt(healthyCurve(k)));
-      assert.ok(CHECKS.find(c => c.id === id).hit(r),
-        `${id} must still fire on its own defect at ${k}x scale`);
-    }
-  }
-});
 
 /* ---------- the bench has to encode the CURRENT contract, not a stale one ---------- */
 
@@ -323,78 +248,6 @@ test("for a never-initiating strategy, standing tracks provocation exactly — a
   // not staying branded on for the rest of the session.
   const flips = fought.curve.filter((c, i) => i > 0 && !c.provokedAi && fought.curve[i - 1].provokedAi);
   assert.ok(flips.length > 0, "provocation cools off once the shooting stops — it is not a permanent brand");
-});
-
-// Two detectors were rewritten after the first fix round, because scaling the AI up turned them
-// into false positives: "any Barracks idle while holding 400" fired on 42 of 44 HEALTHY runs once
-// surplus opened six Barracks, and a peak-based thrift measure scored a working economy (peaks
-// high, spends straight back down) the same as a stalled one. A metric that fires on correct
-// behaviour is worse than no metric — the tuning loop optimises against it.
-
-test("ordinary churn in a scaled-up production line is not a production stall", () => {
-  const healthy = { rax: 6, idleRax: 2 };
-  const stalled = { rax: 6, idleRax: 6 };
-  const frac = c => summarise([{ ...c, dev: 0, army: 0, waves: 0, hostility: 0, playerBuildings: 1,
-                                 entitled: true, canAffordNext: true, banked: 2200, armyValue: 0, workers: 0,
-                                 buildings: 0, supplyBlocked: false, aiAlive: true, t: 0 }]).idleRichFrac;
-  assert.equal(frac(healthy), 0, "two of six Barracks between jobs is not a stall");
-  assert.equal(frac(stalled), 1, "every Barracks idle while it can afford the next unit is");
-});
-
-test("the money gate is scale-free — it asks what the AI could BUY, not how much ore it holds", () => {
-  // The gate used to be `banked > 1000`, a threshold calibrated against one particular size of
-  // economy: on a neighbour earning several times what it used to, 1,000 banked is change in
-  // transit. These two rows are identical except for the size of the bank, and the detector must
-  // not care — only whether the next unit was affordable (docs/odyssey-ai-review.md §2.12).
-  const row = extra => ({ dev: 0, army: 0, waves: 0, hostility: 0, playerBuildings: 1, entitled: true,
-                          rax: 2, idleRax: 2, armyValue: 0, workers: 0, buildings: 0,
-                          supplyBlocked: false, aiAlive: true, t: 0, ...extra });
-  assert.equal(summarise([row({ banked: 900, canAffordNext: true })]).idleRichFrac, 1,
-    "a small bank that still covers the next unit is a stall — the old absolute gate missed this");
-  assert.equal(summarise([row({ banked: 250000, canAffordNext: false })]).idleRichFrac, 0,
-    "…and a huge bank it cannot spend on THIS unit is not — being broke in the right currency is an excuse");
-});
-
-test("hoarding means a bank it never spent, not a bank it passed through", () => {
-  const hoard = CHECKS.find(c => c.id === "hoarding");
-  assert.ok(hoard.hit({ bankedFinal: 30000, armyGrowthTail: 0 }), "big final bank + a frozen army is hoarding");
-  assert.ok(!hoard.hit({ bankedFinal: 2200, armyGrowthTail: 51 }), "a working balance with a growing army is not");
-  assert.ok(!hoard.hit({ bankedFinal: 30000, armyGrowthTail: 40 }), "…nor is a big balance it's actively converting");
-});
-
-test("supply PRESSURE with a Habitat on the way is not a deadlock", () => {
-  // A healthy AI at full tilt lives close to its cap and is momentarily unable to fit the next
-  // unit all the time. A third detector had to learn that difference: measured, helix grew its army
-  // 75 -> 327 and drained a 10,000 bank to 854 while the old test still called it deadlocked.
-  const base = { dev: 0, army: 0, waves: 0, hostility: 0, playerBuildings: 1, entitled: true,
-                 armyValue: 0, workers: 0, buildings: 0, rax: 1, idleRax: 0, aiAlive: true, t: 0 };
-  const frac = c => summarise([{ ...base, ...c }]).supplyDeadlockFrac;
-  assert.equal(frac({ supplyBlocked: true, habitatPending: true, canAffordUnblock: true }), 0,
-    "blocked, but a Habitat is already going up — it resolves itself");
-  assert.equal(frac({ supplyBlocked: true, habitatPending: false, canAffordUnblock: false }), 0,
-    "blocked with nothing on the way but no money for a Habitat — broke, not deadlocked");
-  assert.equal(frac({ supplyBlocked: true, habitatPending: false, canAffordUnblock: true }), 1,
-    "blocked with nothing on the way and the money to fix it is the state that never resolves");
-});
-
-test("a rising supply ceiling clears the deadlock detector however often the AI is momentarily blocked", () => {
-  // The case this detector actually got wrong (docs/odyssey-ai-review.md §2.12): an AI outgrowing
-  // its housing lives AT its ceiling, so a per-sample "blocked right now" test fires constantly on
-  // a world that is manifestly fine. The `why` string always claimed to measure "the state that
-  // never resolves itself"; now the predicate does too.
-  const deadlock = CHECKS.find(c => c.id === "supply-deadlock");
-  assert.ok(deadlock.hit({ supplyDeadlockFrac: 0.9, supplyCapGrowthTail: 0 }),
-    "blocked almost always AND the ceiling never moved — genuinely wedged");
-  assert.ok(!deadlock.hit({ supplyDeadlockFrac: 0.9, supplyCapGrowthTail: 441 }),
-    "blocked just as often, but the ceiling climbed 441 supply in the tail — growing, not stuck");
-});
-
-test("a growing army clears the production-stall detector however often a Barracks is caught idle", () => {
-  const stall = CHECKS.find(c => c.id === "production-stall");
-  assert.ok(stall.hit({ idleRichFrac: 0.9, armyGrowthTail: 0 }),
-    "idle on affordable money AND the army never grew — the line really stopped");
-  assert.ok(!stall.hit({ idleRichFrac: 0.9, armyGrowthTail: 37 }),
-    "…caught idle just as often while the army grew 37 is a busy line sampled between jobs");
 });
 
 /* ---------- leaderboard: Tier 0 of ranking candidates against a fixed yardstick ----------
@@ -458,18 +311,6 @@ test("leaderboard ranks a crippled candidate below a normal one against an oppon
     { worlds: ["korrath"], difficulty: "medium", opponent: "tech", seeds: 1, minutes: 20, sample: 4, seed: 7 });
   assert.deepEqual(results.map(r => r.name), ["normal", "crippled"],
     "a token 1-unit standing army should rank below the default Rusher build against an opponent that presses it");
-});
-
-test("a strategy that deliberately caps its army isn't reported as a production stall", () => {
-  // Economic keeps 3 units and Force Parity mirrors what it has seen — idle Barracks are the
-  // POINT of those strategies, and counting them made the detector fire on the design working.
-  const base = { dev: 0, army: 0, waves: 0, hostility: 0, playerBuildings: 1, entitled: true,
-                 armyValue: 0, workers: 0, buildings: 0, rax: 2, idleRax: 2, canAffordNext: true,
-                 supplyBlocked: false, habitatPending: false, aiAlive: true, t: 0 };
-  assert.equal(summarise([{ ...base, armyCapped: true }]).idleRichFrac, 0,
-    "an army-capped strategy sitting on idle Barracks is doing what it was asked to");
-  assert.equal(summarise([{ ...base, armyCapped: false }]).idleRichFrac, 1,
-    "…an uncapped one doing the same has run out of things to buy");
 });
 
 /* ---------- duel: Tier 2, TRUE head-to-head via Tier 1 self-play ----------
@@ -897,60 +738,7 @@ test("Swiss needs at least 2 candidates, and rejects duplicate names up front (r
 
 // A deterministic stand-in for runSwappedDuel: alphabetically-earlier name wins, so standings move
 // in a predictable way without simulating anything.
-const fakePair = (a, b) => ({
-  aName: a.name, bName: b.name, n: 2, draws: 0,
-  aWins: a.name < b.name ? 2 : 0,
-  bWins: a.name < b.name ? 0 : 2,
-  avgMargin: 0, rows: [],
-});
 const field = n => Array.from({ length: n }, (_, i) => ({ name: `C${i}`, strategy: "default" }));
-const swissRounds = n => Math.max(3, Math.ceil(Math.log2(n)));
-
-test("default rounds follow ceil(log2(n)), and every round pairs at most floor(n/2) matches", () => {
-  const candidates = field(8);
-  const bracket = buildSwissBracket(candidates, swissRounds(8), { worlds: ["korrath"], seeds: 1 }, fakePair);
-  assert.equal(bracket.rounds, 3, "ceil(log2(8)) = 3, at least the floor of 3");
-  assert.equal(bracket.roundsLog.length, 3);
-  for (const { byeName, matches } of bracket.roundsLog) {
-    assert.equal(matches.length, 4, "8 candidates, even, no bye -> 4 pairings a round");
-    assert.equal(byeName, null, "an even pool never needs a bye");
-  }
-});
-
-test("Swiss runs strictly fewer pairings than full round-robin for a pool large enough for it to matter", () => {
-  const n = 10;
-  const candidates = field(n);
-  const bracket = buildSwissBracket(candidates, swissRounds(n), { worlds: ["korrath"], seeds: 1 }, fakePair);
-  const swissPairings = bracket.roundsLog.reduce((a, r) => a + r.matches.length, 0);
-  const roundRobinPairings = (n * (n - 1)) / 2;
-  assert.ok(swissPairings < roundRobinPairings,
-    `Swiss (${swissPairings} pairings over ${bracket.rounds} rounds) should cost less than round-robin's C(${n},2)=${roundRobinPairings}`);
-});
-
-test("byes rotate: nobody gets a second bye while another candidate hasn't had one yet", () => {
-  // 5 candidates (odd) over enough rounds that everyone gets exactly one bye before anyone gets a
-  // second — 5 rounds guarantees every candidate has been the odd one out exactly once.
-  const candidates = field(5);
-  const bracket = buildSwissBracket(candidates, 5, { worlds: ["korrath"], seeds: 1 }, fakePair);
-  const byes = bracket.roundsLog.map(r => r.byeName);
-  assert.equal(new Set(byes).size, 5, `every candidate should get exactly one bye across 5 rounds of 5, got: ${byes.join(", ")}`);
-});
-
-test("a bye is scorable-neutral: it adds to nobody's wins or losses, only its own bye count", () => {
-  // A bye is a candidate the schedule couldn't pair, not a match anyone won — crediting it as a
-  // win (at ANY size) lets a candidate that never fights outrank one that actually won something.
-  // The only thing a bye should move is `byes` (bookkeeping/reporting), never `wins`/`losses`.
-  // Pure bookkeeping — no match needs simulating to prove a bye moves only `byes`.
-  const opts = { worlds: ["ferros", "vesper"], seeds: 2 };
-  const bracket = buildSwissBracket(field(3), swissRounds(3), opts, fakePair);
-  const round = bracket.roundsLog.find(r => r.byeName);
-  assert.ok(round, "fixture: an odd pool must produce a bye somewhere");
-  // byeMatchCount is purely informational — "how big a real pairing this round would have been" —
-  // and must still be reported accurately, just never added to anyone's standing.
-  const expectedMatchCount = opts.worlds.length * opts.seeds * 2;
-  assert.equal(bracket.byeMatchCount, expectedMatchCount);
-  assert.equal(round.byeMatchCount, expectedMatchCount);
-});
 
 test("a bye never lets a candidate that structurally cannot fight tie or beat one that actually won", () => {
   // The exact scenario an independent review found broken: an odd field where one candidate is
@@ -978,59 +766,6 @@ test("a bye never lets a candidate that structurally cannot fight tie or beat on
     `the genuine winner (${normalRow.wins} wins) must rank strictly above a bye recipient that never fought (${byeRow.wins} wins)`);
 });
 
-test("rematch avoidance: with enough candidates relative to rounds, no pairing repeats", () => {
-  // A plain greedy pairing (this test's first version) could strand two candidates together even
-  // when a full zero-repeat matching existed elsewhere in the round — independent review found it
-  // failing 25-51% of the time at these exact scales, and that this very test only passed because
-  // its hardcoded seedBase (7) happened to be a lucky one (seedBases 6, 9, 10 reproducibly failed
-  // with the old algorithm). pairRound now backtracks to find a zero-repeat matching whenever one
-  // exists, so this checks across several seed bases — including the ones independently confirmed
-  // to break the old algorithm — rather than trusting a single roll.
-  const candidates = field(6);
-  for (const seedBase of [1, 6, 7, 9, 10]) {
-    const bracket = buildSwissBracket(candidates, 3, { worlds: ["korrath"], seeds: 1, seedBase }, fakePair);
-    const seen = new Set();
-    for (const { matches } of bracket.roundsLog) {
-      for (const res of matches) {
-        const key = [res.aName, res.bName].sort().join("::");
-        assert.ok(!seen.has(key),
-          `seedBase=${seedBase}: pairing ${key} repeated across rounds even though unplayed opponents remained (6 candidates, 3 rounds)`);
-        seen.add(key);
-      }
-    }
-  }
-});
-
-test("pairRound backtracks to a zero-repeat matching a plain greedy walk would miss", () => {
-  // The exact failure an independent review reproduced: greedily pairing the two joint leaders
-  // first strands the round's one forbidden pair together, even though pairing either leader with
-  // one of them instead leaves a perfectly valid zero-repeat matching for the rest. Tested directly
-  // against pairRound on synthetic standings — fast, and isolates the pairing algorithm from match
-  // simulation entirely.
-  const standings = [
-    { name: "Aggressive", wins: 3, losses: 1 }, { name: "QuickCommit", wins: 3, losses: 1 },
-    { name: "Adaptive", wins: 1, losses: 3 }, { name: "ForceParity", wins: 1, losses: 3 },
-  ];
-  const played = new Set(["Adaptive::ForceParity"]);
-  const { pairs } = pairRound(standings, played, new Set());
-  const pairKeys = pairs.map(([a, b]) => [a.name, b.name].sort().join("::"));
-  assert.equal(pairs.length, 2, "4 candidates must produce 2 pairs");
-  assert.ok(!pairKeys.includes("Adaptive::ForceParity"),
-    `pairRound repeated the one forbidden pair even though a zero-repeat matching existed: got ${pairKeys.join(", ")}`);
-});
-
-test("pairRound still completes (with a forced repeat) when a zero-repeat matching is genuinely impossible", () => {
-  // 4 candidates who have all already played each other (a fully round-robin'd played-set) leave
-  // no zero-repeat option anywhere — pairRound must still return a complete pairing (via its
-  // greedy fallback) rather than hang or throw.
-  const standings = ["A", "B", "C", "D"].map(name => ({ name, wins: 0, losses: 0 }));
-  const played = new Set(["A::B", "A::C", "A::D", "B::C", "B::D", "C::D"]);
-  const { pairs } = pairRound(standings, played, new Set());
-  assert.equal(pairs.length, 2, "must still produce a complete pairing even with no zero-repeat option");
-  const paired = new Set(pairs.flatMap(([a, b]) => [a.name, b.name]));
-  assert.equal(paired.size, 4, "every candidate must appear in exactly one pair");
-});
-
 test("Swiss standings: total wins equal total losses — a bye contributes to neither", () => {
   // Every REAL pairing is win/loss-balanced (one side's win is the other's loss, exactly like
   // round-robin's own invariant), and a bye is now scorable-neutral (previous test) — so unlike a
@@ -1040,19 +775,6 @@ test("Swiss standings: total wins equal total losses — a bye contributes to ne
   const totalWins = bracket.standings.reduce((s, c) => s + c.wins, 0);
   const totalLosses = bracket.standings.reduce((s, c) => s + c.losses, 0);
   assert.equal(totalWins, totalLosses, "every win must have a matching loss somewhere — a bye must add to neither");
-});
-
-test("standings are sorted by win RATE, with raw wins as the tie-break", () => {
-  // Updated, not deleted: this used to assert most-wins-first, which ranked "everyone who avoided a
-  // bye, then everyone who didn't" — a bye recipient plays one fewer pairing and so has strictly
-  // fewer chances to earn a win. Rate is the contract now; wins break a rate tie.
-  const bracket = buildSwissBracket(field(6), swissRounds(6), { worlds: ["korrath"], seeds: 1 }, fakePair);
-  const rate = r => { const n = r.wins + r.losses + r.draws; return n > 0 ? r.wins / n : 0; };
-  for (let i = 1; i < bracket.standings.length; i++) {
-    const prev = bracket.standings[i - 1], cur = bracket.standings[i];
-    assert.ok(rate(prev) > rate(cur) || (rate(prev) === rate(cur) && prev.wins >= cur.wins),
-      `standings order violated at index ${i}: ${JSON.stringify(prev)} before ${JSON.stringify(cur)}`);
-  }
 });
 
 test("a strong candidate rises to the top of Swiss standings against a field of crippled ones", () => {
@@ -1133,12 +855,6 @@ test("two duel candidates overriding DIFFERENT keys still run (A9 regression fen
   assert.doesNotThrow(() => runDuel(a, b, { worlds: ["korrath"], seeds: 1, minutes: 2 }));
 });
 
-test("this suite leaves the shipped strategy table exactly as it found it (T2)", () => {
-  // Placed last on purpose: it is a whole-file assertion, not a unit one.
-  assert.equal(STRATEGIES.aggressive.garrisonMult, 0.4, "the shipped garrisonMult, not a test's override");
-  assert.equal(STRATEGIES.aggressive.attackTimeoutMult, 0.55);
-});
-
 test("the side-swap is a PAIRED comparison: both directions play the same maps (T2)", () => {
   // runSwappedDuel's own header says the swap exists so "a side-symmetry bug would show up as those
   // two disagreeing". It could not: duelSeed hashes the candidate names in ORDER, and the two
@@ -1152,40 +868,6 @@ test("the side-swap is a PAIRED comparison: both directions play the same maps (
   const fixture = rows => rows.map(r => [r.world, r.seed, r.swapAsym]);
   assert.deepEqual(fixture(res.bAsAi.rows), fixture(res.aAsAi.rows),
     "both directions must play the SAME world/seed/asym fixtures — only the seat differs");
-});
-
-test("the round-1 bye doesn't depend on the order candidates were listed in (T2)", () => {
-  // pairRound sorts on wins alone, and in round 1 every standing is 0-0. V8's sort is stable, so
-  // the order is preserved and the loop takes the LAST element — i.e. `--candidates a,…,e`
-  // structurally penalised whichever file was listed last. Nothing to do with merit.
-  const names = ["A", "B", "C", "D", "E"];
-  const rows = order => order.map(n => ({ name: n, wins: 0, losses: 0, draws: 0, byes: 0 }));
-  const byeFor = order => pairRound(rows(order), new Set(), new Set()).byeName;
-  const a = byeFor(names);
-  const b = byeFor([...names].reverse());
-  const c = byeFor(["C", "A", "E", "B", "D"]);
-  assert.equal(a, b, `listing the same field in reverse changed the bye (${a} vs ${b})`);
-  assert.equal(a, c, `listing the same field shuffled changed the bye (${a} vs ${c})`);
-});
-
-test("standings rank by RESULT, not by how many pairings the schedule handed out (T2)", () => {
-  // A bye is scorable-neutral (the e9ad1d0 fix) — but the standings still sorted on absolute win
-  // totals, and a bye recipient simply plays one fewer pairing, i.e. worlds x seeds x 2 fewer
-  // chances to earn a win (16 under the swiss CLI defaults). So the ranking was literally "everyone
-  // who avoided a bye, then everyone who didn't": a 2W-2L candidate at 50% ranked below a 3W-3L
-  // candidate at 50% purely for having played more. This is the mirror image of the bug e9ad1d0
-  // just fixed, in the one place the tool is supposed to be trustworthy.
-  const played = { name: "played-more", wins: 3, losses: 3, draws: 0, byes: 0 };
-  const byed = { name: "took-a-bye", wins: 2, losses: 2, draws: 0, byes: 1 };
-  const ranked = rankStandings([played, byed]);
-  assert.equal(ranked[0].name, ranked[1].name === "played-more" ? "took-a-bye" : "played-more",
-    "sanity: the two are distinct rows");
-  assert.deepEqual(ranked.map(r => r.name).sort(), ["played-more", "took-a-bye"]);
-  assert.equal(rankStandings([played, byed])[0].wins / 6, 0.5, "both are at 50% — this is a genuine tie");
-  // The real assertion: equal rates must not be broken in favour of the bigger denominator.
-  const strictlyBetter = { name: "better", wins: 3, losses: 1, draws: 0, byes: 1 };
-  assert.equal(rankStandings([played, strictlyBetter])[0].name, "better",
-    "a 75% record must outrank a 50% one even though it played fewer pairings");
 });
 
 /* ---------- the per-side archetype plumb through runDuel (docs/ai-evolution-design.md §8.4) ----------
@@ -1322,22 +1004,6 @@ const archiveOpts = {
   duelWorlds: ["korrath"], duelMinutes: 4, duelSeeds: 1, screen: false,
   panel: [{ name: "Panel: Adaptive" }],
 };
-
-test("binOf is total and ordered — every real value lands in exactly one bin", () => {
-  for (const d of ARCHIVE_DIMS) {
-    assert.equal(d.names.length, d.edges.length + 1, `${d.label}: n edges must give n+1 bins`);
-    for (let i = 1; i < d.edges.length; i++)
-      assert.ok(d.edges[i] > d.edges[i - 1], `${d.label}: edges must ascend`);
-    assert.equal(binOf(-1e9, d.edges), 0, `${d.label}: below every edge is bin 0`);
-    assert.equal(binOf(1e9, d.edges), d.edges.length, `${d.label}: above every edge is the last bin`);
-    // The boundary itself belongs to the UPPER bin, and each edge must actually move the bin —
-    // an edge that changes nothing is a silently missing axis.
-    d.edges.forEach((e, i) => {
-      assert.equal(binOf(e, d.edges), i + 1, `${d.label}: a value ON edge ${e} belongs to the upper bin`);
-      assert.equal(binOf(e - 1e-9, d.edges), i, `${d.label}: just below edge ${e} belongs to the lower bin`);
-    });
-  }
-});
 
 test("runArchive is deterministic: the same seed builds the same cast", () => {
   const strip = r => JSON.stringify(r.cells.map(c => [c.key, c.fitness, c.genome]));

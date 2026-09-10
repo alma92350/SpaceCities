@@ -8,18 +8,19 @@ change that breaks one fails `npm test` rather than shipping.
 ## Getting set up
 
 ```
-node --version      # must be >= 20
+node --version      # must be >= 22 (the global WebSocket the multiplayer client needs)
 npm start           # serve the game at http://localhost:8080  (zero-dep static server)
-npm test            # the pre-commit suite: ~27s, 3173 tests (node --test)
-npm run test:slow   # the slow tier — test/slow/, ~200s, AI-bench guards only
-npm run test:all    # both, i.e. what CI covers between its two jobs
+npm test            # the suite you run on every change (node --test) — ~50s
+npm run test:slow   # the long bench guards (test/slow/) — ~4 minutes
 ```
 
-`npm test` is the one you run in your edit loop, so it is kept fast enough to actually run.
-`test/slow/` holds files whose wall clock would otherwise stop that happening — today just
-`test/slow/ailab.test.js`, which was 91% of the old suite's runtime for 3.4% of its tests. The tier
-is a *schedule*, not an exemption: CI runs it on every push, and `test/suite-integrity.test.js`
-fails if a slow file is ever left wired to no script or no CI job.
+`npm test` is the inner loop and is meant to stay fast. `npm run test:slow` holds the 72
+`tools/ailab.js` guards that drive real matches; they used to sit in `npm test` and made it take
+five minutes, most of it an AI-tuning sweep that almost no commit can affect. They are **not
+optional and never skipped** — CI runs both on every push and pull request, and
+`test/suite-integrity.test.js` fails if the slow half loses its script, its CI job, or its files.
+Run `npm run test:slow` before anything that touches `tools/ailab.js`, `tools/genome.js`, or AI
+tuning, and before cutting a release.
 
 There is nothing to install — no `npm install`, no bundler, no transpiler.
 
@@ -87,12 +88,22 @@ instead of an untyped bag. **No build step, no runtime dependency** — the ship
 ES modules.
 
 Type checking is **opt-in per file**: a file is checked only if it starts with a `// @ts-check`
-pragma. Twenty engine files opt in today — the core data and hot-path modules (`state.js`, `movement.js`,
-`gather.js`, `grid.js`, `fog.js`, `separation.js`, `formation.js`, `haul.js`, `recycle.js`,
-`wreckage.js`) plus `supply.js`, `colliders.js`, `scout.js`, `victory.js`, `production.js`,
-`persist.js`, `aiCommon.js`, `aiStrategy.js`, `aiDifficulty.js` and `aiArchetypes.js`. Expand
-coverage file-by-file by adding the pragma **and annotating** the functions'
-`state`/`unit`/`building` params with the shared typedefs.
+pragma. **29 of the 51 engine files** opt in today — the core data and hot-path modules
+(`state.js`, `movement.js`, `gather.js`, `grid.js`, `fog.js`, `separation.js`, `formation.js`,
+`haul.js`, `recycle.js`, `wreckage.js`), plus `supply.js`, `colliders.js`, `scout.js`,
+`victory.js`, `production.js`, `persist.js`, `aiCommon.js`, `aiStrategy.js`, `aiDifficulty.js`,
+`aiArchetypes.js`, and most recently `rng.js`, `factions.js`, `colony.js`, `wonder.js`,
+`projectionDelta.js` and `colonyPolicy.js`. Rather than counting the list by hand, ask the tree:
+
+```
+for f in engine/*.js; do head -1 "$f" | grep -q '@ts-check' || echo "$f"; done   # what's left
+```
+
+Expand coverage file-by-file by adding the pragma **and annotating** the functions'
+`state`/`unit`/`building` params with the shared typedefs. It is worth doing rather than
+box-ticking: adding those six turned up `Building.capital` — a field `engine/galaxy.js` writes and
+`engine/colony.js` reads to refuse packing a Capital, declared on no typedef — plus two return
+types this guide's own author had written down wrong.
 
 The annotation half is not optional: `strict` and `noImplicitAny` are off, so an un-annotated
 parameter is `any` and the pragma alone checks nothing. `test/types-contract.test.js` enforces both
@@ -100,6 +111,15 @@ halves — every `// @ts-check` file must annotate its exported functions, and e
 factory constructs must be declared on its `@typedef`.
 This is what catches the silent-`undefined`-field class of bug — a mistyped or renamed field is a
 check-time error, not a wrong result the same-seed determinism test can't see.
+
+`npm run typecheck` also carries the closest thing this repo has to a linter, and deliberately the
+only one: **`noUnusedLocals`**. It needs no dependency and no new command — it is a compiler flag on
+a compiler CI already runs. A real linter (ESLint, Prettier) is NOT used here and that is a
+decision, not an omission: both would mean a dependency and a config to maintain, and a formatter
+run over 40,000 lines of deliberately hand-shaped code — this codebase's comment layout carries
+argument and history — would produce an enormous diff that destroys exactly what makes it readable.
+The house style is enforced by review and by matching the surrounding code, as the Style section
+says.
 
 ```
 npm run typecheck        # runs `tsc -p jsconfig.json` — needs a TypeScript compiler available
@@ -130,7 +150,14 @@ writing the implementation:
    determinism, save versioning).
 4. Run the whole suite (`npm test`) and `npm run typecheck` — a new feature can surface a
    now-outdated assumption in an older test; update that test's assertion to the new, intended
-   contract rather than deleting coverage.
+   contract rather than deleting coverage. Add `npm run test:slow` when the change is anywhere
+   near the AI bench.
+
+A note on **where** a new test goes: `npm test` globs `test/*.test.js` and `npm run test:slow`
+globs `test/slow/*.test.js`, so a file in any other directory under `test/` is run by neither.
+That is the one way to add a test file that looks green because nothing executes it, so
+`test/suite-integrity.test.js` asserts the two globs stay disjoint and exhaustive. A test belongs
+in `test/slow/` only if it genuinely needs to drive real matches; the default is the fast half.
 
 ## Commits
 
@@ -142,7 +169,7 @@ writing the implementation:
   Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
   ```
 
-## Protecting the default branch (one-time repo setup — not yet done)
+## Protecting the default branch
 
 Everything above is enforced by tests, and the tests run in CI on every push and pull request. But
 nothing stops a red build being merged anyway, and that is not hypothetical: `npm run typecheck`
@@ -150,49 +177,93 @@ failed on every commit from 2026-08-05 to 2026-08-08 in the upstream repo this o
 and two PRs there both merged straight through it. A gate nobody is required to pass is a gate that
 eventually gets walked past.
 
-**Not yet applied here, deliberately.** This repository doesn't have a `main` branch yet — its only
-branch, `claude/spacecities-multiplayer-rts-port-hp9195`, is also its default branch, and
-development is still direct-push rather than PR-based (see `TASKS.md` T-005). Turning on **Block
-force pushes** or **Require a pull request before merging** against the *only* branch that exists
-would lock out the very push-based workflow the port is using to land Phase 0. Apply this once a
-real `main` exists and day-to-day work moves onto PRs — the required-checks list below stays
-correct as written for whichever branch that ends up being; only `Target branch` needs updating.
+It went quiet in a way worth recording, because it was not the way this section predicted. On
+2026-09-02 the repository's Actions allowance ran out (2,000/2,000 on a private repo's free tier)
+and every run from then on failed in 2-5 seconds having never started a runner. No workflow was
+broken and no test was failing; the gate simply stopped existing, and the red X it left on each
+commit looked enough like an ordinary failure that four commits merged behind it. A gate nobody is
+required to pass is one thing. A gate that silently stops running is worse, because it still
+reports something.
 
-This is a repository setting, so it cannot live in a file here. It takes about two minutes:
+**This is now applied.** The repository is public (Actions minutes are unlimited and free for
+public repositories, which also removes the failure above permanently) and the ruleset below is
+active. It is a repository setting, so it cannot live in a file here — this section is the record
+of what was configured, and the place to update if it ever changes.
 
-**Settings → Branches → Add branch ruleset** (or *Add rule* on the classic UI)
+**Settings → Rules → Rulesets → New branch ruleset**
 
-- Target branch: `main` (or whichever branch this applies to, once it exists)
-- ☑ **Require status checks to pass before merging**, and add all three by name — **confirmed
-  present and correctly named in `.github/workflows/test.yml` as of this port** (2026-08-31):
-  - `tests (node 20)`
+- Name: `main protection`, Enforcement status: **Active**
+- Target branches: **Include default branch** (`main`)
+- ☑ **Require a pull request before merging.** Development is PR-based from 2026-09-06; it was
+  direct-push to `main` for the whole port before that (`TASKS.md` T-005). This is not only about
+  review — required status checks cannot be satisfied by a direct push at all, since the checks
+  run *after* the push and a fresh commit has none yet. So the two rules come as a pair: choosing
+  to require checks is choosing to work on branches.
+- ☑ **Require status checks to pass**, and add all three by name — **confirmed present and
+  correctly named in `.github/workflows/test.yml`**:
   - `tests (node 22)`
   - `browser smoke test`
+  - `slow tests (ailab sweeps)`
 
-  All three must be listed. The matrix produces one check per Node version, and requiring only one
-  lets a version-specific regression through — which is the whole reason the matrix exists. The
-  smoke job is the only check that can see a page which parses cleanly and then throws on load.
+  All three must be listed, and each earns its place differently. The Node 22 job is the suite.
+  The smoke job is the only check that can see a page which parses cleanly and then throws on
+  load. The slow job holds the 72 long-running bench guards since they were split out of
+  `npm test` — they are not optional, only off the inner loop, so leaving them out of this list is
+  the one way that split could quietly become a deletion of 72 tests.
+
+  There used to be a fourth, `tests (node 20)`, and its removal is worth understanding rather than
+  repeating: `package.json` claimed `">=20"` while the multiplayer client uses the global
+  `WebSocket`, which Node only exposes from 22. That leg could never pass — and it did not fail
+  cleanly either, it hung awaiting connections that could not open, 36 minutes against 72 seconds
+  on the Node 22 leg, so the whole gate read as broken rather than as one false version claim. The
+  matrix now names only the versions actually supported, and `test/runtime-floor.test.js` keeps
+  `package.json`, the Dockerfile and that matrix agreeing so they cannot drift apart again.
 - ☑ **Require branches to be up to date before merging** — so a check that passed against a stale
   base cannot count for a merge onto a newer one.
 - ☑ **Block force pushes**
 
-Leave "Require a pull request before merging" to taste; it is orthogonal to the failure above,
-which was about a red check rather than an unreviewed one.
+A check only appears in that picker once it has reported recently, so if one is missing, push
+something first and come back.
+
+## Day-to-day workflow
+
+Since 2026-09-06, `main` is protected and takes no direct pushes. The loop is:
+
+```
+git checkout -b some-change     # branch off an up-to-date main
+npm test                        # ~60s; the inner loop, run it constantly
+npm run typecheck               # and before you push
+git push -u origin some-change
+```
+
+then open a pull request and merge it once the three checks are green. `npm run test:slow` is not
+part of the inner loop but CI runs it on the PR, so run it locally too for anything touching the
+AI bench, rather than discovering it at merge time.
+
+The point of the branch is not ceremony: it is that CI can only vouch for a commit *after* it
+exists somewhere, and a branch is the somewhere that is not yet `main`.
 
 The check names come from `.github/workflows/test.yml`'s job name
-(`name: tests (node ${{ matrix.node-version }})`). If that line is ever edited, the required
+(`name: tests (node ${{ matrix.node-version }})`), so adding a Node version to the matrix adds a
+check that must be added here too. If that line is ever edited, the required
 checks silently stop matching and the gate goes quiet — so change the two together.
 
 ## Release checklist
 
 When cutting a release:
 
-1. `npm test` is green (determinism + purity + static-integrity included), and `npm run typecheck`
-   reports no errors on the `// @ts-check`ed files.
+1. `npm test` is green (determinism + purity + static-integrity included), `npm run test:slow` is
+   green (the bench guards — a release is exactly when the slow half is worth the four minutes),
+   and `npm run typecheck` reports no errors on the `// @ts-check`ed files.
 2. `npm run smoke` is green — boots the real page in real Chromium, starts a match and clicks
    things, failing on any uncaught error (`tools/smoke.js`; CI runs it as the *browser smoke test*
    job). It is shallow on purpose. Still worth ten minutes by hand for anything the script does not
    cover — an Odyssey run, and a save/reload of both modes.
+2b. `npm run smoke:mp` is green — two browsers, one server, a real shared link: host, join, both in
+   one live match (`tools/smokeMultiplayer.js`, run as a second step of the same CI job). This is
+   the only automated thing that sees the path a real player takes; everything multiplayer is
+   otherwise tested one layer down in Node, and the gap between those two is where a live-match
+   autosave crash sat unnoticed in every match anyone played.
 3. Bump `APP_VERSION` in `version.js` **and** `version` in `package.json` to the new semver, and
    keep `version.json` in sync (the auto-update check compares them). (`test/release-manifest.test.js`,
    `test/version.test.js`.)

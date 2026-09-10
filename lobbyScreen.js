@@ -146,6 +146,11 @@ async function joinLive(matchId, owner, token, statusEl) {
   const closeTransport = transport.close.bind(transport);
   transport.close = () => { clearLiveMatch(); closeTransport(); };
   bootState(firstState, { intro: true, transport });
+  // AFTER bootState, which clears it — the same ordering (and the same reason) as
+  // spectateLive's own game.networkSpectate below. Read only by saveShape.js's resumableMode,
+  // which must refuse to checkpoint a live match: this state is a reassembled projection with no
+  // fog structures for engine/persist.js to serialize.
+  game.networkLive = true;
   initChatPanel();   // T-038 — after bootState, same as everywhere else here: game.transport must already be this one
   transport.onEvent(e => {
     if (e.type !== "state") return;
@@ -290,10 +295,18 @@ function renderHostCard(container) {
   planetRow.appendChild(planetSelect);
   card.appendChild(planetRow);
 
+  const sizeSelect = dialSelectInto(card, "Map size", SIZE_OPTIONS);
+  const resourceSelect = dialSelectInto(card, "Resources", RESOURCE_OPTIONS);
+  const lengthSelect = dialSelectInto(card, "Match length", MATCH_LENGTH_OPTIONS);
+
   // Who sits in each seat. Until now the form sent neither seatKinds nor hostJoins, so seat 0 was
   // always auto-claimed by the creator and the only match reachable from the browser was
   // host-plus-one-human: setting up two MCP agents against each other, or watching a match rather
   // than playing it, meant hand-rolling the POST. hostSeatConfig() (above) owns the mapping.
+  //
+  // AFTER the four world/size/resources/length dials, not before them: those four are read
+  // POSITIONALLY by test/lobbyScreen-render.test.js's "built from the shared setup tables" guard,
+  // so inserting a row above them silently breaks it.
   const seat1Select = dialSelectInto(card, "Seat 1", [
     { label: "Me (play)", mult: "me", note: "you take this seat" },
     { label: "Open (agent)", mult: "agent", note: "an MCP agent or another human joins" },
@@ -315,10 +328,6 @@ function renderHostCard(container) {
   };
   seat2Select.addEventListener("change", syncAiRows);
   syncAiRows();
-
-  const sizeSelect = dialSelectInto(card, "Map size", SIZE_OPTIONS);
-  const resourceSelect = dialSelectInto(card, "Resources", RESOURCE_OPTIONS);
-  const lengthSelect = dialSelectInto(card, "Match length", MATCH_LENGTH_OPTIONS);
 
   // T-037 (FR-7): "unless the host has disabled spectators" — on by default (an unchecked box is
   // the ONE thing that changes today's behavior, so the default matches what every match already
