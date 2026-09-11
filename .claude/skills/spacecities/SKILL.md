@@ -174,6 +174,91 @@ rather than firing them individually.
   own 3 workers and 1 command center and nothing else. An empty enemy list means *not
   visible*, not *not present*.
 
+## Playing to win
+
+Two recorded matches on the same map (`korrath`, 0.6x resources) — one loss, one win — separate
+the habits that decide the game from the ones that only feel productive. The loss was not a
+strategy failure: both agents read `get_counters` and both named the right counter. The loss was
+an *execution* failure — the right build bought 60s too late, workers left to die, and units fed
+into fights one at a time.
+
+### The loop that wins
+
+Every wake is the same four steps, and none of them is narration:
+
+1. `wait_for_event` (or a short `get_situation` poll).
+2. `list_entities` with `activity:"idle"` on your own owner — **every idle worker is a leak.**
+   Re-task it the same tick: gather, or build the thing you have been putting off.
+3. Spend. If ore is above a unit's cost, it should already be queued. Keep the barracks queue
+   non-empty and keep adding workers from the command center all game — the winner ran 9-10
+   workers and never stopped queueing them; the loser topped out at 6 and starved.
+4. Re-check supply. One habitat caps you at 18, which a worker line plus three bastions reaches
+   around 150s. Queue the second habitat *before* it bites; "cannot-afford" and "supply-capped"
+   both read as a stalled queue, and only one of them is fixed by waiting.
+
+### Buy the counter before you need it
+
+`get_counters` is static — read it once at join and write the bonuses down. On `korrath`:
+lancer > bastion +20, bastion > skiff +10, skiff > lancer +10.
+
+**The trigger for the foundry is the enemy's *first* bastion, not their fourth.** Foundry is
+175 ore / 22s, and the first lancer is ~16s after that — call it 38s from the decision to a unit
+on the field, plus however long you spend saving up. The winner queued the foundry on the event
+announcing the enemy's first bastion and had lancers out with ore to spare. The loser waited
+until four enemy bastions were visible at ~165s, then discovered it was 25 ore short, and never
+caught up. If you can see the threat, you are already too late to start the tech.
+
+If you genuinely missed the window, the stopgap is a turret (150 ore + 100 crystals, 12s) — but
+it only buys time, it does not win the fight. That is why one worker goes to a crystal node in
+the first 60s.
+
+### Keep the worker line alive
+
+A single enemy bastion killed six workers in the winning match, and worker loss was the loss
+condition in the losing one. Nodes deplete and **workers auto-retarget to the next node, which
+is often across the map in contested ground** — so after any `node-depleted` event, look at
+where your gatherers actually went and pull them back to nodes near home. Park the army between
+the worker line and the enemy rather than chasing raiders across the map.
+
+When you have no workers you have no recovery. An army can be rebuilt from a worker line; a
+worker line cannot be rebuilt from 5 ore.
+
+### Fight with the whole ball, or don't fight
+
+The loss fed units in as they spawned: one lancer out, dead; next lancer out, dead; repeat until
+the base was empty. Every one of those was a losing count at the moment it was fought.
+
+- Gather at home, then commit. `ids[0]` leads a `move`/`attackMove`, so send the group in one
+  command.
+- Only push the enemy base once you have *confirmed* their military is dead — and confirm it by
+  having killed it, not by not seeing it.
+- Retreat units that have dropped low near defended ground. Turrets at a base will delete a
+  two-lancer poke that already won the field.
+- Once you are in their base unopposed, work the buildings down and stay: foundry, habitat,
+  barracks, command center. Sieging is slow (a command center is 1000 hp); do not wander off.
+
+### Fog is not information about the enemy's base
+
+The losing agent twice concluded "their base is gone, I've won" because `list_entities` came back
+empty, and both times the enemy army was intact and re-formed. **An empty enemy list means you
+cannot see them.** The only proofs a match is over are `get_situation`'s `over`/`winner` fields
+and the match report. Never declare a result from absence.
+
+### Small mechanical facts that cost a round each
+
+- **Rangers come from the command center; lancers come from the barracks.** The foundry is a
+  prerequisite that unlocks the lancer, not a producer — `queueProduction` against the foundry
+  fails.
+- **Habitats and turrets are `build` commands needing a worker**, not `queueProduction`. If every
+  worker is gathering you cannot build anything; pull one off the line.
+- **Buildings need clearance** (~40 units from existing structures). A failed placement is a
+  position problem, not a resource problem — move further out and retry once, don't churn.
+- **A production queue reserves its cost.** `cannot-afford` at an ore total that looks sufficient
+  usually means something is already queued, or the reading is a tick stale. Re-read
+  `get_situation` immediately before queueing instead of retrying the same command in a loop.
+- **Seat handles expire.** Keep the `client_id` you joined with; re-join with it to recover the
+  seat mid-match.
+
 ## Verifying it works
 
 Two agents in one match, end to end, is the thing worth checking — it exercises
