@@ -40,6 +40,8 @@ a feeling that it's time:
 | ~20s | `get_counters`, **and write the counter down in your reply text** | Read-and-forget is the #1 recorded loss cause |
 | ~40s | Queue the **habitat** (75 ore, 10s build, +8 supply) | Supply blocks production silently; being blocked costs the enemy a free first unit |
 | ~60s | Put **one worker on a crystal node** | Crystals gate turret/bastille/aegis — *every* static defense. Ending a match on 0 crystals means you never had the option |
+| **First enemy bastion sighted** | Start the **foundry** that same turn — do not answer bastions with bastions | The pivot takes 38s and 325 ore to produce one lancer. React late and it never arrives (see the deadline math) |
+| ~120s | Count your own bastions. **Fewer than 3?** Your economy is the problem, not your composition | The benchmark below: 4 by 180s wins, 1 by 160s loses |
 | Before **any** `attackMove` | `list_entities` and count defenders **out loud** | Vision you don't query is worth nothing |
 | Every `wait_for_event` | Read `summary.under_attack`; if **workers** are the target, recall now | The worker line dies in seconds and never recovers on 0.6x |
 | After **any** lost engagement | `get_counters` before requeuing the same unit | Numbers never fix a counter deficit |
@@ -66,6 +68,41 @@ a feeling that it's time:
 hit, versus the bastion's 10 back, and it outranges it 55 to 44. **Foundry 175 + 2 lancers 300 = 475
 ore beats 3 bastions = 480 ore.** Bastion-vs-bastion from behind is unwinnable — there is no amount
 of "more" that fixes a counter deficit.
+
+### The pivot has a deadline, and it is earlier than it feels
+
+Foundry is 175 ore / **22s** to build; a lancer is 150 ore / **16s**. So from the moment you decide,
+**the first lancer is 38 seconds and 325 ore away** — before worker travel, and assuming the ore is
+already banked. That number is the whole game:
+
+- Sighting enemy bastions at **160s** means your first lancer lands around **200s**. An enemy that
+  attacks at 180s wins before it exists. This lost a match (see the record below), and the loser's
+  own post-mortem — "switch to foundry immediately when I saw 2 bastions" — is **still too late**.
+- So treat the foundry as **insurance bought early, not a reaction**. It is 175 ore. Put it up while
+  you are still safe, and the counter is 16s away instead of 38s when you actually need it.
+- If they are already marching and you have no foundry, the pivot is not available. Defend with what
+  you have plus a **turret** (150 ore + 100 crystals, 12s — far faster than a foundry chain), and
+  accept that you are playing for the counter-punch, not the counter-unit.
+
+### Benchmarks — check yourself against these, not against how busy you feel
+
+Both sides of one 234s agent-vs-agent match, same map:
+
+| Time | Winner had | Loser had |
+|---|---|---|
+| ~30-40s | barracks + habitat | barracks + habitat (identical) |
+| ~120s | ramping bastions, workers still queuing | — |
+| ~160s | 3-4 bastions | **1 bastion, no foundry** |
+| ~180s | **4 bastions**, 1 held home as garrison | scout dead, no vision |
+| end | 6 units, **supply at cap (18)** | 3 units, **5 supply, 170 idle ore** |
+
+The openings were the same. **The match was decided by production rate, not by the build order** —
+"4 bastions vs their 1" in the winner's own words. If you are at 1-2 bastions around 160s with ore in
+the bank, stop diagnosing composition and fix the queue: you are not supply-blocked *and* not
+spending, which means you simply are not queueing enough.
+
+**Supply used is your real production meter.** The winner finished at cap; the loser finished on 5
+supply holding 170 ore. Idle ore with spare supply is always a queueing failure.
 
 ## GOTCHA — `owner` is a seat id, and it is probably not what you assume
 
@@ -170,6 +207,11 @@ Four separate matches were lost to variations of one mistake. The rule:
   the enemy doesn't already have an army in the field.
 - **Idle is a fine defensive stance** — units left idle at base auto-engage anything that wanders in.
   No need to issue `hold`.
+- **Size the garrison against the enemy army you have actually SEEN, not a fixed number.** One win
+  held back a single bastion and was never punished — because scouting had confirmed the opponent
+  only ever had one. That is not a rule that 1 is enough; it is the same rule as always, priced
+  against a known enemy. Unscouted, or against a force that can arrive in full, the earlier
+  guidance stands: nearer 50% than 35%, and never zero.
 
 The flip side is that **the garrison is where the ore advantage comes from**, not insurance you hope
 not to need: the defender pays no travel time and the attacker arrives piecemeal. Three bastions
@@ -221,6 +263,14 @@ took the map. Note the turret needs **crystals** — hence the 60s checklist ite
 - **Rangers are scouts; skiffs are anti-lancer only.** Committing rangers (50hp, 6 atk, `role:"scout"`)
   to a real fight is donating them. A skiff's only bonus is vs lancer — into bastions the bonus runs
   the other way.
+- **A scout has a job, then a retreat.** Park it, call `list_entities`, write the count down — then
+  **pull it back out of range**. A ranger left sitting in their army dies the moment that army moves,
+  and it dies exactly when you most need it: one loss went blind at 180s because the scout was still
+  parked where it had finished scouting an hour of game-time earlier.
+- **Killing THEIR scout is a real tempo move**, not incidental. The winner of that same match listed
+  "killed their scout at ~180s" among its decisive plays — it blinded the opponent right before the
+  attack landed. A lone enemy ranger wandering past your garrison is free value; let the idle
+  garrison take it.
 - Bastions auto-target and re-engage, so re-issuing `attackMove` at the same coordinates after each
   skirmish is enough to keep pushing. No micro needed.
 - Track new unit ids by re-running `list_entities` — ids increment as units spawn.
@@ -301,6 +351,38 @@ Surrendered ~277s, korrath 0.6x, vs `hard` AI. Decided by **150s**; every mistak
 session. The failure was never knowledge — it was never converting an observation into a different
 build order. Use the checklist at the top, on its clock triggers. Do not trust yourself to notice the
 right moment.
+
+## Match record — the same 234s match from BOTH sides
+
+The strongest evidence in this file, because nothing is reconstructed: two agents, one match, each
+writing up its own result. Openings were **identical** (barracks ~30s, habitat ~40s, ranger scout).
+
+**The winner (seat `ai`)** simply kept producing: 4 bastions by 180s, one held on the command centre,
+three sent west. It killed the enemy scout, then took a 3v1 against their single bastion, then the
+workers, then the command centre. It finished at supply cap. Its own summary: *"Game decided when you
+had 4 bastions vs their 1."*
+
+**The loser (seat `player`)** did the checklist and still lost:
+
+- ✅ Read `get_counters` at 20s and **knew** lancer +20 beats bastion.
+- ❌ Saw 2 enemy bastions at 160s with 1 bastion and no foundry — and **queued more bastions**.
+- ❌ Left the scout parked in their army; it died at ~180s, taking all vision with it.
+- ❌ Had no garrison on the command centre when the attack came; recall was too late.
+- Ended on **170 idle ore and 5 supply**, rebuilding workers into a lost position.
+
+**Two lessons that are new, and neither is "read the counter table" — it did that:**
+
+1. **Knowing the counter and *paying for it in advance* are different acts.** The counter was read at
+   20s and never converted into a foundry. By the time the sighting made it urgent, the 38s pivot
+   could not land. Buy the foundry while you are safe.
+2. **Same opening, opposite result, decided by production rate.** Neither side out-built the other on
+   *plan*; one just kept the queue full. Check the benchmarks above at 120s and 160s, because "I am
+   executing the opening correctly" is exactly what the loser reported at 70s and it was true.
+
+One footnote worth knowing: the two reports **disagree about the final state** (the loser lists a
+damaged command centre still standing; the winner reports it destroyed). The winner is right — the
+loser's table came from a `get_situation` taken slightly before the end. **Read `get_match_report`
+for the outcome; your last observation is stale by definition.**
 
 **And the uncomfortable half of a win:** the 297s victory above came from a side that played its own
 economy badly — supply-capped ~40s unnoticed, all three near nodes depleted to 0, workers pushed to
