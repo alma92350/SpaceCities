@@ -85,6 +85,14 @@ function trimEntity(e, own) {
     // The order's own target, flattened to whichever id/point it actually carries — enough to tell
     // two gathering workers on different nodes apart without shipping the raw order object.
     orderTarget: orderTargetOf(e),
+    // A gatherer's CARGO and which leg of the haul cycle it is on. "activity" alone reports
+    // "gathering" for a worker mining, one walking to the seam, and one wedged halfway home with a
+    // full hold — three states an agent has to tell apart to notice its economy has stopped. With
+    // these, "gathering / toDrop / cargo 10" that never changes is a diagnosis; without them it was
+    // indistinguishable from a worker doing its job. Own entities only, like everything here:
+    // projection.js's stripIntel has already blanked an enemy's order before this file sees it.
+    ...(e.cargo && e.cargo.qty > 0 ? { cargo: { com: e.cargo.com, qty: e.cargo.qty } } : {}),
+    ...(e.order && e.order.type === "gather" && e.order.phase ? { gather_phase: e.order.phase } : {}),
     ...(e.queue ? { queue: e.queue.map(j => j.unitType) } : {}),
     ...(e.constructing ? { buildProgress: e.buildProgress } : {}),
   };
@@ -312,7 +320,8 @@ export function createObservationTools(lobby, getCache) {
       description:
         "Lists every unit/building currently visible to the calling seat — its own, always, plus any enemy's currently " +
         "inside its fog of war. Each entry carries id/type/owner/x/y/hp; your OWN entities also carry what they are " +
-        "currently doing (activity, orderTarget, a producer's queue, a site's buildProgress) — an enemy's never does, " +
+        "currently doing (activity, orderTarget, a gatherer's cargo and gather_phase, a producer's queue, a " +
+        "site's buildProgress) — an enemy's never does, " +
         "since fog does not reveal intent. Optionally filter by owner or type to narrow a large list, or pass " +
         "since_tick to get back only what has CHANGED since a tick you already read (plus removed_ids), which is how " +
         "to poll a long match without re-reading the whole world every time. " +

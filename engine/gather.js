@@ -20,6 +20,31 @@ const ORBIT_RADIUS = 16;   // workers ring the node instead of stacking on its e
 const ARRIVE_REACH = 4;
 const DROP_REACH = 30;
 
+// Progress watchdog: how long a gatherer may walk without ever getting closer to what
+// it is walking to before it is reported stalled. Generous — a worker steering laterally
+// around its own crowd (movement.js senseLateralAvoidance) plateaus for a second or two
+// in normal traffic, and a legitimately long haul still closes the gap steadily.
+const STALL_AFTER = 10;
+
+// Minimum gap between two adjacent docking spots on a ring. Must clear separation.js's own
+// resting distance for two workers — (6+6) * SEPARATION_PAD_MULT = 14.4 — or the crew is
+// handed spots it will immediately shove itself off of. Derived from the roster rather than
+// written as a bare 15 so a change to the worker hull or the separation pad can't silently
+// make these rings too tight again.
+export const DOCK_SPACING = UNITS.worker.radius * 2 * 1.25;
+
+// How far out a hauler parks to bank. Comfortably inside DROP_REACH so a worker that
+// reaches its spot is always within depositing distance of the drop's centre even after
+// a tick or two of being jostled, and capped there however big the crew gets: past the
+// cap the ring just packs tighter, which separation resolves on its own — the deposit
+// still lands, because the gate is measured from the centre and everyone is inside it.
+// That cap is a real ceiling on how many haulers can stand a full DOCK_SPACING apart at
+// once — about 2*pi*DOCK_RADIUS_MAX/DOCK_SPACING of them. It is deliberately NOT bought
+// by widening DROP_REACH, which would shorten every haul in the game and move the
+// economy's whole balance point; a packed ring costs a little jostling and nothing else.
+const DOCK_RADIUS = 14;
+const DOCK_RADIUS_MAX = DROP_REACH - 6;
+
 // How far a gatherer will look for a fresh seam of the SAME commodity once its current node runs
 // dry — far enough to reach a sibling deposit in the same home cluster (UNITS.worker's own
 // "~3 home seams" comment below) without sending a worker on a cross-map trek that should really
@@ -40,12 +65,57 @@ function miningEfficiency(node, def) {
   return (cap + (m - cap) * extra) / m;
 }
 
-// Stable per-worker angle around the node, so a group sent to the same
-// node spreads out around it instead of converging on one point.
-/** @param {ResourceNode} node @param {string} unitId @returns {{x:number, y:number}} */
-function orbitSpot(node, unitId) {
-  const angle = (hashStr(unitId) % 360) * (Math.PI / 180);
-  return { x: node.x + Math.cos(angle) * ORBIT_RADIUS, y: node.y + Math.sin(angle) * ORBIT_RADIUS };
+// A docking spot on a ring around (cx, cy): the crew's `index`-th of `count` evenly
+// spaced places, rotated by a per-site offset so two neighbouring sites don't hand out
+// the same angles. The ring GROWS when the crew outnumbers the places `baseRadius` can
+// hold at DOCK_SPACING, up to `maxRadius` — so an oversubscribed site packs its ring
+// tighter rather than stacking bodies on one point.
+//
+// Even spacing, not a hash. This used to be `hashStr(unitId) % 360`, and hashStr is
+// `h * 31 + charCode` — so the sequentially-numbered ids a production queue actually
+// emits hash to sequential values, and a freshly trained crew (u9, u10, u11 …) drew
+// angles 331°, 341°, 342°, 343° … Two workers a single degree apart on a radius-16 ring
+// stand 0.3px apart, far inside separation.js's 14.4 resting distance, so they shove
+// each other forever and NEITHER ever closes to ARRIVE_REACH of its own spot: both walk,
+// get pushed, and walk again for the rest of the match without ever starting to mine.
+// Silent, too — a wedged worker reads as "moving", never idles, and emits no event.
+// (test/gatherCongestion.test.js)
+/** @param {number} cx @param {number} cy @param {number} baseRadius @param {number} maxRadius @param {number} index @param {number} count @param {string} siteId @returns {{x:number, y:number, radius:number}} */
+function ringSpot(cx, cy, baseRadius, maxRadius, index, count, siteId) {
+  // Size by CHORD, not by arc: `count` spots evenly spaced on a radius-r ring stand
+  // 2r*sin(pi/count) apart, which is always LESS than the arc between them, so sizing
+  // the ring off arc length quietly hands out spots inside the separation floor at
+  // exactly the crowded end this is meant to fix. Past maxRadius the ring simply packs
+  // tighter — spots stay evenly spread and distinct, which is all the deposit gate needs.
+  const needed = count > 1 ? DOCK_SPACING / (2 * Math.sin(Math.PI / count)) : 0;
+  const radius = Math.min(Math.max(baseRadius, needed), maxRadius);
+  const offset = (hashStr(siteId) % 360) * (Math.PI / 180);   // per-site rotation only — never per-unit spacing
+  const angle = offset + (index / Math.max(count, 1)) * 2 * Math.PI;
+  return { x: cx + Math.cos(angle) * radius, y: cy + Math.sin(angle) * radius, radius };
+}
+
+// This worker's place in a site's crew, as frozen for the tick by sim.js (countMiners /
+// countDockers build the id lists). Falls back to a lone worker at index 0 when there is
+// no list at all — the direct-call unit tests, which never run a full tick.
+/** @param {string[]|undefined} crew @param {string} unitId @returns {{index:number, count:number}} */
+function crewSlot(crew, unitId) {
+  if (!crew || !crew.length) return { index: 0, count: 1 };
+  const index = crew.indexOf(unitId);
+  return index < 0 ? { index: 0, count: crew.length + 1 } : { index, count: crew.length };
+}
+
+// Where this worker mines from: its slot on the node's ring.
+/** @param {ResourceNode} node @param {string} unitId @returns {{x:number, y:number, radius:number}} */
+export function orbitSpot(node, unitId) {
+  const { index, count } = crewSlot(node.minerIds, unitId);
+  return ringSpot(node.x, node.y, ORBIT_RADIUS, ORBIT_RADIUS * 6, index, count, node.id);
+}
+
+// Where this worker parks to bank: its slot on the drop's ring.
+/** @param {Building|Unit} drop @param {string} unitId @returns {{x:number, y:number, radius:number}} */
+export function dockSpot(drop, unitId) {
+  const { index, count } = crewSlot(drop.dockerIds, unitId);
+  return ringSpot(drop.x, drop.y, DOCK_RADIUS, DOCK_RADIUS_MAX, index, count, drop.id);
 }
 
 // Called from updateGather's two depletion exits (the node is already dry when its order is
@@ -74,6 +144,18 @@ function nextNodeAfterDepletion(state, unit, node) {
       || (underCap === bestUnderCap && (dist < bestDist || (dist === bestDist && n.id < best.id)));
     if (better) { best = n; bestUnderCap = underCap; bestDist = dist; }
   }
+  // Claim the seat on the way out. countMiners freezes `miners` once at the top of the
+  // tick, so a whole crew whose node drained together would otherwise every one of them
+  // read the SAME stale counts and pick the SAME "nearest under-cap" seam — nine workers
+  // funnelling onto one rock in lockstep, which is exactly what a late-game map of
+  // half-drained seams produces over and over. Counting the claim immediately means the
+  // next worker through this function sees the seat taken and moves to the next seam.
+  // Recomputed from scratch next tick regardless, so this can never drift.
+  if (best) {
+    best.miners = (best.miners || 0) + 1;
+    (best.minerIds || (best.minerIds = [])).push(unit.id);
+    best.minerIds.sort();   // same stable order countMiners maintains, so ring slots agree
+  }
   unit.order = best ? { type: "gather", nodeId: best.id, phase: "toNode" } : null;
   // workerRetargeted (agent-observability): the OTHER half of a depletion, and the dangerous one.
   // A gatherer whose seam runs dry silently re-tasks itself to the nearest surviving node of the
@@ -96,6 +178,39 @@ function nextNodeAfterDepletion(state, unit, node) {
   if (!best) state.events.push({ type: "unitIdle", id: unit.id, unitType: unit.type, reason: "node-depleted", x: unit.x, y: unit.y, owner: unit.owner });
 }
 
+// Watch a walking gatherer for progress and announce one that has stopped making any.
+// unitStalled is the missing twin of unitIdle above: a worker wedged on the way to a seam
+// or to a drop-off is NOT idle — it has an order, it is moving, and every observable an
+// agent (or the HUD) can poll says "working", while the economy it was supposed to feed
+// sits at zero. That is precisely how the drop-off and node jams stayed invisible for as
+// long as they did. Reported ONCE per stalled leg, not per tick, and cleared the moment
+// the worker gets closer to its target than it has ever been on this leg.
+/** @param {State} state @param {Unit} unit @param {Object} order @param {number} dist @param {number} dt */
+function watchProgress(state, unit, order, dist, dt) {
+  // A new leg starts its own watch: the previous leg measured distance to a different
+  // thing entirely, so carrying its best across would read as an instant stall. The drop
+  // is part of the key, not just the phase — nearestGatherDrop re-picks every tick, and a
+  // collection-point freighter landing nearby legitimately moves the target mid-haul.
+  const key = `${order.phase}|${order.dropId || ""}`;
+  if (order.watchPhase !== key) {
+    order.watchPhase = key; order.watchBest = dist; order.stallFor = 0; order.stalled = false;
+    return;
+  }
+  if (dist < (order.watchBest ?? Infinity)) {
+    order.watchBest = dist; order.stallFor = 0;
+    return;
+  }
+  order.stallFor = (order.stallFor || 0) + dt;
+  if (order.stallFor >= STALL_AFTER && !order.stalled) {
+    order.stalled = true;
+    state.events.push({
+      type: "unitStalled", id: unit.id, unitType: unit.type, owner: unit.owner,
+      phase: order.phase, seconds: order.stallFor, x: unit.x, y: unit.y,
+      reason: order.phase === "toDrop" ? "cannot-reach-dropoff" : "cannot-reach-node",
+    });
+  }
+}
+
 /** @param {State} state @param {Unit} unit @param {number} dt */
 export function updateGather(state, unit, dt) {
   const def = UNITS[unit.type];
@@ -110,8 +225,15 @@ export function updateGather(state, unit, dt) {
   if (order.phase === "toNode") {
     const spot = orbitSpot(node, unit.id);
     const dist = Math.hypot(spot.x - unit.x, spot.y - unit.y);
-    if (dist <= ARRIVE_REACH) order.phase = "mining";
-    else stepToward(state, unit, spot.x, spot.y, def.speed, dt);
+    // Arrive on EITHER reaching the assigned spot or simply being at the rock. The
+    // second gate is what makes the transition impossible to deny: ARRIVE_REACH (4) is
+    // smaller than one tick of separation displacement, so a worker whose spot is
+    // contested can be held just outside it indefinitely — and the "mining" phase has no
+    // range check of its own anyway (a miner shoved off the seam keeps mining), so
+    // insisting on the exact spot bought nothing but the deadlock.
+    const atRock = Math.hypot(node.x - unit.x, node.y - unit.y) <= spot.radius + ARRIVE_REACH;
+    if (dist <= ARRIVE_REACH || atRock) order.phase = "mining";
+    else { watchProgress(state, unit, order, dist, dt); stepToward(state, unit, spot.x, spot.y, def.speed, dt); }
     return;
   }
 
@@ -142,6 +264,10 @@ export function updateGather(state, unit, dt) {
   if (order.phase === "toDrop") {
     const drop = nearestGatherDrop(state, unit.owner, unit.x, unit.y);
     if (!drop) { unit.order = null; return; }   // no Command Center → hold the load, idle
+    // Remember which drop this haul is headed for: sim.js's countDockers reads it next
+    // tick to hand out ring slots, and it is what an observer polls to tell a worker
+    // hauling home from one stuck on the road (engine/projection.js).
+    order.dropId = drop.id;
     const dist = Math.hypot(drop.x - unit.x, drop.y - unit.y);
     if (dist <= DROP_REACH) {
       const player = state.players[unit.owner];
@@ -175,14 +301,23 @@ export function updateGather(state, unit, dt) {
           if (unit.cargo.qty <= 1e-9) { unit.cargo.qty = 0; unit.cargo.com = null; }
         }
       } else {
-        const banked = unit.cargo.qty * mult;
+          const banked = unit.cargo.qty * mult;
         player.resources[unit.cargo.com] = (player.resources[unit.cargo.com] || 0) + banked;
         unit.cargo.qty = 0;
       }
       if (node.amount > 0) order.phase = "toNode";
       else nextNodeAfterDepletion(state, unit, node);   // this deposit drained the last of it — roll to the next seam or idle
     } else {
-      stepToward(state, unit, drop.x, drop.y, def.speed, dt);
+      watchProgress(state, unit, order, dist, dt);
+      // Walk to a slot on the drop's ring, never to its exact centre. Every hauler
+      // seeking one identical point was the drop-off half of the same jam: separation
+      // pushes are applied per overlapping PAIR and so add up without bound, while a
+      // worker's approach is capped at its own speed — which is exactly PUSH_SPEED — so
+      // a dense enough pile shoves its outer members back past DROP_REACH faster than
+      // they can walk in, and a cargo-full worker that never banks never returns to the
+      // seam either. Spots sit inside DROP_REACH, so reaching one always banks.
+      const spot = dockSpot(drop, unit.id);
+      stepToward(state, unit, spot.x, spot.y, def.speed, dt);
     }
   }
 }

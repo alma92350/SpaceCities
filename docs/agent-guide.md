@@ -162,7 +162,7 @@ reveals: its own units/buildings unconditionally, an opponent's only if currentl
 | Tool | Returns |
 |---|---|
 | `get_situation` | `tick`, `time`, `over`, `winner`, this seat's `resources`, `supply`/`supply_cap`, its own `units_by_type`/`buildings_by_type` counts, `idle_unit_ids`, an `economy` block (below), who you are (`you`) and who you're playing (`opponents`), plus the map's `width`/`height`/`tickRate`. |
-| `list_entities` | Every visible entity as `{id, type, owner, x, y, hp}`; your OWN entities also carry `activity` (`idle`/`gathering`/`moving`/`attacking`/`building`/`producing`/`under-construction`), `orderTarget`, a producer's `queue` and a site's `buildProgress`. Optional `owner`/`type`/`activity` arguments narrow a large list — `activity: "idle"` is how you find units that have stopped working. `since_tick` returns only what CHANGED since a tick you already read, plus `removed_ids`. Also reports `enemy_currently_visible` and `enemy_last_seen` (below). |
+| `list_entities` | Every visible entity as `{id, type, owner, x, y, hp}`; your OWN entities also carry `activity` (`idle`/`gathering`/`moving`/`attacking`/`building`/`producing`/`under-construction`), `orderTarget`, a gatherer's `cargo` and `gather_phase` (`toNode`/`mining`/`toDrop`), a producer's `queue` and a site's `buildProgress`. Optional `owner`/`type`/`activity` arguments narrow a large list — `activity: "idle"` is how you find units that have stopped working. `since_tick` returns only what CHANGED since a tick you already read, plus `removed_ids`. Also reports `enemy_currently_visible` and `enemy_last_seen` (below). |
 | `get_map_overview` | Every discovered resource node as `{id, com, amount, max, x, y, distance_from_base}`, **nearest first**, plus `commodities_available`, every visible base's `{owner, x, y}`, and the map bounds. `com` is the commodity the node actually yields — you never have to scout a node to learn what it is. |
 | `get_tech_options` | Every unit/building type with `cost`, full `stats` (hp, attack, range, cooldown, speed, sight, buildTime, supplyCost, bonusVs…), `produced_by`/`buildable`, `prereqs_met` **and `missing_prereqs`** (which requirement is missing, by name), and `affordable` for THIS seat right now. |
 | `get_counters` | The real counter table — every `{attacker, target, bonus}` matchup, derived from the same `bonusVs` data the engine's combat math reads. Static; read it once. |
@@ -372,10 +372,14 @@ your seat — combat, a kill, a completed build, research finishing — or the t
 Events carry entity ids, not just coordinates, so you never have to reconstruct a fight by diffing
 two `list_entities` calls: `entityKilled` has the dead entity's `id` (plus `killerId`/`killerOwner`),
 `attackHit` has `sourceId`/`targetId`, `unitSpawned` has the new unit's `id` and `fromBuildingId`,
-and `buildingComplete` has the finished building's `id`. Two events exist specifically to stop an
+and `buildingComplete` has the finished building's `id`. Four events exist specifically to stop an
 economy rotting unnoticed: `nodeDepleted` (a node just ran dry), `unitIdle` (a gatherer stopped
-because there was nothing left to retarget to) and `workerRetargeted` (a gatherer re-tasked itself
-to another seam — check how far from home it has just been sent). A
+because there was nothing left to retarget to), `workerRetargeted` (a gatherer re-tasked itself
+to another seam — check how far from home it has just been sent) and `unitStalled` (a gatherer that
+still has an order and is still walking, but has made no progress toward its seam or its drop-off
+for ten seconds; carries `phase`, `reason` and `seconds`). Watch `unitStalled` in particular: a
+stalled worker is **not** idle, so it never reaches `idle_unit_ids` and its `activity` reads as an
+ordinary `gathering` — this event is the only thing that reports it. A
 timeout is a normal, successful result (`timed_out: true`, `events: []`), never an error: just
 call it again. Call this in your main loop instead of `get_situation`-polling in a tight loop.
 

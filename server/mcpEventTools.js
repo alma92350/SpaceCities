@@ -34,7 +34,7 @@ import { withSeat, rejection } from "./mcpSeatHandle.js";
 const ALERT_GROUPS = {
   combat: ["attackHit", "entityKilled"],
   construction: ["buildingComplete", "unitSpawned", "researchComplete"],
-  economy: ["nodeDepleted", "unitIdle", "workerRetargeted", "planExhausted", "productionBlocked", "rigDig", "recycled"],
+  economy: ["nodeDepleted", "unitIdle", "unitStalled", "workerRetargeted", "planExhausted", "productionBlocked", "rigDig", "recycled"],
   match: ["matchEnded", "eliminated", "wonderCharging", "rivalGateComplete", "deployBlocked", "neighbourHostile", "bombFused", "wreckMatured", "craterMatured"],
 };
 

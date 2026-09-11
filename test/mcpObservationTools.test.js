@@ -653,3 +653,41 @@ test("estimate_engagement refuses ids this seat cannot see rather than quietly w
   assert.equal(body.result.isError, true);
   assert.match(body.result.content[0].text, /not-visible/);
 });
+
+test("list_entities reports a gatherer's cargo and which leg of the haul it is on", async () => {
+  const { state } = fixture();
+  const worker = [...state.units.values()].find(u => u.owner === "player" && u.type === "worker");
+  const node = state.map.nodes.find(n => n.com === "ore");
+  worker.order = { type: "gather", nodeId: node.id, phase: "toDrop" };
+  worker.cargo = { com: "ore", qty: 10 };
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "list_entities", { seat_handle });
+  const mine = body.result.structuredContent.entities.find(e => e.id === worker.id);
+  // "gathering" alone cannot tell a worker mining from one wedged halfway home with a
+  // full hold — these two fields are what make the difference readable.
+  assert.equal(mine.activity, "gathering");
+  assert.equal(mine.gather_phase, "toDrop");
+  assert.deepEqual(mine.cargo, { com: "ore", qty: 10 });
+});
+
+test("an enemy gatherer's cargo and haul leg stay hidden — fog does not reveal intent", async () => {
+  const { state } = fixture();
+  const seen = makeUnit("worker", "ai", state.map.bases.player.x + 20, state.map.bases.player.y + 20);
+  seen.order = { type: "gather", nodeId: state.map.nodes[0].id, phase: "toDrop" };
+  seen.cargo = { com: "ore", qty: 10 };
+  state.units.set(seen.id, seen);
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "list_entities", { seat_handle });
+  const theirs = body.result.structuredContent.entities.find(e => e.id === seen.id);
+  assert.ok(theirs, "the unit itself is visible — it is standing in the player's base");
+  assert.equal(theirs.cargo, undefined);
+  assert.equal(theirs.gather_phase, undefined);
+});

@@ -61,6 +61,11 @@
  * @property {boolean} [explore]  scout: this leg is heading for genuinely unexplored ground (vs. a patrol circuit leg)
  * @property {boolean} [patrol]   patrol: requeue-me flag (engine/commands.js issuePatrol), read off orderQueue by engine/sim.js
  * @property {number} [patrolLeg] scout: index into scout.js's PATROL circuit, once nothing is left to discover. Deliberately NOT named `patrol` — see that field
+ * @property {string} [dropId]    gather/toDrop: the drop-off this haul is headed for, stamped by engine/gather.js so sim.js countDockers can hand out docking spots around it
+ * @property {string} [watchPhase] gather: which leg (phase + drop target) the progress watchdog is currently timing (engine/gather.js watchProgress)
+ * @property {number} [watchBest]  gather: the closest this unit has come to its target on this leg
+ * @property {number} [stallFor]   gather: seconds spent walking without beating watchBest
+ * @property {boolean} [stalled]   gather: this leg's one-shot "reported as stalled" latch, so unitStalled fires once per leg rather than every tick
  */
 
 /**
@@ -153,6 +158,9 @@
  * @property {string} [laneId]  the Freight Lane this ship is assigned to (engine/galaxy.js assignShipToLane) — a standing investment, so stagedRiders excludes it from jumps
  * @property {number} [packId]  which bandit pack a Bounty-scenario pirate belongs to (engine/scenarios.js setupBounty) — packs are cleared as whole units, so updateBounty groups survivors by this to decide which camps are still standing; absent on every non-scenario unit
  * @property {number} [kills]  confirmed kills this unit has landed (engine/combat.js performAttack's target-died branch, unit-kind attackers only) — feeds entities.js rankMults for the veterancy damage-dealt/damage-taken multipliers and renderUnits.js's chevron overlay; absent reads as 0 (fresh off the line)
+ * @property {string[]|null} [dockerIds]  ids of the haulers currently inbound to bank here, sorted —
+ *   rebuilt each tick by engine/sim.js countDockers; engine/gather.js reads a hauler's index in it
+ *   to spread the crowd around the drop instead of onto its exact centre (see dockSpot).
  */
 
 /**
@@ -201,6 +209,9 @@
  * @property {number} [menderClaims]  transient: auto-repair Menders committed to this building this tick (engine/sim.js)
  * @property {number} [repairers]     transient: workers already assigned to REPAIR this building this tick (engine/repair.js countRepairJobs) — stripped on serialize
  * @property {{progress:number, time:number}} [recycling]  an in-progress player Recycle (engine/commands.js issueRecycle) — persisted; progress 0..1, removes the building and refunds part of its cost at 1 (engine/recycle.js updateBuildingRecycle); the building stays fully functional until then
+ * @property {string[]|null} [dockerIds]  ids of the haulers currently inbound to bank here, sorted —
+ *   rebuilt each tick by engine/sim.js countDockers; engine/gather.js reads a hauler's index in it
+ *   to spread the crowd around the drop instead of onto its exact centre (see dockSpot).
  */
 
 /**
@@ -214,6 +225,10 @@
  * @property {number} y
  * @property {boolean} [hidden]   a cache, invisible until scouted
  * @property {number} [miners]    workers currently assigned (engine/gather.js saturation)
+ * @property {string[]|null} [minerIds]  ids of those workers, sorted — rebuilt from scratch each
+ *   tick by engine/sim.js countMiners. gather.js reads a worker's INDEX in this list to hand out
+ *   evenly spaced spots on the node's ring, so a crew never draws spots close enough together to
+ *   shove each other off them forever (see orbitSpot).
  * @property {boolean} [depletedAnnounced]  this node's own one-shot "it ran dry" latch — set when
  *   engine/gather.js pushes its nodeDepleted event, so several miners landing the finishing tick
  *   together announce it once between them rather than once each. Transient, never persisted (a

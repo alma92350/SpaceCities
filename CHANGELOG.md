@@ -6,6 +6,50 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **Gatherers no longer wedge themselves at a seam or at the drop-off.** Both convergence points
+  in the gather loop could deadlock a worker permanently, and both presented identically: every
+  observable said "moving", nothing went idle, no event fired, and income fell to zero while the
+  worker count looked healthy.
+  - **At the node**, docking angles were hashed per unit id — and `hashStr` is `h * 31 + charCode`,
+    so the sequentially-numbered ids a production queue actually emits hashed to sequential angles.
+    A freshly trained crew drew 331°, 341°, 342°, 343°…, putting two workers 0.8px apart on a
+    radius-16 ring, far inside separation's 14.4px resting distance. They shoved each other forever
+    and neither ever closed to the 4px arrival tolerance of its own spot, so neither ever started
+    mining. Spots are now **assigned, evenly spaced slots** on the crew's ring (sized by chord, not
+    arc, and grown when the crew outnumbers the places the ring can hold), and arrival is granted
+    for simply being at the rock as well as for reaching the assigned spot — a tolerance smaller
+    than one tick of separation displacement could otherwise be denied indefinitely.
+  - **At the drop-off**, every hauler walked at the Command Center's exact centre. Separation
+    pushes are applied per overlapping *pair* and so add up without bound, while a worker's
+    approach is capped at its own speed — which is exactly `PUSH_SPEED` — so a dense enough pile
+    shoved its outer members back past `DROP_REACH` faster than they could walk in, and a
+    cargo-full worker that never banked never returned to the seam either. Haulers now park on a
+    ring of assigned slots inside the deposit gate. `DROP_REACH` itself is deliberately unchanged:
+    widening it would shorten every haul in the game and move the economy's balance point.
+  - **A drained seam no longer funnels its whole crew onto one survivor.** `countMiners` freezes
+    per-node counts once per tick, so a crew whose node ran dry together every one of them read
+    the same stale counts and picked the same "nearest under-cap" seam in lockstep. A retargeting
+    worker now claims its seat immediately, so the next one through sees it taken.
+  - Measured over 150s: no wedged workers at any crew size, and total hauls up 15-27% across 4-32
+    workers (the worst case — 8 workers across 3 seams — went from one worker banking *nothing* and
+    143 hauls total, to 27 and 220). `test/gatherCongestion.test.js`.
+- A saturated node's crowding ring is drawn at the seam's **sim footprint** rather than on its
+  shrinking silhouette. The drawn rock deliberately shrinks as it drains, but the footprint never
+  does — so the cue used to sit somewhere no worker actually stands.
+
+### Added
+
+- **A stalled gatherer is now observable.** `unitStalled` fires once per leg when a worker with a
+  gather order has made no progress toward its seam or its drop-off for ten seconds, carrying
+  `phase`, `reason` and `seconds`, and joins the `economy` alert group in `wait_for_event`'s
+  summary. It is the twin of `unitIdle`: a *stalled* worker is not idle, so it never appears in
+  `idle_unit_ids` and its `activity` reads as an ordinary `gathering` — this event is the only
+  thing that reports it. `list_entities` also now carries a gatherer's `cargo` and `gather_phase`
+  (`toNode`/`mining`/`toDrop`) on your own units, so "gathering / toDrop / cargo 10" that never
+  changes is a diagnosis rather than a guess.
+
 ### Added
 
 - **Nine MCP capabilities drawn from two recorded agent matches on the same map — one lost, one

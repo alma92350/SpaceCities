@@ -81,6 +81,7 @@ a feeling that it's time:
 | Every `take_turn` | Read `summary.under_attack`; if **workers** are the target, recall now | The worker line dies in seconds and never recovers on 0.6x |
 | Every `take_turn` | Read `economy.income_per_min` and `economy.workers_at_risk` | A stalled economy and a worker line wandering into the open both look like "150 ore" otherwise |
 | On `workerRetargeted` | Check where that worker just sent itself; pull it back if it left home | A depleted seam re-tasks workers across the map, one at a time, until a single raider eats your economy |
+| On `unitStalled` | Re-issue that worker's `gather` order | A stalled hauler never shows as idle and never banks; its cargo and its seam are both simply out of the economy |
 | The moment you pick a unit to mass | `set_production_plan` for it | Production that only continues while you are awake is production that stops |
 | Before **any** commit | `estimate_engagement` | "Losing count" is a number, not a feeling |
 | After **any** lost engagement | `get_counters` before requeuing the same unit | Numbers never fix a counter deficit |
@@ -214,6 +215,22 @@ workers auto-retarget the **nearest** node — which after a battle is often a j
 wreck**, so income silently stalls. Re-issue `gather` explicitly at a real, rich node whenever
 `nodeDepleted` fires; prefer the large far nodes (1170 ore) over small home ones (525) once home is
 dry.
+
+**Three workers per node, not more.** `UNITS.worker.minerSoftCap` is **3**: the first three miners
+on a seam work at full rate, the fourth and beyond pull only **0.4** of a share each. Two or three
+on one rock is correct and is not something to "fix" — spreading a crew of three across three seams
+buys nothing but walking time. Past the cap the node draws a saturation ring and posts a live
+`miners/3` count.
+
+**A stalled gatherer is not an idle one, and only one signal reports it.** A worker wedged on the
+way to a seam or to a drop-off still has an order and is still walking, so it never appears in
+`idle_unit_ids` and its `activity` reads as a perfectly ordinary `gathering`. `wait_for_event`'s
+**`unitStalled`** (`phase`, `reason`, `seconds`) is the only thing that names it — fired once per
+leg after ten seconds of no progress toward the target. Treat it like `nodeDepleted`: re-issue the
+worker's order rather than assuming it will sort itself out. `list_entities` also carries a
+gatherer's **`cargo`** and **`gather_phase`** (`toNode` / `mining` / `toDrop`) on your own units, so
+"gathering / toDrop / cargo 10" unchanged across two polls is a diagnosis, not a worker doing its
+job.
 
 **Wrecks are a real late-game economy.** Destroyed *buildings* leave big wrecks — one was **1016
 ore**. Late in a match with every real node at 0, salvaging a single building wreck took ore from 65

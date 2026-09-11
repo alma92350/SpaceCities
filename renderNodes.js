@@ -10,6 +10,7 @@
 
 import { COM } from "./data.js";
 import { isNodeDiscovered } from "./engine/fog.js";
+import { NODE_RADIUS } from "./engine/map.js";
 import { UNITS } from "./engine/entities.js";
 import { hashStr, seededRng, pathPoints, inView, centeredText } from "./renderShared.js";
 
@@ -45,14 +46,21 @@ export function drawNodes(ctx, state, view, observerMode = false) {
     // it and post the live "miners/cap" count, so "spread out, then expand" reads at a glance
     // without opening the panel.
     if ((n.miners || 0) > UNITS.worker.minerSoftCap) {
+      // Ringed at the seam's SIM footprint (NODE_RADIUS), not at the shrinking silhouette
+      // above. The drawn rock deliberately shrinks as it drains — that's the "how much is
+      // left" cue — but the deposit's footprint never does: colliders.js keeps buildings
+      // clear of NODE_RADIUS and gather.js parks the crew on a ring out at ORBIT_RADIUS
+      // whatever the amount. Drawing the crowding cue on the shrinking silhouette put it
+      // somewhere no worker actually stands, so a nearly-dry, six-deep seam showed a tight
+      // little ring with the crew visibly outside it.
       ctx.beginPath();
-      ctx.arc(n.x, n.y, r + 6, 0, Math.PI * 2);
+      ctx.arc(n.x, n.y, NODE_RADIUS + 6, 0, Math.PI * 2);
       ctx.strokeStyle = SATURATION_COLOR;
       ctx.lineWidth = 2;
       ctx.stroke();
       ctx.font = "9px sans-serif";
       ctx.fillStyle = SATURATION_COLOR;
-      ctx.fillText(`${n.miners}/${UNITS.worker.minerSoftCap}`, n.x, n.y - r - 9);
+      ctx.fillText(`${n.miners}/${UNITS.worker.minerSoftCap}`, n.x, n.y - NODE_RADIUS - 9);
     ctx.textAlign = "left";   // restore the canvas default, like textBaseline elsewhere
     }
   }

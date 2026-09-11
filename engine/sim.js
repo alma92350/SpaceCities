@@ -47,6 +47,9 @@ export function tick(state, dt) {
   // Frozen before any worker mines so every miner on a node sees the same count
   // regardless of Map iteration order (determinism).
   countMiners(state);
+  // Per-drop hauler lists for this tick, frozen alongside the miner counts above and for
+  // the same reason: every worker banking at one drop must see the same crew list.
+  countDockers(state);
   // Per-building hauler/supplier counts for this tick, frozen before any idle worker is
   // assigned a logistics job below — so the "≤2 per building" caps read the same regardless
   // of Map iteration order (determinism). A no-op in skirmish: nothing there has a buffer.
@@ -146,14 +149,37 @@ export function collectAnvils(state) {
 // rock, so the "~3 workers per node" rule reads by intent rather than by who
 // happens to be mid-haul. Recomputed from scratch each tick — never accumulates.
 function countMiners(state) {
-  for (const n of state.map.nodes) n.miners = 0;
+  for (const n of state.map.nodes) { n.miners = 0; n.minerIds = null; }
   for (const u of state.units.values()) {
     const o = u.order;
     if (o && o.type === "gather") {
       const n = state.map.nodesById ? state.map.nodesById.get(o.nodeId) : null;
-      if (n) n.miners++;
+      if (n) { n.miners++; (n.minerIds || (n.minerIds = [])).push(u.id); }
     }
   }
+  // Sorted so a node's crew list — and with it every worker's ring slot in
+  // gather.js — reads the same regardless of state.units' Map order. Plain string
+  // order: it only has to be STABLE, not meaningful.
+  for (const n of state.map.nodes) if (n.minerIds) n.minerIds.sort();
+}
+
+// Tally which haulers are inbound to each drop-off this tick, the drop-side twin of
+// countMiners above: gather.js hands out evenly spaced docking spots around a drop from
+// this list, so a crowd banking at one Command Center rings it instead of converging on
+// its exact centre. Reads order.dropId, which gather.js's own toDrop branch stamps when
+// it picks the nearest drop — so a worker's first tick in toDrop has no slot yet and
+// takes crewSlot's lone-worker fallback, which is correct: it isn't there yet.
+function countDockers(state) {
+  for (const b of state.buildings.values()) b.dockerIds = null;
+  for (const u of state.units.values()) { if (u.dockerIds) u.dockerIds = null; }
+  for (const u of state.units.values()) {
+    const o = u.order;
+    if (!o || o.type !== "gather" || o.phase !== "toDrop" || !o.dropId) continue;
+    const drop = state.buildings.get(o.dropId) || state.units.get(o.dropId);
+    if (drop) (drop.dockerIds || (drop.dockerIds = [])).push(u.id);
+  }
+  for (const b of state.buildings.values()) if (b.dockerIds) b.dockerIds.sort();
+  for (const u of state.units.values()) if (u.dockerIds) u.dockerIds.sort();
 }
 
 function updateUnit(state, unit, dt) {
