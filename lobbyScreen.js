@@ -236,7 +236,26 @@ const LOBBY_POLL_MS = 2500;
 let lobbyPollTimer = null;
 let hostPollTimer = null;
 
-function stopLobbyPolling() {
+/**
+ * Starts one of this screen's polls. `unref` exists only under Node (it is not a browser API, hence
+ * the optional call), and matters only there: an interval left running holds the process open and
+ * goes on firing into whatever global fetch is installed at the time, which under `node --test`
+ * means one test's stray poll landing in the NEXT test's request recorder. That made the suite
+ * sensitive to how long it happened to take — green on a fast machine, arbitrary elsewhere.
+ * stopLobbyPolling below is still the real answer; this only bounds the damage if it is missed.
+ */
+function startPoll(fn) {
+  const timer = setInterval(fn, LOBBY_POLL_MS);
+  timer.unref?.();
+  return timer;
+}
+
+/**
+ * Stops every poll this screen owns. Exported because leaving the lobby is not always something
+ * this file sees: a test tears the screen down between cases, and a future caller may navigate away
+ * by a route that does not pass through Back/joinLive/spectateLive.
+ */
+export function stopLobbyPolling() {
   if (lobbyPollTimer) clearInterval(lobbyPollTimer);
   if (hostPollTimer) clearInterval(hostPollTimer);
   lobbyPollTimer = null;
@@ -500,7 +519,7 @@ function renderHostCard(container) {
 function watchHostedMatch(matchId, status, hostBtn) {
   if (hostPollTimer) clearInterval(hostPollTimer);
   const seated = hostBtn.textContent !== "👁 Watch";
-  hostPollTimer = setInterval(async () => {
+  hostPollTimer = startPoll(async () => {
     const res = await apiGet(`/api/matches/${encodeURIComponent(matchId)}`);
     if (!res.ok) { clearInterval(hostPollTimer); hostPollTimer = null; return; }
     const m = res.json;
@@ -519,7 +538,7 @@ function watchHostedMatch(matchId, status, hostBtn) {
       ? "Your opponent has joined — the match is live."
       : `The match is live${m.seats ? ` (${seatSummary(m)})` : ""} — you can watch it now.`;
     if (seated) hostBtn.textContent = "▶ Enter match";
-  }, LOBBY_POLL_MS);
+  });
 }
 
 async function joinMatchById(matchId, statusBtn) {
@@ -598,7 +617,7 @@ function renderOpenMatchesCard(container) {
   // can create, fill and start one between two renders, and a one-shot fetch at render time left
   // the browser showing a lobby that had been stale since the moment it loaded. Cleared when the
   // screen is hidden (see hideLobbyScreen) so a backgrounded tab is not polling forever.
-  lobbyPollTimer = setInterval(refresh, LOBBY_POLL_MS);
+  lobbyPollTimer = startPoll(refresh);
 }
 
 // One row of the match list: the world it is on, who is in it, and the single action it offers.

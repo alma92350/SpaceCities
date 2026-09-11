@@ -33,6 +33,11 @@ All notable changes to this project are documented here. The format follows
     dropdown finally requests the `agent` seat kind rather than flattening it to `open` — so that
     intent survives into the lobby listing, a watcher's view and the end-of-match report, instead of
     every waiting seat looking alike.
+  - The lobby's polls are torn down on leaving the screen (and `unref`'d under Node), and
+    `stopLobbyPolling` is exported so a caller that navigates away by some other route can stop
+    them too. A leaked interval went on firing into whatever global `fetch` was installed at the
+    time, which under `node --test` meant one test's stray poll landing in the next test's request
+    recorder — a suite whose result depended on how fast the machine happened to be.
 - **An MCP client that lost its context mid-match could not get back into the game, and could never
   learn how the match ended.** Observed in a real session: the agent compacted at ~10 minutes, and
   from then on its base stood frozen while the opponent played on, the match was nowhere to be found,

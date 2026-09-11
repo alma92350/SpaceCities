@@ -84,7 +84,11 @@ test("REAL end to end: the reference agent joins an open match over real HTTP, w
     // built to handle.
     const agentPromise = runReferenceAgent({
       baseUrl, matchId: created.matchId, maxRounds: 2, waitTimeoutMs: 200,
-      startupTimeoutMs: 5000, startupRetryMs: 100, log: l => lines.push(l),
+      // 30s, not 5: `npm test` runs every file concurrently, so this agent is racing a machine
+      // that is simultaneously spawning workers for several other suites. 5s was enough on an idle
+      // run and observably not enough on a busy one, which made this the suite's flakiest test
+      // rather than a real signal about the startup gap it exists to prove.
+      startupTimeoutMs: 30000, startupRetryMs: 100, log: l => lines.push(l),
     });
 
     await fetch(`${baseUrl}/api/matches/${created.matchId}/start`, {

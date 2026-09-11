@@ -33,7 +33,13 @@ globalThis.location = { protocol: "http:", host: "localhost:8080", href: "http:/
 // than assigned; only the "Copy link" button reads it.
 Object.defineProperty(globalThis, "navigator", { value: { clipboard: { writeText: async () => {} } }, configurable: true });
 
-const { renderLobbyScreen } = await import("../lobbyScreen.js");
+const { renderLobbyScreen, stopLobbyPolling } = await import("../lobbyScreen.js");
+
+// The lobby POLLS the server now, so a test that renders it leaves a live interval behind. Left
+// running, that interval fires into whatever fake fetch the NEXT test installed — a stray request
+// in another test's recorder, landing or not depending purely on how long the suite happened to
+// take. Torn down after every case so this file's results never depend on machine speed.
+test.afterEach(() => stopLobbyPolling());
 const { MAP_CHOICES, SIZE_OPTIONS, RESOURCE_OPTIONS, MATCH_LENGTH_OPTIONS } = await import("../setup.js");
 const { PLANETS } = await import("../data.js");
 
@@ -174,6 +180,10 @@ test("a match the server refuses to create says why, and lets the host try again
 // The lobby now asks for started matches too, so the route key carries the query string. Kept as a
 // named constant because every test below answers this exact request.
 const LIST = "GET /api/matches?include_started=1";
+// lobbyScreen.js's own LOBBY_POLL_MS. Not imported (it is deliberately private), so the one test
+// that has to outwait a poll states it here; if the two ever diverge that test simply waits longer
+// than it needs to, never less.
+const POLL_MS = 2500;
 
 test("the open-matches list offers only matches with a free seat, named by world", async () => {
   fakeNet({
@@ -242,6 +252,26 @@ test("a seat taken between listing and clicking says 'Seat taken', not nothing",
   await click(joinBtn);
   assert.equal(joinBtn.textContent, "Seat taken");
   assert.equal(joinBtn.disabled, false, "…and the row stays usable rather than stuck on 'Joining…'");
+});
+
+test("the lobby POLLS for matches, and stops the moment the screen is left", async () => {
+  // Polling is what makes a match an MCP client created show up without a reload — and a poll that
+  // outlives its screen is what makes a test suite depend on how fast the machine is, by firing a
+  // stray request into the NEXT test's recorder. Both halves are pinned here.
+  const calls = fakeNet({ [LIST]: { json: { matches: [] } } });
+  renderLobbyScreen();
+  await settle();
+  const afterRender = calls.filter(c => c.path === "/api/matches?include_started=1").length;
+  assert.equal(afterRender, 1, "one fetch on render");
+
+  await new Promise(r => setTimeout(r, POLL_MS + 400));
+  assert.ok(calls.filter(c => c.path === "/api/matches?include_started=1").length > afterRender,
+    "the list must re-read the server on its own — a one-shot fetch is stale the moment it lands");
+
+  stopLobbyPolling();
+  const settled = calls.length;
+  await new Promise(r => setTimeout(r, POLL_MS + 400));
+  assert.equal(calls.length, settled, "a stopped screen must make no further requests at all");
 });
 
 test("a shared link renders the join card alone — no host form to configure first", () => {

@@ -625,7 +625,10 @@ test("createAppServer().close() stops every live match's worker and ws attachmen
 // the gap docs/mcp-player-handbook.md tells a real agent to tolerate. Poll through it rather than
 // racing it.
 async function untilLive(port, seat_handle) {
-  for (let i = 0; i < 100; i++) {
+  // Generous on purpose: spawning a worker_threads Worker costs noticeably more on a loaded or
+  // Windows machine than on CI here, and this budget only decides how long a FAILING case takes to
+  // report — a passing one leaves on the first good answer, typically within a tick or two.
+  for (let i = 0; i < 400; i++) {
     const result = await mcpResult(port, "get_situation", { seat_handle });
     if (!result.isError) return result;
     await new Promise(r => setTimeout(r, 25));
@@ -667,18 +670,23 @@ test("create_match over MCP can put the game's own AI on SEAT 0 — and that sea
     const watch = await mcpResult(port, "watch_match", { match_id: created.structuredContent.match_id });
     const watch_handle = watch.structuredContent.watch_handle;
 
+    // Wait for the thing actually being asserted — a seat-0 unit that has been given an order —
+    // not merely for seat 0 to HAVE units, which is true from tick 0 and so exited this loop
+    // immediately, leaving the assertion below racing the AI's first think tick on a slow machine.
     let seat0 = null;
-    for (let i = 0; i < 60 && !seat0?.units_by_type?.worker; i++) {
+    let entities = [];
+    const acting = list => list.some(e => e.activity && e.activity !== "idle");
+    for (let i = 0; i < 60 && !acting(entities); i++) {
       await mcpResult(port, "wait_for_event", { seat_handle: watch_handle, timeout_ms: 200 });
       const situation = await mcpResult(port, "get_situation", { seat_handle: watch_handle });
       seat0 = situation.structuredContent.sides?.find(s => s.owner === "player") ?? null;
+      entities = (await mcpResult(port, "list_entities", { seat_handle: watch_handle, owner: "player" })).structuredContent.entities;
     }
     assert.ok(seat0, "a watcher sees a per-side scoreboard for every owner");
     assert.ok(seat0.units_by_type.worker > 0, "seat 0 has its own units");
     // The real claim: seat 0 is being PLAYED, not just seeded. Its starting workers idle forever
     // unless a controller sends them somewhere.
-    const entities = (await mcpResult(port, "list_entities", { seat_handle: watch_handle, owner: "player" })).structuredContent.entities;
-    assert.ok(entities.some(e => e.activity && e.activity !== "idle"),
+    assert.ok(acting(entities),
       `seat 0's own units should be doing something under AI control, got ${JSON.stringify(entities.map(e => e.activity))}`);
   } finally {
     app.close();
