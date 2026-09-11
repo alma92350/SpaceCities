@@ -273,6 +273,11 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // T-054: server/mcpEventTools.js — same class again, only ever reached from tools/serve.js's
     // own mcpServer wiring.
     "server/mcpEventTools.js",
+    // server/seatPresence.js — same class again: reached only from tools/serve.js's own
+    // createAppServer wiring, never from any browser-side import chain (a browser client's own
+    // seat presence IS its open socket, which is precisely why this module exists for the MCP
+    // path and has nothing to offer the browser one).
+    "server/seatPresence.js",
     // server/mcpBatchTools.js — same class again, only ever reached from tools/serve.js's own
     // mcpServer wiring (it is a tool over the OTHER tools, so it is if anything further from the
     // browser than the rest of this list).

@@ -63,7 +63,14 @@ const COMMAND_SCHEMA = {
  *   engine/aiCommon.js's own apm==null already uses — so every caller/test built before T-056
  *   keeps working unchanged.
  */
-export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
+/**
+ * @param {(matchId:string, owner:string, wantAi:boolean) => void} [onSeatControllerSet] told about
+ *   every EXPLICIT handover, so server/seatPresence.js's own idle cover can tell "the agent asked
+ *   for this" apart from "we did it because the seat went quiet" — the two must not undo each
+ *   other (see that file's own header). Defaults to a no-op for every caller that has no presence
+ *   tracking at all.
+ */
+export function createActionTools(lobby, getBridge, getApmGuard = () => null, onSeatControllerSet = () => {}) {
   return [
     {
       name: "issue_command",
@@ -173,6 +180,9 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
         if (!bridge) return rejection("match-not-live: this match hasn't started yet");
         if (!bridge.setSeatAi) return rejection("handover-unsupported: this match's server cannot swap a seat's controller");
         const wantAi = controller === "ai";
+        // Recorded BEFORE the swap, so an idle sweep landing between these two lines can never
+        // see a seat as un-owned-by-the-agent and re-cover what the agent just took back.
+        onSeatControllerSet(seat.matchId, seat.owner, wantAi);
         const { ai } = await bridge.setSeatAi(seat.owner, wantAi, {
           ...(ai_strategy ? { strategy: ai_strategy } : {}),
           ...(difficulty ? { difficulty } : {}),

@@ -6,6 +6,43 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **An MCP client that lost its context mid-match could not get back into the game, and could never
+  learn how the match ended.** Observed in a real session: the agent compacted at ~10 minutes, and
+  from then on its base stood frozen while the opponent played on, the match was nowhere to be found,
+  and the outcome was unreachable. Four separate gaps, each fixed:
+  - **The seat froze.** T-036's disconnect → AI-takeover is driven by a WebSocket closing, so it can
+    never fire for an MCP seat — which has no connection to lose. `server/seatPresence.js` records
+    presence from the seat's own tool calls (via the one chokepoint they all pass through) and hands
+    a seat silent for 90s to the game's own AI, handing it back on that seat's very next call, with
+    no resume step. A handover the agent asked for itself with `set_seat_controller` is never undone
+    this way. `SEAT_IDLE_MS` tunes the window.
+  - **The match seemed to vanish.** `list_matches` only ever listed OPEN matches, so a match in
+    progress was invisible — indistinguishable from deleted. It now takes `include_started`, and
+    every taken seat reports `idle_seconds`, which is how an agent tells its own abandoned seat from
+    one someone is actively playing.
+  - **There was no way back into the seat.** The `client_id` rejoin added earlier only helps an agent
+    that passed a `client_id` BEFORE losing its handle, which a compacted agent did not. New
+    `reclaim_seat` takes over a seat silent past a staleness window (60s), minting a fresh token so
+    the stale handle is retired and a seat never has two live claimants; a seat still making calls is
+    refused with `seat-still-active` and its current idle time. Reachable by default, disabled with
+    `SEAT_RECLAIM=off` for a lobby strangers share.
+  - **The result was unreachable.** T-059's results store had an HTTP endpoint and no MCP tool at
+    all. New `get_match_report` returns winner, reason, duration, **who played each seat** (`winner`
+    is a seat id — `"ai"` does not mean "the computer won") and each side's final standing, and keeps
+    answering after the match's worker is gone and across a server restart. `find_my_seats` carries a
+    finished match's result too.
+  - **`wait_for_event` blocked forever on a decided match.** `engine/victory.js` sets `state.over`
+    and emits no event, because in-browser consumers read it off the frame they are already
+    rendering; an agent sitting in `wait_for_event` had no such frame. The MCP cache now synthesises a
+    terminal `matchEnded` event (no engine change), returns it immediately on a finished match, and
+    never filters it out however the caller narrowed `types`/`groups`.
+- **Seat handles are ~44 characters instead of ~180**, packing the two uuids as raw bytes rather than
+  base64'd JSON. Handle length is a correctness concern, not cosmetics: an agent's only copy lives in
+  its context, and a long opaque blob is exactly what a summarizer drops. Both encodings still
+  resolve, so existing handles keep working.
+
 ### Added
 
 - **An MCP client can now set up, leave, resume and watch a match — not just play one that already

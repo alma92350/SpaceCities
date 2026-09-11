@@ -111,8 +111,26 @@ export function attachProjectionCache(worker) {
     checkWaiters(msg.seat, msg.proj);
   });
 
+  // The terminal event the ENGINE never emits: engine/victory.js's finish() sets state.over/winner
+  // and pushes nothing, because every in-browser consumer already reads state.over off the frame
+  // it is rendering anyway. An MCP agent has no frame — it sits in wait_for_event — so without
+  // this a decided match is indistinguishable from a quiet one, and an agent waits out its full
+  // timeout again and again against a match that will never produce another event as long as it
+  // keeps asking. Synthesised here rather than in the engine so no rendering/consumer path
+  // changes: a projection already carries everything the event needs.
+  function endedEventFor(proj) {
+    return { type: "matchEnded", winner: proj.winner ?? null, winReason: proj.winReason ?? null, tick: proj.tick, time: proj.time };
+  }
+
   function waitForEvent(seat, timeoutMs) {
     const current = bySeat.get(seat) ?? null;
+    // A finished match resolves IMMEDIATELY, every time, rather than blocking: nothing further can
+    // ever happen in it, so the only honest answers are "it is over" now or "nothing yet" in eight
+    // seconds, forever. Returning it on every call (rather than once) keeps this idempotent for an
+    // agent that asks twice, and costs nothing — the agent reads `over` and stops.
+    if (current?.over) {
+      return Promise.resolve({ tick: current.tick, events: [endedEventFor(current)], timedOut: false });
+    }
     // Events that fired while no waiter was in flight are buffered (see UNDELIVERED_EVENTS_CAP).
     // Deliver ONLY the ones NOT still visible in the latest projection: an event the latest proj
     // still carries is baseline (e.g. a fog scroll re-sending an already-known event — the

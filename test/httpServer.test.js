@@ -740,3 +740,165 @@ test("an MCP client hands its live seat to the AI and takes it back, through the
     await new Promise(resolve => app.server.close(resolve));
   }
 });
+
+/* ============================================================
+   THE COMPACTION CASE, end to end through the real server. Observed in a real Sonnet session: the
+   agent compacted its context ~10 minutes in, lost its seat_handle, and from then on could not
+   find its match (a running match is hidden from the default listing), could not get back into its
+   seat (it had passed no client_id), and never learned the outcome (nothing over MCP reads the
+   results store). Its base meanwhile stood frozen, because an MCP seat has no socket whose close
+   could trigger the AI cover a browser client's seat already gets.
+   ============================================================ */
+
+test("an agent that lost EVERYTHING but the server address finds its match, takes its seat back, and reads the outcome", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    // Deliberately no client_id — this is an agent that did not know it would need one.
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0,
+    });
+    const match_id = created.structuredContent.match_id;
+    await untilLive(port, created.structuredContent.seat_handle);
+
+    // --- the compaction: every handle it held is gone ---
+
+    // 1. Finding the match again. The default listing is "what can I join", so a running match is
+    //    absent from it — which is exactly what "my match disappeared" looked like.
+    const joinable = await mcpResult(port, "list_matches", {});
+    assert.equal(joinable.structuredContent.matches.some(m => m.id === match_id), false);
+    const all = await mcpResult(port, "list_matches", { include_started: true });
+    const mine = all.structuredContent.matches.find(m => m.id === match_id);
+    assert.ok(mine, "include_started must surface the running match");
+    assert.equal(mine.status, "started");
+    assert.equal(typeof mine.seats[0].idle_seconds, "number", "which seat is silent is readable without any credential");
+
+    // 2. Taking the seat back. Refused while the seat is plainly active...
+    const tooSoon = await mcpResult(port, "reclaim_seat", { match_id, seat_index: 0 });
+    assert.equal(tooSoon.isError, true);
+    assert.match(tooSoon.content[0].text, /seat-still-active/);
+
+    // ...and granted once it has genuinely gone quiet. (Reaching into the lobby to age the seat is
+    // the one thing a test cannot do by waiting: the real window is 60s.)
+    app.lobby.touchSeat(match_id, 0, Date.now() - 120000);
+    const reclaimed = await mcpResult(port, "reclaim_seat", { match_id, seat_index: 0, client_id: "agent-alpha" });
+    assert.equal(reclaimed.isError, undefined, JSON.stringify(reclaimed));
+    const seat_handle = reclaimed.structuredContent.seat_handle;
+
+    // 3. The recovered handle really drives the seat — not merely a well-formed string.
+    const situation = await mcpResult(port, "get_situation", { seat_handle });
+    assert.equal(situation.structuredContent.you, "player");
+
+    // 4. And having passed a client_id this time, the NEXT recovery is a plain rejoin.
+    const rejoined = await mcpResult(port, "join_match", { match_id, client_id: "agent-alpha" });
+    assert.equal(rejoined.structuredContent.rejoined, true);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("a finished match reports its outcome over MCP — wait_for_event resolves at once and get_match_report explains it", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0, client_id: "agent-alpha",
+    });
+    const match_id = created.structuredContent.match_id;
+    const { seat_handle } = created.structuredContent;
+    await untilLive(port, seat_handle);
+
+    // Concede, to reach a real decided match quickly rather than playing one out.
+    await mcpResult(port, "surrender", { seat_handle });
+
+    // wait_for_event must RESOLVE, not block out its timeout: a decided match will never produce
+    // another event, so blocking on one is an agent hanging forever by design.
+    let waited = null;
+    for (let i = 0; i < 40; i++) {
+      waited = await mcpResult(port, "wait_for_event", { seat_handle, timeout_ms: 250 });
+      if (waited.structuredContent.summary?.match_over) break;
+    }
+    assert.ok(waited.structuredContent.summary?.match_over, `wait_for_event never reported the match ending: ${JSON.stringify(waited.structuredContent)}`);
+    assert.ok(waited.structuredContent.events.some(e => e.type === "matchEnded"));
+    assert.match(waited.content[0].text, /The match is over/);
+
+    // The report survives the match itself — who won, why, how long, and who was playing each seat.
+    const report = await mcpResult(port, "get_match_report", { match_id });
+    assert.equal(report.structuredContent.finished, true);
+    const result = report.structuredContent.result;
+    assert.equal(result.winner, "ai", JSON.stringify(result));
+    assert.ok(result.winReason, "a report must say WHY it ended, not just who won");
+    assert.deepEqual(result.seats.map(s => s.controller), ["agent", "ai"],
+      "who played each seat — 'ai won' is meaningless without it, since 'ai' is a seat id");
+    assert.equal(result.sides.find(s => s.owner === "ai").won, true);
+
+    // And an agent coming back with only its client_id learns the match is over in one call.
+    const found = await mcpResult(port, "find_my_seats", { client_id: "agent-alpha" });
+    assert.equal(found.structuredContent.seats[0].status, "finished");
+    assert.equal(found.structuredContent.seats[0].result.winner, "ai");
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("a seat that goes quiet is covered by the game's AI, and handed back on the agent's next call", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0, client_id: "agent-alpha",
+    });
+    const { seat_handle, match_id } = created.structuredContent;
+    await untilLive(port, seat_handle);
+
+    const controllerOf = owner => app.liveMatches.get(match_id).worker && app.lobby.getMatch(match_id) && owner;
+    assert.ok(controllerOf("player"));
+
+    // Nothing yet — the agent has just been playing.
+    await app.seatPresence.sweep();
+    assert.equal(app.seatPresence.isAutoCovered(match_id, "player"), false);
+
+    // Now it compacts: silent well past the idle window. (Aging the clock is the one thing a test
+    // cannot do by waiting — the real window is 90s.)
+    app.lobby.touchSeat(match_id, 0, Date.now() - 600000);
+    await app.seatPresence.sweep();
+    assert.equal(app.seatPresence.isAutoCovered(match_id, "player"), true,
+      "an MCP seat has no socket whose close could trigger cover — silence is the only signal there is");
+
+    // Coming back needs no special call: any ordinary tool call hands the seat straight back.
+    await mcpResult(port, "get_situation", { seat_handle });
+    assert.equal(app.seatPresence.isAutoCovered(match_id, "player"), false);
+
+    // ...and the seat is genuinely commandable again.
+    const cmd = await mcpResult(port, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
+    assert.notEqual(cmd.structuredContent?.code, "command-timeout");
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("an EXPLICIT set_seat_controller('ai') is not undone by the agent's own observation calls while away", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0, client_id: "agent-alpha",
+    });
+    const { seat_handle, match_id } = created.structuredContent;
+    await untilLive(port, seat_handle);
+
+    await mcpResult(port, "set_seat_controller", { seat_handle, controller: "ai" });
+    // Watching the match while deliberately away must not silently take the seat back.
+    await mcpResult(port, "get_situation", { seat_handle });
+    assert.equal(app.seatPresence.isAutoCovered(match_id, "player"), false);
+
+    const back = await mcpResult(port, "set_seat_controller", { seat_handle, controller: "self" });
+    assert.equal(back.structuredContent.ai_controlled, false);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});

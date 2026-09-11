@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createLobby } from "../server/lobby.js";
 import { createMcpServer, PROTOCOL_VERSION } from "../net/mcp.js";
-import { resolveSeatHandle } from "../server/mcpSeatHandle.js";
+import { resolveSeatHandle, mintSeatHandle } from "../server/mcpSeatHandle.js";
 import { createLobbyTools } from "../server/mcpLobbyTools.js";
 import { AGENT_APM } from "../net/agentApm.js";
 
@@ -15,8 +15,16 @@ import { AGENT_APM } from "../net/agentApm.js";
    directly.
    ============================================================ */
 
-function mcpFor(lobby, onSeatsFilled) {
-  return createMcpServer({ tools: createLobbyTools(lobby, onSeatsFilled) });
+function mcpFor(lobby, onSeatsFilled, opts) {
+  return createMcpServer({ tools: createLobbyTools(lobby, onSeatsFilled, opts) });
+}
+
+// A second lobby VIEW over the same match objects — for asserting a different tool policy against
+// state a previous assertion already moved, without rebuilding the fixture.
+function createLobbyWith(match) {
+  const lobby = createLobby();
+  lobby.matches.set(match.id, match);
+  return lobby;
 }
 
 async function callTool(mcp, name, args) {
@@ -34,7 +42,7 @@ async function callTool(mcp, name, args) {
 test("createLobbyTools registers the full lobby surface: create/list/join/leave/watch, plus seat recovery", () => {
   const tools = createLobbyTools(createLobby());
   assert.deepEqual(tools.map(t => t.name).sort(),
-    ["create_match", "find_my_seats", "join_match", "leave_match", "list_matches", "watch_match"]);
+    ["create_match", "find_my_seats", "get_match_report", "join_match", "leave_match", "list_matches", "reclaim_seat", "watch_match"]);
 });
 
 test("list_matches reports every open match's PUBLIC shape — never a seat's real token, never the raw seed", async () => {
@@ -48,7 +56,10 @@ test("list_matches reports every open match's PUBLIC shape — never a seat's re
   assert.equal(body.result.structuredContent.matches.length, 1);
   const listed = body.result.structuredContent.matches[0];
   assert.equal(listed.id, match.id);
-  assert.deepEqual(listed.seats, [
+  // idle_seconds is present only for a seat someone actually holds, and is elapsed time rather
+  // than a fixed value — checked separately from the shape it rides along with.
+  assert.equal(listed.seats[0].idle_seconds >= 0, true);
+  assert.deepEqual(listed.seats.map(({ idle_seconds, ...rest }) => rest), [
     { kind: "open", taken: true, controller: "human" },
     { kind: "open", taken: false, controller: "human" },
   ]);
@@ -358,4 +369,135 @@ test("leave_match refuses a watch handle — there is no seat behind it to give 
   const { body } = await callTool(mcp, "leave_match", { seat_handle: watch });
   assert.equal(body.result.isError, true);
   assert.match(body.result.content[0].text, /watch-only-handle/);
+});
+
+/* ============================================================
+   RECOVERY WITHOUT FORESIGHT, and the end-of-match report. The client_id rejoin above only helps an
+   agent that passed a client_id BEFORE it lost its handle — which an agent that has just been
+   compacted did not. These are the paths that work anyway: find the match again (it is running, so
+   the default listing hides it), take back a seat nobody is driving, and learn how it all ended.
+   ============================================================ */
+
+test("list_matches hides a running match by default and finds it with include_started — the 'my match vanished' case", async () => {
+  const lobby = createLobby();
+  const open = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const running = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  lobby.joinMatch(running.id, 0);
+  lobby.startMatch(running.id);
+  const mcp = mcpFor(lobby);
+
+  const byDefault = await callTool(mcp, "list_matches", {});
+  assert.deepEqual(byDefault.body.result.structuredContent.matches.map(m => m.id), [open.id],
+    "the default listing is 'what can I join', which a running match is not");
+
+  const all = await callTool(mcp, "list_matches", { include_started: true });
+  assert.deepEqual(all.body.result.structuredContent.matches.map(m => m.id).sort(), [open.id, running.id].sort());
+  const listed = all.body.result.structuredContent.matches.find(m => m.id === running.id);
+  assert.equal(listed.status, "started");
+  assert.equal(typeof listed.seats[0].idle_seconds, "number", "a held seat reports how long its holder has been silent");
+});
+
+test("reclaim_seat takes back a seat whose holder has gone silent, and refuses one still playing", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  lobby.joinMatch(match.id, 0);
+  lobby.startMatch(match.id);
+  const mcp = mcpFor(lobby, undefined, { seatReclaim: { enabled: true, staleMs: 60000 } });
+
+  // Still active: the seat was just joined, so its holder is by definition present.
+  const tooSoon = await callTool(mcp, "reclaim_seat", { match_id: match.id, seat_index: 0 });
+  assert.equal(tooSoon.body.result.isError, true);
+  assert.match(tooSoon.body.result.content[0].text, /seat-still-active/);
+
+  // Now silent for longer than the window — the compacted-agent case.
+  lobby.touchSeat(match.id, 0, Date.now() - 120000);
+  const taken = await callTool(mcp, "reclaim_seat", { match_id: match.id, seat_index: 0, client_id: "agent-alpha" });
+  assert.equal(taken.body.result.isError, undefined, JSON.stringify(taken.body.result));
+  const sc = taken.body.result.structuredContent;
+  assert.equal(sc.reclaimed, true);
+  assert.equal(sc.owner, "player");
+  assert.ok(sc.previous_holder_idle_seconds >= 60);
+  assert.equal(resolveSeatHandle(lobby, sc.seat_handle).ok, true, "the handed-back handle really drives that seat");
+});
+
+test("reclaiming ROTATES the token, so the abandoned holder's old handle stops working — never two clients on one seat", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const joined = lobby.joinMatch(match.id, 0);
+  lobby.startMatch(match.id);
+  const oldHandle = mintSeatHandle(match.id, 0, joined.token);
+  assert.equal(resolveSeatHandle(lobby, oldHandle).ok, true);
+
+  lobby.touchSeat(match.id, 0, Date.now() - 120000);
+  const mcp = mcpFor(lobby, undefined, { seatReclaim: { enabled: true, staleMs: 60000 } });
+  await callTool(mcp, "reclaim_seat", { match_id: match.id, seat_index: 0 });
+
+  assert.equal(resolveSeatHandle(lobby, oldHandle).ok, false, "the previous holder's handle is retired by the reclaim");
+});
+
+test("reclaim_seat picks the longest-silent seat when none is named, and can be switched off entirely", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  lobby.joinMatch(match.id, 0);
+  lobby.joinMatch(match.id, 1);
+  lobby.startMatch(match.id);
+  lobby.touchSeat(match.id, 0, Date.now() - 70000);
+  lobby.touchSeat(match.id, 1, Date.now() - 300000);
+
+  const open = mcpFor(lobby, undefined, { seatReclaim: { enabled: true, staleMs: 60000 } });
+  const picked = await callTool(open, "reclaim_seat", { match_id: match.id });
+  assert.equal(picked.body.result.structuredContent.seat_index, 1, "the seat silent longest is the one to take back");
+
+  const locked = mcpFor(createLobbyWith(match), undefined, { seatReclaim: { enabled: false } });
+  const refused = await callTool(locked, "reclaim_seat", { match_id: match.id });
+  assert.equal(refused.body.result.isError, true);
+  assert.match(refused.body.result.content[0].text, /seat-reclaim-disabled/);
+});
+
+test("get_match_report answers for a finished match — including one whose worker and live state are long gone", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["agent", "ai"] });
+  lobby.joinMatch(match.id, 0);
+  lobby.startMatch(match.id);
+  const result = {
+    matchId: match.id, owners: ["player", "ai"], winner: "ai", winReason: "commandCenterDestroyed",
+    tick: 12000, time: 600, endedAt: Date.now(),
+    sides: [{ owner: "player", units: 0, buildings: 0, won: false }, { owner: "ai", units: 14, buildings: 6, won: true }],
+  };
+  // No live match at all — exactly the state after a worker exits, or after a server restart.
+  const mcp = mcpFor(lobby, undefined, { getResult: id => (id === match.id ? result : null) });
+
+  const { body } = await callTool(mcp, "get_match_report", { match_id: match.id });
+  assert.equal(body.result.isError, undefined, JSON.stringify(body.result));
+  assert.equal(body.result.structuredContent.finished, true);
+  assert.deepEqual(body.result.structuredContent.result, result);
+  assert.match(body.result.content[0].text, /ai won \(commandCenterDestroyed\)/);
+  assert.match(body.result.content[0].text, /10m00s/);
+});
+
+test("get_match_report on a match still in progress says so, rather than erroring", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  lobby.startMatch(match.id);
+  const mcp = mcpFor(lobby);
+
+  const { body } = await callTool(mcp, "get_match_report", { match_id: match.id });
+  assert.equal(body.result.isError, undefined);
+  assert.deepEqual(
+    { finished: body.result.structuredContent.finished, status: body.result.structuredContent.status, result: body.result.structuredContent.result },
+    { finished: false, status: "started", result: null });
+});
+
+test("find_my_seats carries a finished match's own result, so recovering never needs a second call to learn it is over", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  lobby.joinMatch(match.id, 0, "agent-alpha");
+  lobby.startMatch(match.id);
+  const result = { matchId: match.id, winner: "ai", winReason: "commandCenterDestroyed", time: 300 };
+  const mcp = mcpFor(lobby, undefined, { getResult: id => (id === match.id ? result : null) });
+
+  const { body } = await callTool(mcp, "find_my_seats", { client_id: "agent-alpha" });
+  const seat = body.result.structuredContent.seats[0];
+  assert.equal(seat.status, "finished");
+  assert.deepEqual(seat.result, result);
 });

@@ -35,7 +35,7 @@ const ALERT_GROUPS = {
   combat: ["attackHit", "entityKilled"],
   construction: ["buildingComplete", "unitSpawned", "researchComplete"],
   economy: ["nodeDepleted", "unitIdle", "productionBlocked", "rigDig", "recycled"],
-  match: ["eliminated", "wonderCharging", "rivalGateComplete", "deployBlocked", "neighbourHostile", "bombFused", "wreckMatured", "craterMatured"],
+  match: ["matchEnded", "eliminated", "wonderCharging", "rivalGateComplete", "deployBlocked", "neighbourHostile", "bombFused", "wreckMatured", "craterMatured"],
 };
 
 const GROUP_OF = Object.fromEntries(
@@ -102,6 +102,9 @@ export function createEventTools(lobby, getCache) {
         `(combat/construction/economy/match), \`under_attack\` with WHICH of your entities are being ` +
         `hit and where, and what of yours just finished — so you can branch on "am I being attacked" ` +
         `without parsing raw events. Narrow what wakes you with \`types\` or \`groups\`. ` +
+        `When the match ENDS this returns immediately with a \`matchEnded\` event and ` +
+        `\`summary.match_over\` — it never blocks on a finished match, and never filters that event ` +
+        `out however you narrowed the rest. ` +
         `A timeout is reported as a normal result ` +
         `(timed_out:true, no events), never an error; just call it again. Optionally request a shorter ` +
         `timeout_ms for tighter polling — requests above ${MAX_TIMEOUT_MS}ms are capped.`,
@@ -140,13 +143,21 @@ export function createEventTools(lobby, getCache) {
           const round = await cache.waitForEvent(seat.owner, remaining);
           tick = round.tick ?? tick;
           if (round.timedOut) break;
-          const keep = wanted.size ? round.events.filter(ev => wanted.has(ev.type)) : round.events;
+          // matchEnded is never filtered out, whatever the caller asked to be woken for: a decided
+          // match produces nothing else ever again, so dropping it for not matching a `types`
+          // filter would leave the loop below waiting out its budget on a match that is finished —
+          // the exact hang this event exists to prevent.
+          const keep = wanted.size ? round.events.filter(ev => wanted.has(ev.type) || ev.type === "matchEnded") : round.events;
           if (keep.length) { collected = keep; timedOut = false; break; }
         }
         const summary = digest(collected, seat.watching ? null : seat.owner);
-        const headline = timedOut
-          ? "Nothing new yet."
-          : `${collected.length} new event(s) at tick ${tick}${summary.under_attack ? " — YOU ARE UNDER ATTACK" : ""}${summary.completed ? `, ${summary.completed.length} thing(s) finished` : ""}.`;
+        const ended = collected.find(ev => ev.type === "matchEnded") ?? null;
+        if (ended) summary.match_over = { winner: ended.winner, win_reason: ended.winReason };
+        const headline = ended
+          ? `The match is over — ${ended.winner ? `${ended.winner} won` : "no winner"}${ended.winReason ? ` (${ended.winReason})` : ""}. Call get_match_report for the full outcome.`
+          : timedOut
+            ? "Nothing new yet."
+            : `${collected.length} new event(s) at tick ${tick}${summary.under_attack ? " — YOU ARE UNDER ATTACK" : ""}${summary.completed ? `, ${summary.completed.length} thing(s) finished` : ""}.`;
         return {
           content: [{ type: "text", text: headline }],
           structuredContent: { tick, events: collected, timed_out: timedOut, summary },

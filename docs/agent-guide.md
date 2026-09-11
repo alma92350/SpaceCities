@@ -73,10 +73,12 @@ it, just store and resend it.
 | Tool | Arguments | Notes |
 |---|---|---|
 | `create_match` | `seats`, `join_as?`, `client_id?`, `planet_id?`, `size_mult?`, `resource_mult?`, `match_time_limit?`, `spectators_enabled?` | Make your own match and say who plays each seat — see §2.1. `join_as` claims one of them in the same call, returning a `seat_handle`. |
-| `list_matches` | *(none)* | Every open (joinable) match, plus the server's published `agent_apm_cap` (§6). A match already running, or restricted to a benchmark harness, never appears here. |
+| `list_matches` | `include_started?` | Every open (joinable) match by default, plus the server's published `agent_apm_cap` (§6). Pass `include_started:true` to also see running and finished matches — a running match is otherwise invisible here, which is what makes a match you were playing appear to have vanished. Each taken seat reports `idle_seconds`. |
 | `join_match` | `match_id`, `seat_index?`, `client_id?` | Omit `seat_index` to auto-pick the first open seat. Returns `seat_handle`, `owner` (the seat's id, e.g. `"player"` or `"ai"`), `seat_index`, `started` — `true` exactly when THIS join was the one that filled every remaining seat, which starts the match immediately — and `rejoined`. With a `client_id` you already used here, this is a REJOIN and works even on a started match (§2.2). |
 | `leave_match` | `seat_handle` | Give up a seat before the match starts. Fails once it has. |
-| `find_my_seats` | `client_id` | Every seat that client_id holds, with working handles — recovery when you have lost everything but your own id (§2.2). |
+| `find_my_seats` | `client_id` | Every seat that client_id holds, with working handles and any finished match's own result — recovery when you have lost everything but your own id (§2.2). |
+| `reclaim_seat` | `match_id`, `seat_index?`, `client_id?` | Take back a seat whose holder has gone silent — the recovery path that needs no prior `client_id` (§2.2). |
+| `get_match_report` | `match_id` | How a match ended: winner, reason, duration, who played each seat, each side's final standing. Works long after the match and its worker are gone (§5.1). |
 | `watch_match` | `match_id` | A `watch_handle`: observe a match unfogged, from both sides, without taking a seat (§2.3). |
 
 **If your own `join_match` still reports `started: false`**, another seat is still open and
@@ -108,19 +110,43 @@ const { seat_handle, match_id, started } = (await client.callTool("create_match"
 })).structuredContent;
 ```
 
-### 2.2 Rejoining: `client_id`
+### 2.2 Rejoining after losing your handle
 
 There is no protocol session and no connection to drop, so nothing about your seat depends on you
-staying reachable — but everything depends on you keeping the `seat_handle`. Mint one random
-`client_id` per agent, pass it to `create_match`/`join_match`, and you have a second way in:
+staying reachable — but everything depends on keeping the `seat_handle`, which for an LLM client
+means keeping it through a context compaction. Three recovery paths, strongest first:
 
-- `join_match({match_id, client_id})` returns the SAME seat and a fresh working handle
-  (`rejoined: true`) — and unlike an ordinary join, it works on a match already in progress.
-- `find_my_seats({client_id})` lists every seat you hold, across matches, each with a handle.
+1. **`client_id`.** Mint one random string per agent and pass it to `create_match`/`join_match`.
+   `join_match({match_id, client_id})` then returns the SAME seat with a fresh handle
+   (`rejoined: true`), and unlike an ordinary join it works on a match already in progress.
+   `find_my_seats({client_id})` lists every seat you hold across matches, each with a handle and,
+   for a finished match, its result. Treat the id as a secret: whoever knows it can take your seat.
+2. **`reclaim_seat({match_id, seat_index?, client_id?})`** — for when you did NOT pass a
+   `client_id` before losing the handle, which is the usual case for an agent that has just been
+   compacted. It takes over a seat that has been silent past a staleness window (60s by default),
+   MINTING A NEW TOKEN so the previous handle is retired and a seat never has two live claimants.
+   A seat still making calls is refused with `seat-still-active` and its current idle time. Whether
+   this tool is reachable is a server policy (`SEAT_RECLAIM=off` disables it) — on a lobby
+   strangers share, "the holder went quiet" is not distinguishable from "the holder is thinking".
+3. **`list_matches({include_started: true})`** to find the match in the first place. The default
+   listing answers "what can I join", so a running match is absent from it; each seat in the
+   extended listing carries `idle_seconds`, which is how you tell your own abandoned seat from one
+   someone is actively playing.
 
-Treat the id as a secret: whoever knows it can reclaim your seat.
+Handles are compact (~44 chars) rather than a long opaque blob, specifically so they survive
+summarization more often — but that is a mitigation, not a guarantee. Persist the `client_id`.
 
-### 2.3 Watching: `watch_match`
+### 2.3 Going quiet: what the server does about it
+
+A browser client's presence is its open WebSocket, so the server sees it leave and covers the seat
+with the game's own AI after a grace period (FR-5). An MCP client has no socket at all — the gap
+between two tool calls is the only evidence there is — so presence is recorded from your calls
+themselves, and a seat silent for 90 seconds is handed to the AI automatically. **Your next tool
+call of any kind hands it straight back**; there is no separate resume step. A handover you
+requested yourself with `set_seat_controller` (§4) is never undone this way — only cover the server
+applied on its own is automatic to reverse.
+
+### 2.4 Watching: `watch_match`
 
 A `watch_handle` is the same opaque string, naming a match but no seat. Pass it as `seat_handle` to
 `get_situation` (which reports a per-side scoreboard instead of "your" resources), `list_entities`,
@@ -291,6 +317,29 @@ call rather than a busy loop.
 const { structuredContent } = await client.callTool("wait_for_event", { seat_handle, timeout_ms: 5000 });
 if (!structuredContent.timed_out) { /* structuredContent.events has what changed */ }
 ```
+
+### 5.1 The end of the match
+
+`wait_for_event` returns IMMEDIATELY on a finished match, with a `matchEnded` event and
+`summary.match_over` — it never blocks on a decided match, and never filters that event out however
+you narrowed the rest with `types`/`groups`. This event is synthesised by the MCP layer rather than
+the engine (`engine/victory.js` sets `state.over` and pushes nothing, because every in-browser
+consumer reads it off the frame it is already rendering); without it an agent sitting in
+`wait_for_event` cannot tell a decided match from a quiet one and waits out its timeout forever.
+
+`get_match_report({match_id})` then gives the full outcome, and keeps giving it after the match's
+worker has exited and even across a server restart:
+
+```jsonc
+{ "winner": "ai", "winReason": "commandCenterDestroyed", "time": 612.4, "tick": 12248,
+  "seats": [{ "seat_index": 0, "owner": "player", "controller": "agent" },
+            { "seat_index": 1, "owner": "ai", "controller": "ai", "ai": { "difficulty": "hard" } }],
+  "sides": [{ "owner": "player", "units": 0, "buildings": 0, "won": false },
+            { "owner": "ai", "units": 14, "buildings": 6, "won": true }] }
+```
+
+`seats` is what makes the result readable: `winner` is a SEAT ID, so `"ai"` means "the seat called
+ai", not "the computer" — either seat can be an agent or a scripted AI.
 
 ## 6. Rate limit — the same published cap every scripted opponent has
 

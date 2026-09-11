@@ -77,9 +77,14 @@ function seatConfigFrom(seats) {
     const kind = CONTROLLER_KINDS[entry?.controller];
     if (!kind) return { error: `bad-controller: ${JSON.stringify(entry?.controller)} — use ai, human or agent` };
     seatKinds.push(kind);
-    seatAi.push(kind === "ai"
-      ? { ...(entry.ai_strategy ? { strategy: entry.ai_strategy } : {}), ...(entry.difficulty ? { difficulty: entry.difficulty } : {}) }
-      : null);
+    // An AI seat with no explicit pick stores null, not {} — "no preference expressed" and "an
+    // empty preference" read the same to a caller but only one of them is true, and the empty
+    // object would surface in every public listing and match report as noise.
+    const pick = {
+      ...(entry.ai_strategy ? { strategy: entry.ai_strategy } : {}),
+      ...(entry.difficulty ? { difficulty: entry.difficulty } : {}),
+    };
+    seatAi.push(kind === "ai" && Object.keys(pick).length ? pick : null);
   }
   return { seatKinds, seatAi };
 }
@@ -91,7 +96,20 @@ function seatConfigFrom(seats) {
  *   (whether or not it happened to be the LAST open seat) — see this file's own header for why the
  *   "is the match actually ready to start" decision lives in the caller, not here.
  */
-export function createLobbyTools(lobby, onSeatsFilled) {
+export function createLobbyTools(lobby, onSeatsFilled, opts = {}) {
+  // Seat reclaim policy. Enabled by default because the cost of the two errors is wildly
+  // asymmetric on the server this actually runs on: refusing a legitimate reclaim strands an agent
+  // outside a match it is still playing with no way back, while allowing a bogus one requires
+  // someone who can already reach a local dev server to guess a live match id AND wait out the
+  // idle window. A deployment where strangers share a lobby should pass {enabled:false} and rely
+  // on client_id instead — see reclaim_seat's own description.
+  const reclaimEnabled = opts.seatReclaim?.enabled !== false;
+  const reclaimStaleMs = Number.isFinite(opts.seatReclaim?.staleMs) ? opts.seatReclaim.staleMs : 60000;
+  // Looks up a FINISHED match's own recorded outcome (tools/serve.js's own results store), or null
+  // — a match that ended in an earlier boot is still answerable through it, long after its worker
+  // and its live projection are gone.
+  const getResult = typeof opts.getResult === "function" ? opts.getResult : () => null;
+
   const maybeStart = async match => (onSeatsFilled ? await onSeatsFilled(match) : false);
 
   return [
@@ -159,13 +177,33 @@ export function createLobbyTools(lobby, onSeatsFilled) {
     },
     {
       name: "list_matches",
-      title: "List open matches",
-      description: "Lists every match currently open for a seat to join — world, size, resource level, match length, which seats are taken, and whether spectators are allowed. Never includes a seat's real token or the match's random seed. Also reports agent_apm_cap, the published actions-per-minute ceiling issue_command is subject to.",
-      inputSchema: { type: "object", properties: {}, additionalProperties: false },
-      handler: () => {
-        const matches = lobby.listOpenMatches().map(publicMatch);
+      title: "List matches",
+      description:
+        "Lists matches — by default only the ones still OPEN for a seat to join. Pass " +
+        "include_started:true to also see matches already running or finished, which is how you " +
+        "find a match again after losing track of it (a running match is invisible to the default " +
+        "listing, which is why one can appear to have vanished). Each entry reports the world, " +
+        "size, resource level, match length, status, each seat's controller and whether it is " +
+        "taken, how long a taken seat's holder has been silent (idle_seconds), and whether " +
+        "spectators are allowed. Never includes a seat's real token or the match's random seed. " +
+        "Also reports agent_apm_cap, the published actions-per-minute ceiling issue_command is " +
+        "subject to.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          include_started: { type: "boolean", description: "Also list matches that have already started or finished (default false)." },
+        },
+        additionalProperties: false,
+      },
+      handler: ({ include_started } = {}) => {
+        const source = include_started
+          ? [...lobby.matches.values()].filter(m => (m.config.clockPolicy ?? "realtime") === "realtime")
+          : lobby.listOpenMatches();
+        const matches = source.map(m => ({ ...publicMatch(m), ...(getResult(m.id) ? { result: getResult(m.id) } : {}) }));
         return {
-          content: [{ type: "text", text: matches.length ? `${matches.length} open match(es).` : "No open matches right now." }],
+          content: [{ type: "text", text: matches.length
+            ? `${matches.length} match(es)${include_started ? "" : " open to join"}.`
+            : (include_started ? "No matches on this server." : "No open matches right now — pass include_started:true to see running ones.") }],
           structuredContent: { matches, agent_apm_cap: AGENT_APM },
         };
       },
@@ -274,6 +312,103 @@ export function createLobbyTools(lobby, onSeatsFilled) {
       },
     },
     {
+      // The recovery path that needs NO foresight. join_match's client_id is better when it
+      // applies, but an agent that has just been compacted did not necessarily pass one before it
+      // lost its handle — and telling it "you should have" is not a recovery path.
+      name: "reclaim_seat",
+      title: "Take back a seat nobody is driving",
+      description:
+        "Takes over a seat whose holder has gone silent, handing you a fresh seat_handle for it — " +
+        "the way back in when you have lost your handle AND did not pass a client_id. Find the " +
+        "match with list_matches(include_started:true), read which seat is yours from its " +
+        "idle_seconds, then call this. Only succeeds once the seat has been silent long enough to " +
+        "be genuinely abandoned rather than merely thinking; a seat still making calls is refused " +
+        "with seat-still-active and its current idle time. Reclaiming MINTS A NEW TOKEN, so the " +
+        "previous holder's handle stops working — there is always exactly one live claimant. If " +
+        "the game's AI was covering the seat while you were away, control returns to you " +
+        "automatically on your next command. Pass a client_id to make every future recovery a " +
+        "plain join_match instead of this.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          match_id: { type: "string" },
+          seat_index: { type: "integer", description: "Which seat to take back. Omit to take the one that has been silent longest." },
+          client_id: { type: "string", description: "Your own stable id — recorded on the seat so you can rejoin with join_match next time instead of reclaiming again." },
+        },
+        required: ["match_id"],
+      },
+      handler: ({ match_id, seat_index, client_id }) => {
+        if (!reclaimEnabled) return rejection("seat-reclaim-disabled: this server requires a client_id to rejoin — use join_match with the client_id you joined with");
+        const match = lobby.getMatch(match_id);
+        if (!match) return rejection("no-such-match");
+        let seatIndex = seat_index;
+        if (seatIndex === undefined) {
+          // The seat that has been silent longest — never an unheld one (nothing to reclaim) and
+          // never a scripted-AI seat (no holder to have abandoned it).
+          const candidates = match.seats
+            .map((seat, i) => ({ i, idle: lobby.seatIdleMs(match_id, i) }))
+            .filter(c => c.idle !== null)
+            .sort((a, b) => b.idle - a.idle);
+          if (!candidates.length) return rejection("no-reclaimable-seat: no seat in this match is held by anyone");
+          seatIndex = candidates[0].i;
+        }
+        const taken = lobby.reclaimAbandonedSeat(match_id, seatIndex, client_id ?? null, reclaimStaleMs);
+        if (!taken.ok) {
+          return rejection(taken.code === "seat-still-active"
+            ? `seat-still-active: seat ${seatIndex} was heard from ${Math.round(taken.idleMs / 1000)}s ago; it is considered abandoned after ${Math.round(reclaimStaleMs / 1000)}s`
+            : taken.code);
+        }
+        return {
+          content: [{ type: "text", text: `Reclaimed seat ${seatIndex} (${taken.owner}) of match ${match_id}. Call get_situation before acting — the match ran on while you were away.` }],
+          structuredContent: {
+            seat_handle: mintSeatHandle(match_id, seatIndex, taken.token),
+            match_id, seat_index: seatIndex, owner: taken.owner,
+            reclaimed: true, previous_holder_idle_seconds: taken.idleMs < 0 ? null : Math.round(taken.idleMs / 1000),
+          },
+        };
+      },
+    },
+    {
+      // T-059's results store had an HTTP endpoint and no MCP tool at all, so an agent could play
+      // a match to its end and never learn the outcome — the match simply stopped answering and
+      // vanished from list_matches. This is that missing half.
+      name: "get_match_report",
+      title: "How a match ended",
+      description:
+        "The outcome of a match: who won and why, how long it ran, and each side's final standing. " +
+        "Works after the match is over and after its worker is gone — including matches that " +
+        "finished before this server restarted — so it is the call to make when a match stops " +
+        "responding and you want to know how it went. A match still in progress reports " +
+        "status:'running' with no result rather than an error.",
+      inputSchema: {
+        type: "object",
+        properties: { match_id: { type: "string", description: "A match id from list_matches, create_match, or find_my_seats." } },
+        required: ["match_id"],
+      },
+      handler: ({ match_id }) => {
+        const match = lobby.getMatch(match_id);
+        const result = getResult(match_id);
+        if (!match && !result) return rejection("no-such-match");
+        if (!result) {
+          return {
+            content: [{ type: "text", text: `Match ${match_id} has not finished yet (${match.status}).` }],
+            structuredContent: { match_id, status: match.status, finished: false, result: null, ...(match ? { match: publicMatch(match) } : {}) },
+          };
+        }
+        const minutes = Math.floor((result.time ?? 0) / 60);
+        const seconds = Math.round((result.time ?? 0) % 60);
+        return {
+          content: [{ type: "text", text:
+            `Match ${match_id} is over after ${minutes}m${String(seconds).padStart(2, "0")}s — ` +
+            `${result.winner ? `${result.winner} won` : "no winner"}${result.winReason ? ` (${result.winReason})` : ""}.` }],
+          structuredContent: {
+            match_id, status: "finished", finished: true, result,
+            ...(match ? { match: publicMatch(match) } : {}),
+          },
+        };
+      },
+    },
+    {
       name: "find_my_seats",
       title: "Find the seats you already hold",
       description:
@@ -286,12 +421,22 @@ export function createLobbyTools(lobby, onSeatsFilled) {
         required: ["client_id"],
       },
       handler: ({ client_id }) => {
-        const seats = lobby.listSeatsForClient(client_id).map(s => ({
-          match_id: s.matchId, status: s.status, seat_index: s.seatIndex, owner: s.owner,
-          seat_handle: mintSeatHandle(s.matchId, s.seatIndex, s.token),
-        }));
+        const seats = lobby.listSeatsForClient(client_id).map(s => {
+          // A finished match is still one of "your" seats, and its outcome is the single thing you
+          // most want on coming back — reported here so recovering never needs a second round trip
+          // just to learn the match you were playing has already been decided.
+          const result = getResult(s.matchId);
+          return {
+            match_id: s.matchId, status: result ? "finished" : s.status, seat_index: s.seatIndex, owner: s.owner,
+            seat_handle: mintSeatHandle(s.matchId, s.seatIndex, s.token),
+            ...(result ? { result } : {}),
+          };
+        });
+        const live = seats.filter(s => !s.result);
         return {
-          content: [{ type: "text", text: seats.length ? `You hold ${seats.length} seat(s).` : "You hold no seats right now." }],
+          content: [{ type: "text", text: seats.length
+            ? `You hold ${seats.length} seat(s), ${live.length} in a match still going.`
+            : "You hold no seats right now. If you were playing without a client_id, use list_matches(include_started:true) and reclaim_seat instead." }],
           structuredContent: { seats },
         };
       },

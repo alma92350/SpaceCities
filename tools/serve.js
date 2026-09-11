@@ -84,6 +84,7 @@ import { attachProjectionCache } from "../server/mcpObservationCache.js";
 import { createActionTools } from "../server/mcpActionTools.js";
 import { createEventTools } from "../server/mcpEventTools.js";
 import { createBatchTools } from "../server/mcpBatchTools.js";
+import { createSeatPresence } from "../server/seatPresence.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 import { createGameResources } from "../server/mcpResources.js";
 import { AGENT_APM, createAgentApmGuard } from "../net/agentApm.js";
@@ -253,6 +254,36 @@ export async function createAppServer() {
   // server/mcpBatchTools.js's own getTools doc for why that has to be lazy).
   /** @type {Array<Object>} */
   const mcpTools = [];
+
+  // A finished match's outcome, by id — the results store already recorded it (T-059), but until
+  // now nothing over MCP could read it, so an agent whose match ended simply found the match gone
+  // from list_matches with no way to learn how it went.
+  const resultFor = matchId => resultsStore.list().find(r => r.matchId === matchId) ?? null;
+
+  // AI cover for an MCP seat that has gone quiet (server/seatPresence.js). A browser client's seat
+  // already gets this from its socket closing; an MCP client has no socket, so a compacting agent
+  // used to leave its base frozen for the rest of the match.
+  const seatPresence = createSeatPresence({
+    lobby,
+    getBridge: matchId => liveMatches.get(matchId)?.cmdBridge ?? null,
+    isLive: matchId => liveMatches.has(matchId),
+    ...(Number.isFinite(Number(process.env.SEAT_IDLE_MS)) ? { idleMs: Number(process.env.SEAT_IDLE_MS) } : {}),
+  });
+  seatPresence.start();
+
+  // The tools resolve seats through THIS lobby view, not the bare one: server/mcpSeatHandle.js's
+  // withSeat already calls touchSeat on every seat-scoped call, so hanging the "and hand the seat
+  // back if we were covering it" side effect here means returning from a pause needs no special
+  // call at all — the agent's next ordinary tool call does it. Spread rather than mutated so the
+  // lobby itself stays the plain, dependency-free model server/lobby.js's own header promises.
+  const toolLobby = {
+    ...lobby,
+    touchSeat(matchId, seatIndex, nowMs) {
+      lobby.touchSeat(matchId, seatIndex, nowMs);
+      seatPresence.onSeatActive(matchId, seatIndex);
+    },
+  };
+
   mcpTools.push(
     // Bugfix: join_match used to never start a match on its own (docs/agent-guide.md's own §2
     // told an agent to expect this gap: "the host still has to start the match separately"),
@@ -266,15 +297,26 @@ export async function createAppServer() {
     // handleJoinMatch's own `seatsFilled(match) ? await startAndSpawnIfReady(match) : false`
     // exactly, so join_match and the HTTP endpoints can never disagree about when a match is
     // ready to start.
-    ...createLobbyTools(lobby, async match => {
+    ...createLobbyTools(toolLobby, async match => {
       if (!seatsFilled(match)) return false;
       const startedNow = await startAndSpawnIfReady(match);
       if (dataDir) writeLobbySnapshot(dataDir, lobby);
       return startedNow;
+    }, {
+      getResult: resultFor,
+      // Local-first default: an agent locked out of its own match is a far worse outcome here than
+      // a reclaim that should not have happened, since reaching this server at all already implies
+      // access to it. Set SEAT_RECLAIM=off for a deployment strangers share.
+      seatReclaim: { enabled: process.env.SEAT_RECLAIM !== "off" },
     }),
-    ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
-    ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null, matchId => liveMatches.get(matchId)?.apmGuard ?? null),
-    ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    ...createObservationTools(toolLobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    ...createActionTools(
+      toolLobby,
+      matchId => liveMatches.get(matchId)?.cmdBridge ?? null,
+      matchId => liveMatches.get(matchId)?.apmGuard ?? null,
+      (matchId, owner, wantAi) => seatPresence.setManual(matchId, owner, wantAi),
+    ),
+    ...createEventTools(toolLobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
     // `batch` is registered LAST and reads the registry lazily, so a batch step can name any tool
     // above it — including one registered after this line, should any ever be.
     ...createBatchTools(() => mcpTools),
@@ -403,6 +445,24 @@ export async function createAppServer() {
       resultsStore.record({
         matchId: match.id, owners: msg.proj.owners, winner: msg.proj.winner, winReason: msg.proj.winReason,
         tick: msg.proj.tick, time: msg.proj.time, endedAt: Date.now(),
+        // WHO PLAYED EACH SEAT, and HOW EACH SIDE FINISHED — the difference between "ai won" (which
+        // says nothing: "ai" is a seat id, and either seat can be a scripted AI or an agent) and a
+        // report an agent can actually learn from. Read off this same final projection rather than
+        // the live state, which no longer exists by the time anyone asks. Fog is not a concern: the
+        // match is over, and this is only ever served through get_match_report, never mid-match.
+        seats: match.seats.map((seat, i) => ({
+          seat_index: i, owner: OWNER_IDS[i],
+          controller: seat.kind === "ai" ? "ai" : (seat.kind === "agent" ? "agent" : "human"),
+          ...(seat.ai ? { ai: seat.ai } : {}),
+        })),
+        sides: (msg.proj.owners ?? []).map(owner => ({
+          owner,
+          resources: msg.proj.players?.[owner]?.resources ?? null,
+          supply: msg.proj.players?.[owner]?.supply ?? null,
+          units: (msg.proj.units ?? []).filter(u => u.owner === owner).length,
+          buildings: (msg.proj.buildings ?? []).filter(b => b.owner === owner).length,
+          won: msg.proj.winner === owner,
+        })),
       });
     });
     liveMatches.set(match.id, { worker, wsMatch, projCache, cmdBridge, apmGuard });
@@ -583,8 +643,12 @@ export async function createAppServer() {
     // seat's fog (this engine's ordinary two-base-apart skirmish layout), making "did state.buildings
     // for owner ai grow" an unreliable, slow proxy for a property this already answers directly.
     liveMatches,
+    // Exposed for the same reason liveMatches above is: a test needs to drive the idle sweep at an
+    // explicit clock rather than waiting out a real 5s interval and a real 90s idle window.
+    seatPresence,
     close() {
       if (snapshotTimer) clearInterval(snapshotTimer);
+      seatPresence.stop();
       for (const { worker, wsMatch } of liveMatches.values()) { wsMatch.close(); worker.terminate(); }
       liveMatches.clear();
     },

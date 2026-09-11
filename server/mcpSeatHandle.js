@@ -27,7 +27,28 @@ import { SPECTATOR_SEAT } from "../engine/projection.js";
  * @returns {string} an opaque handle string — see this file's own header for why base64/JSON
  *   rather than a bare token, and why that's still "opaque" in the spec's own sense.
  */
+// A uuid is 32 hex digits plus 4 dashes — 16 real bytes wearing 36 characters. Packing the two
+// uuids and the seat index as raw bytes turns a ~180-character handle into a ~44-character one.
+//
+// WHY LENGTH IS A CORRECTNESS CONCERN AND NOT COSMETICS: an MCP client's only copy of its handle
+// lives in its context, and when that context is compacted, a long opaque base64 blob is exactly
+// the kind of token a summarizer drops. A short one is meaningfully likelier to survive. It is not
+// a guarantee — the real recovery paths are join_match's client_id and reclaim_seat — but it is
+// free, and it makes the common case fail less often.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const packUuid = u => Buffer.from(u.replace(/-/g, ""), "hex");
+const unpackUuid = buf => {
+  const h = buf.toString("hex");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+};
+
 export function mintSeatHandle(matchId, seatIndex, token) {
+  // Packed only when both ids really are uuids (every id server/lobby.js mints) and the seat index
+  // fits a byte; anything else falls back to the original self-describing JSON form rather than
+  // silently truncating. Both forms resolve, so nothing that already holds an older handle breaks.
+  if (UUID_RE.test(matchId) && UUID_RE.test(token) && Number.isInteger(seatIndex) && seatIndex >= 0 && seatIndex < 256) {
+    return Buffer.concat([packUuid(matchId), Buffer.from([seatIndex]), packUuid(token)]).toString("base64url");
+  }
   return Buffer.from(JSON.stringify({ matchId, seatIndex, token }), "utf8").toString("base64url");
 }
 
@@ -65,7 +86,12 @@ export function mintWatchHandle(matchId) {
 export function resolveSeatHandle(lobby, handle) {
   let parsed;
   try {
-    parsed = JSON.parse(Buffer.from(String(handle), "base64url").toString("utf8"));
+    const raw = Buffer.from(String(handle), "base64url");
+    // The packed form is a fixed 33 bytes (16 + 1 + 16) and never valid JSON, so the two encodings
+    // are distinguishable by length alone — no version byte or prefix needed.
+    parsed = raw.length === 33
+      ? { matchId: unpackUuid(raw.subarray(0, 16)), seatIndex: raw[16], token: unpackUuid(raw.subarray(17)) }
+      : JSON.parse(raw.toString("utf8"));
   } catch {
     return { ok: false, code: "bad-handle" };
   }
@@ -107,8 +133,19 @@ export function withSeat(lobby, handler) {
   return async (args = {}) => {
     const resolved = resolveSeatHandle(lobby, args.seat_handle);
     if (!resolved.ok) {
-      return { content: [{ type: "text", text: `Invalid or expired seat handle (${resolved.code}). Call join_match again to get a new one.` }], isError: true };
+      return {
+        content: [{ type: "text", text:
+          `Invalid or expired seat handle (${resolved.code}). If you were playing this match and lost your handle: ` +
+          `call join_match with your client_id to rejoin, find_my_seats if you still know your client_id but not the ` +
+          `match, or list_matches with include_started:true then reclaim_seat to take back a seat nobody is driving.` }],
+        isError: true,
+      };
     }
+    // PRESENCE, recorded as a side effect of playing rather than as something an agent must
+    // remember to report — this is the single place every seat-scoped tool call already passes
+    // through. A watcher touches nothing: it holds no seat, and its reading a match must never
+    // make an absent player look present (which would suppress the AI cover that seat needs).
+    if (!resolved.watching) lobby.touchSeat?.(resolved.matchId, resolved.seatIndex);
     return handler({ ...args, seat: resolved });
   };
 }

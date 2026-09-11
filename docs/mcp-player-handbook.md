@@ -65,16 +65,42 @@ Until then, and for a tick or two after, every observation tool answers `match-n
 
 To join a match someone else made: `list_matches` → `join_match({match_id, client_id})`.
 
-## 3. Coming back — `client_id`, `join_match`, `find_my_seats`
+## 3. Coming back after losing your context
 
-You will compact your context, restart, or crash. Plan for it:
+You **will** compact, restart, or crash mid-match. The match does not stop for it. There are three
+ways back in, best first — and the third one works even if you did nothing to prepare.
 
-- **Mint one random `client_id` per agent** and pass it to `create_match`/`join_match`. Treat it as
-  a secret — it reclaims your seat.
-- **Lost your `seat_handle`?** `join_match({match_id, client_id})` hands the same seat back
-  (`rejoined: true`), *including on a match already in progress*, where an ordinary join is refused.
-- **Lost the match id too?** `find_my_seats({client_id})` lists every seat you hold, with working
-  handles.
+**Best — you kept a `client_id`.** Mint one random string per agent, pass it to
+`create_match`/`join_match`, and keep it somewhere durable (write it to a file; it is one short
+line). Then:
+
+```js
+await call("join_match", { match_id, client_id });   // same seat, new handle, rejoined: true
+await call("find_my_seats", { client_id });          // ...if you lost the match id too
+```
+
+`join_match` with a `client_id` you already used is a **rejoin**, and works on a match already in
+progress, where an ordinary join is refused.
+
+**If you have the match id but no `client_id`:** the match is running, so it is hidden from the
+default listing — this is why a match can look like it vanished. Find it, then take your seat back:
+
+```js
+const { matches } = (await call("list_matches", { include_started: true })).structuredContent;
+// each seat reports idle_seconds — yours is the one nobody has been driving
+await call("reclaim_seat", { match_id, seat_index: 0, client_id });   // pass one THIS time
+```
+
+`reclaim_seat` only succeeds once the seat has been silent long enough to be genuinely abandoned
+(60s by default); a seat still making calls is refused with `seat-still-active`. Reclaiming mints a
+new token, so the old handle stops working — there is never more than one client on a seat.
+
+**If you have nothing at all:** `list_matches({include_started: true})` shows every match on the
+server, with each seat's `idle_seconds` and, for finished ones, the `result`. Work out which was
+yours, then `reclaim_seat` it.
+
+> While you were gone, the game's own AI was probably covering your seat — see §4. Your next tool
+> call takes it back automatically. Call `get_situation` before acting: the position has moved.
 
 ## 4. Stepping away — `set_seat_controller`
 
@@ -89,9 +115,16 @@ await call("set_seat_controller", { seat_handle, controller: "self" });         
 ```
 
 Do this before any pause long enough to matter. The match does **not** pause for you — it runs at
-20 ticks a second whether or not you are calling. A seat nobody drives just stands there while the
-opponent builds an army. Reversible as often as you like; your handle and `client_id` stay valid
-throughout. Whatever the AI did stands, so call `get_situation` when you return.
+20 ticks a second whether or not you are calling. Reversible as often as you like; your handle and
+`client_id` stay valid throughout. Whatever the AI did stands, so call `get_situation` when you
+return.
+
+**There is also a safety net, for the pause you did not see coming.** If a seat makes no tool call
+for 90 seconds, the server hands it to the AI by itself, and hands it back on that seat's very next
+call — no special step, your ordinary `get_situation` does it. You cannot announce a compaction
+that surprises you, so this is what keeps your base building and defending instead of standing
+frozen while the opponent takes the map. Announcing it yourself is still better: you choose the
+strategy and difficulty, and there is no 90-second gap first.
 
 ## 5. Acting — `issue_command`, and three levels of batching
 
@@ -166,7 +199,27 @@ Raw events carry ids, not just coordinates: `attackHit` (`sourceId`/`targetId`),
 (`id`, `killerId`), `unitSpawned` (`id`, `fromBuildingId`), `buildingComplete` (`id`),
 `researchComplete`, `nodeDepleted`, `unitIdle`.
 
-## 7. Observing
+## 7. When the match ends
+
+**`wait_for_event` returns immediately on a finished match** — a `matchEnded` event plus
+`summary.match_over` — and never filters that event out however you narrowed the rest. It will not
+block, because nothing further can ever happen. When you see it, stop playing and read the report:
+
+```js
+const { result } = (await call("get_match_report", { match_id })).structuredContent;
+// { winner, winReason, time, tick, seats: [{ seat_index, owner, controller, ai }], sides: [...] }
+```
+
+`get_match_report` works **after** the match is over and after its worker is gone, including across
+a server restart — so it is the call to make when a match stops responding and you want to know how
+it went. `seats` says who was playing each seat, which is what makes the result readable at all:
+`winner: "ai"` is a *seat id*, not "the computer won" — either seat can be an agent or a scripted
+AI. A match still running reports `finished: false` rather than erroring.
+
+`find_my_seats({client_id})` also carries the `result` of any finished match you held a seat in, so
+coming back to a decided match costs one call, not two.
+
+## 8. Observing
 
 All fog-respecting: your own entities always, an enemy's only while visible.
 
@@ -181,7 +234,7 @@ All fog-respecting: your own entities always, an enemy's only while visible.
 Static reference also lives in MCP **resources** (`game://units`, `game://buildings`,
 `game://counters`, `game://tech-tree`): read once per process, never per turn.
 
-## 8. Watching someone else's match — `watch_match`
+## 9. Watching someone else's match — `watch_match`
 
 `watch_match({match_id})` returns a `watch_handle`. Pass it as `seat_handle` to `get_situation`,
 `list_entities`, `get_map_overview` and `wait_for_event`. It sees the match **unfogged**, from both
@@ -195,10 +248,20 @@ seat, so it never blocks a real player. Fails if the host disabled spectators.
 ## The four things that lose matches
 
 1. **Not saying you are stepping away.** The clock does not stop. `set_seat_controller` before any
-   long pause.
-2. **Losing your handle without a `client_id`.** Mint one up front; that is the only way back into
-   a running match.
+   long pause. (The 90-second auto-cover in §4 will catch you, but it costs you 90 seconds of a
+   frozen base first.)
+2. **Losing your handle without a `client_id`.** Mint one up front and write it down. Failing that,
+   `list_matches({include_started:true})` + `reclaim_seat` — §3.
 3. **One call per action.** Use `batch`, `ids`, and `{t:"batch"}` — latency, not the APM cap, is
    what actually limits you.
 4. **Idle workers.** Check `idle_unit_ids` every turn and watch for `unitIdle`/`nodeDepleted`. An
    economy that stopped is invisible in every other field.
+
+## Do this first, before anything else
+
+```js
+const client_id = crypto.randomUUID();
+// write it somewhere you will still have it after a compaction — a file, one line
+```
+
+Everything in §3 is easy if you did this, and a scramble if you did not.

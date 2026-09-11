@@ -71,6 +71,13 @@ function buildSeats(config) {
     // — the one field that survives a client losing its seat_handle, so it can ask for the same
     // seat back rather than being locked out of a match it is already playing.
     clientId: null,
+    // When this seat's holder was last heard from — set on join, refreshed by touchSeat on every
+    // seat-scoped tool call. A WebSocket client's presence is its open socket; an MCP client has
+    // no socket at all, so "are they still there" can only ever be answered by "when did they
+    // last call something". This is that clock, and the two things built on it (idle AI cover,
+    // and reclaiming a seat whose holder is provably gone) are the difference between an agent
+    // that compacts its context and an agent that has silently forfeited.
+    lastSeenAt: null,
     ai: kind === "ai" ? (seatAi[i] ?? null) : null,
   }));
 }
@@ -129,6 +136,7 @@ export function createLobby() {
     seat.owner = OWNER_IDS[seatIndex];
     seat.token = randomUUID();
     seat.clientId = clientId ?? null;
+    seat.lastSeenAt = Date.now();
     return { ok: true, token: seat.token, owner: seat.owner };
   }
 
@@ -167,6 +175,7 @@ export function createLobby() {
     seat.owner = null;
     seat.token = null;
     seat.clientId = null;
+    seat.lastSeenAt = null;
     return { ok: true };
   }
 
@@ -183,6 +192,59 @@ export function createLobby() {
     if (match.status !== "open") return { ok: false, code: "already-started" };
     match.status = "started";
     return { ok: true, match };
+  }
+
+  /**
+   * Marks this seat's holder as still present, right now. Called from the one place every
+   * seat-scoped MCP tool call already passes through (server/mcpSeatHandle.js's withSeat), so
+   * presence is a side effect of playing rather than something an agent has to remember to
+   * report. Silently ignores a seat that no longer exists — a caller resolving a stale handle is
+   * already being rejected on its own terms and must not also have to guard this.
+   * @param {string} matchId @param {number} seatIndex @param {number} [nowMs]
+   */
+  function touchSeat(matchId, seatIndex, nowMs = Date.now()) {
+    const seat = matches.get(matchId)?.seats[seatIndex];
+    if (seat) seat.lastSeenAt = nowMs;
+  }
+
+  /**
+   * How long this seat's holder has been silent, in ms — null for a seat nobody holds, and for
+   * one held since before this clock existed (a snapshot restored from an older build), which
+   * must read as "unknown", never as "idle forever".
+   * @returns {number|null}
+   */
+  function seatIdleMs(matchId, seatIndex, nowMs = Date.now()) {
+    const seat = matches.get(matchId)?.seats[seatIndex];
+    if (!seat || !seat.token || !seat.lastSeenAt) return null;
+    return Math.max(0, nowMs - seat.lastSeenAt);
+  }
+
+  /**
+   * Takes over a seat whose holder is provably gone — silent for at least `staleMs` — MINTING A
+   * FRESH TOKEN for it, which is what makes this safe rather than a second client on one seat:
+   * the previous holder's handle stops resolving the instant this succeeds, so the seat always has
+   * exactly one live claimant.
+   *
+   * This is the recovery path that needs NO foresight from the caller. join_match's own client_id
+   * rejoin is better when it applies — it proves you are the same client and costs the old holder
+   * nothing — but it only works if you thought to pass a client_id BEFORE you lost your handle,
+   * which an agent that has just been compacted did not. Whether this is reachable at all is the
+   * caller's policy decision (tools/serve.js's own seatReclaim option), because "the holder went
+   * quiet" is indistinguishable from "the holder is thinking" on a server strangers can reach.
+   * @returns {{ok:true, token:string, owner:string, idleMs:number}|{ok:false, code:string, idleMs?:number}}
+   */
+  function reclaimAbandonedSeat(matchId, seatIndex, clientId = null, staleMs = 60000, nowMs = Date.now()) {
+    const match = matches.get(matchId);
+    if (!match) return { ok: false, code: "no-such-match" };
+    const seat = match.seats[seatIndex];
+    if (!seat) return { ok: false, code: "no-such-seat" };
+    if (!seat.token) return { ok: false, code: "seat-not-held" };   // nothing to reclaim — an ordinary join applies
+    const idleMs = seat.lastSeenAt === null ? Infinity : Math.max(0, nowMs - seat.lastSeenAt);
+    if (idleMs < staleMs) return { ok: false, code: "seat-still-active", idleMs };
+    seat.token = randomUUID();
+    seat.clientId = clientId ?? null;
+    seat.lastSeenAt = nowMs;
+    return { ok: true, token: seat.token, owner: seat.owner, idleMs: idleMs === Infinity ? -1 : idleMs };
   }
 
   /**
@@ -223,7 +285,10 @@ export function createLobby() {
     return out;
   }
 
-  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, leaveSeat, startMatch, findSeatForClient, listSeatsForClient };
+  return {
+    matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, leaveSeat, startMatch,
+    findSeatForClient, listSeatsForClient, touchSeat, seatIdleMs, reclaimAbandonedSeat,
+  };
 }
 
 // The safe subset of a match record a stranger (browsing the open-match list, or an MCP agent's
@@ -249,6 +314,11 @@ export function publicMatch(match) {
       kind: s.kind, taken: !!s.owner,
       controller: s.kind === "ai" ? "ai" : (s.kind === "agent" ? "agent" : "human"),
       ...(s.ai ? { ai: s.ai } : {}),
+      // How long this seat's holder has been silent. Not a credential — it is the one fact that
+      // tells a returning agent "that frozen seat is mine and nobody is driving it" apart from
+      // "someone is playing it right now", which is exactly the question it has to answer before
+      // deciding whether to reclaim.
+      ...(s.token && s.lastSeenAt ? { idle_seconds: Math.round(Math.max(0, Date.now() - s.lastSeenAt) / 1000) } : {}),
     })),
     spectatorsEnabled: match.config.spectatorsEnabled !== false,
   };
