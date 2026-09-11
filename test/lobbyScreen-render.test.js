@@ -171,12 +171,16 @@ test("a match the server refuses to create says why, and lets the host try again
   assert.equal(hostBtn.disabled, false, "a failed attempt must not leave the button dead");
 });
 
+// The lobby now asks for started matches too, so the route key carries the query string. Kept as a
+// named constant because every test below answers this exact request.
+const LIST = "GET /api/matches?include_started=1";
+
 test("the open-matches list offers only matches with a free seat, named by world", async () => {
   fakeNet({
-    "GET /api/matches": { json: { matches: [
-      { id: "a", planetId: PLANETS[0].id, seats: [{ kind: "open", taken: false }, { kind: "open", taken: true }] },
-      { id: "b", planetId: PLANETS[0].id, seats: [{ kind: "open", taken: true }, { kind: "open", taken: true }] },
-      { id: "c", planetId: PLANETS[0].id, seats: [{ kind: "ai", taken: false }] },
+    [LIST]: { json: { matches: [
+      { id: "a", status: "open", planetId: PLANETS[0].id, seats: [{ kind: "open", taken: false }, { kind: "open", taken: true }] },
+      { id: "b", status: "open", planetId: PLANETS[0].id, seats: [{ kind: "open", taken: true }, { kind: "open", taken: true }] },
+      { id: "c", status: "open", planetId: PLANETS[0].id, seats: [{ kind: "ai", taken: false }] },
     ] } },
   });
   renderLobbyScreen();
@@ -186,8 +190,41 @@ test("the open-matches list offers only matches with a free seat, named by world
   assert.equal(rows[0].children[0].textContent, PLANETS[0].name, "a player picks a match by world, not by id");
 });
 
+test("a match whose open seat is an 'agent' kind IS listed — the kind says who is expected, it does not lock the seat", async () => {
+  // The regression this pins: every match an MCP client creates names its open seats "agent", and
+  // a browser filtering on kind === "open" alone showed none of them, while the server would have
+  // accepted a join for any of them.
+  fakeNet({
+    [LIST]: { json: { matches: [
+      { id: "a", status: "open", planetId: PLANETS[0].id, seats: [{ kind: "agent", taken: false, controller: "agent" }, { kind: "ai", taken: false, controller: "ai" }] },
+    ] } },
+  });
+  renderLobbyScreen();
+  await settle();
+  const rows = find(lobbyEl, n => n.classList.contains("lobby-match-row"));
+  assert.equal(rows.length, 1);
+  assert.ok(buttonNamed(rows[0], "Join"), "it is joinable, so it gets a Join button");
+});
+
+test("a RUNNING match is listed as watchable — an agent's match starts on creation and would otherwise be invisible here", async () => {
+  fakeNet({
+    [LIST]: { json: { matches: [
+      { id: "live", status: "started", spectatorsEnabled: true, planetId: PLANETS[0].id,
+        seats: [{ kind: "agent", taken: true, controller: "agent" }, { kind: "ai", taken: false, controller: "ai" }] },
+      { id: "private", status: "started", spectatorsEnabled: false, planetId: PLANETS[0].id, seats: [] },
+      { id: "done", status: "started", spectatorsEnabled: true, planetId: PLANETS[0].id, seats: [], result: { winner: "ai" } },
+    ] } },
+  });
+  renderLobbyScreen();
+  await settle();
+  const rows = find(lobbyEl, n => n.classList.contains("lobby-match-row"));
+  assert.equal(rows.length, 1, "a spectators-disabled match and an already-finished one are not watchable");
+  assert.ok(buttonNamed(rows[0], "👁 Watch"));
+  assert.ok(find(rows[0], n => n.textContent === "agent vs AI").length, "the row says who is playing, not just which world");
+});
+
 test("an empty lobby says so instead of showing a blank panel", async () => {
-  fakeNet({ "GET /api/matches": { json: { matches: [] } } });
+  fakeNet({ [LIST]: { json: { matches: [] } } });
   renderLobbyScreen();
   await settle();
   const hints = find(lobbyEl, n => n.classList.contains("setup-hint")).map(p => p.textContent);
@@ -196,7 +233,7 @@ test("an empty lobby says so instead of showing a blank panel", async () => {
 
 test("a seat taken between listing and clicking says 'Seat taken', not nothing", async () => {
   fakeNet({
-    "GET /api/matches": { json: { matches: [{ id: "a", planetId: PLANETS[0].id, seats: [{ kind: "open", taken: false }] }] } },
+    [LIST]: { json: { matches: [{ id: "a", status: "open", planetId: PLANETS[0].id, seats: [{ kind: "open", taken: false }] }] } },
     POST: { ok: false, status: 409, json: { error: "no-open-seat" } },
   });
   renderLobbyScreen();

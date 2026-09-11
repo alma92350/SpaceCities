@@ -8,6 +8,31 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **The browser lobby and the MCP interface disagreed about which matches existed.** They share one
+  lobby model, but the two front doors onto it did not show the same thing, so a human could not see
+  or join the matches their own agents were playing:
+  - `GET /api/matches` only ever listed matches still OPEN to join. A match an MCP client creates
+    typically STARTS the instant it is created (it claims its own seat in the same call, or its
+    opponent is a built-in AI needing no joiner), so it was never open for even one poll and the
+    browser never saw it. The endpoint now takes `?include_started=1` — the HTTP twin of the
+    `list_matches` tool's own `include_started` — and the lobby uses it to list running matches as
+    **watchable**, with a Watch button, alongside joinable ones.
+  - The browser's own joinable-seat rule was `kind === "open"`, so every match an MCP client created
+    — whose open seats are the `agent` kind — was filtered out of the list even though the server
+    would happily have accepted a join for any of them.
+  - **The lobby never refreshed.** It fetched the match list once at render and never again, so a
+    match created a second later was invisible until a page reload. It now polls (2.5s), and every
+    timer it owns is stopped on Back, on joining, on watching, and on re-render.
+  - **The host card never noticed its own match starting.** It chose one action from the creation
+    response and stayed there, so a host whose seat was filled by an MCP agent — which auto-starts
+    the match — went on being offered "▶ Start match" for a match already running. It now polls its
+    own match and switches to "▶ Enter match" when the opponent arrives.
+  - New `GET /api/matches/:id` for single-match lookup, which the join-by-link card's own comment
+    used to note did not exist.
+  - Each row now says **who is playing** ("agent vs AI"), and the host card's "an agent plays here"
+    dropdown finally requests the `agent` seat kind rather than flattening it to `open` — so that
+    intent survives into the lobby listing, a watcher's view and the end-of-match report, instead of
+    every waiting seat looking alike.
 - **An MCP client that lost its context mid-match could not get back into the game, and could never
   learn how the match ended.** Observed in a real session: the agent compacted at ~10 minutes, and
   from then on its base stood frozen while the opponent played on, the match was nowhere to be found,

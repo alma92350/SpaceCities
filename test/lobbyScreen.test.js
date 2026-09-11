@@ -55,7 +55,7 @@ test("a watch-only host of a not-yet-full match still watches — it must WAIT f
    ============================================================ */
 
 test("Me + Open (agent): the ordinary human-hosted match — the host claims seat 0, both seats are joinable kinds", () => {
-  assert.deepEqual(hostSeatConfig("me", "agent"), { seatKinds: ["open", "open"], hostJoins: true });
+  assert.deepEqual(hostSeatConfig("me", "agent"), { seatKinds: ["open", "agent"], hostJoins: true });
 });
 
 test("Me + Built-in AI: seat 1 is an 'ai' kind, so tools/serve.js's seatsFilled sees a full match and auto-starts it", () => {
@@ -63,21 +63,23 @@ test("Me + Built-in AI: seat 1 is an 'ai' kind, so tools/serve.js's seatsFilled 
 });
 
 test("Open (agent) + Open (agent): hostJoins:false is the whole point — leaves BOTH seats genuinely open for two agents' own join_match", () => {
-  assert.deepEqual(hostSeatConfig("agent", "agent"), { seatKinds: ["open", "open"], hostJoins: false });
+  assert.deepEqual(hostSeatConfig("agent", "agent"), { seatKinds: ["agent", "agent"], hostJoins: false });
 });
 
 test("Open (agent) + Built-in AI: one agent against a named built-in AI, with the creator only ever spectating", () => {
-  assert.deepEqual(hostSeatConfig("agent", "ai"), { seatKinds: ["open", "ai"], hostJoins: false });
+  assert.deepEqual(hostSeatConfig("agent", "ai"), { seatKinds: ["agent", "ai"], hostJoins: false });
 });
 
-test("an agent seat is requested as kind 'open', never kind 'agent' — server/mcpLobbyTools.js's join_match only ever claims an 'open' seat", () => {
-  // The "agent" kind server/lobby.js's SEAT_KINDS also accepts would make the seat unjoinable
-  // (joinMatch rejects it with seat-not-open) AND make seatsFilled treat it as already filled,
-  // auto-starting the match before the agent ever arrived. Both dropdown values that mean "an
-  // agent plays here" must therefore map to "open".
-  for (const cfg of [hostSeatConfig("agent", "agent"), hostSeatConfig("me", "agent")]) {
-    assert.ok(!cfg.seatKinds.includes("agent"), `requested ${JSON.stringify(cfg.seatKinds)}`);
-  }
+test("a seat the host designated for an agent is requested as the 'agent' KIND, so the intent survives to the server", () => {
+  // This used to be forbidden: an "agent" kind made the seat unjoinable (joinMatch rejected it with
+  // seat-not-open) AND made seatsFilled treat it as already filled, auto-starting the match before
+  // any agent arrived, so both dropdown values meaning "an agent plays here" had to flatten to
+  // "open". With both of those fixed, flattening would only throw away the one fact that tells an
+  // agent seat apart from a seat waiting for a person.
+  assert.deepEqual(hostSeatConfig("me", "agent").seatKinds[1], "agent");
+  assert.deepEqual(hostSeatConfig("agent", "agent").seatKinds, ["agent", "agent"]);
+  // ...but a seat the host is PLAYING is an ordinary human seat, whatever seat 2 is.
+  assert.equal(hostSeatConfig("me", "ai").seatKinds[0], "open");
 });
 
 test("an unrecognised dropdown value falls back to the plain human-vs-human match rather than inventing a seating", () => {

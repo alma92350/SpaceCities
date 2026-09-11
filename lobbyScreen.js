@@ -131,6 +131,7 @@ async function joinLive(matchId, owner, token, statusEl) {
   }
   const firstState = await new Promise(resolve => { transport.onEvent(e => { if (e.type === "state") resolve(e.state); }); });
   sound.unlockAudio();   // a real user gesture (the Host/Join click) led here — safe to start audio now
+  stopLobbyPolling();    // the lobby is behind us now — nothing left for its timers to update
   game.localOwner = owner;
   lobbyScreenEl.classList.add("hidden");
   // T-036: remembered so a reload/crash mid-match can silently reconnect (main.js's own boot-time
@@ -179,6 +180,7 @@ async function spectateLive(matchId, statusEl) {
   const transport = await createWsSpectatorTransport(wsSpectateUrlFor(matchId));
   const firstState = await new Promise(resolve => { transport.onEvent(e => { if (e.type === "state") resolve(e.state); }); });
   sound.unlockAudio();   // a real user gesture (the Watch click) led here — safe to start audio now
+  stopLobbyPolling();
   game.localOwner = null;
   lobbyScreenEl.classList.add("hidden");
   bootState(firstState, { intro: false, transport });   // no objectives strip — a spectator has no checklist of their own
@@ -225,23 +227,60 @@ function planetOptionsInto(select) {
   }
 }
 
+// How often the lobby re-reads the server. Fast enough that a match an MCP client just created
+// shows up while a human is still looking at the screen, slow enough to be invisible: this is one
+// small JSON GET against a server that is, by construction, on the same machine or one hop away.
+const LOBBY_POLL_MS = 2500;
+// Every timer this screen owns, so leaving it (Back, a join, a watch, or a re-render) stops them.
+// Without this the screen leaked one interval per visit and a backgrounded tab polled forever.
+let lobbyPollTimer = null;
+let hostPollTimer = null;
+
+function stopLobbyPolling() {
+  if (lobbyPollTimer) clearInterval(lobbyPollTimer);
+  if (hostPollTimer) clearInterval(hostPollTimer);
+  lobbyPollTimer = null;
+  hostPollTimer = null;
+}
+
+/**
+ * Which seat kinds a player can actually claim — the browser's copy of server/lobby.js's own
+ * isJoinableKind, which cannot be imported here (that module is server-side and pulls in
+ * node:crypto). "agent" belongs in this list: it is a seat WAITING for someone, and the kind only
+ * says who is expected. Leaving it out is what made every match an MCP client created — which
+ * names its open seats "agent" — invisible in this list even while genuinely joinable.
+ * @param {string} kind @returns {boolean}
+ */
+export function isJoinableSeatKind(kind) {
+  return kind === "open" || kind === "agent";
+}
+
 /**
  * The host form's two seat dropdowns, reduced to the only two POST /api/matches fields that decide
  * who can actually play. Exported (and pure) so the seating rules are testable without a DOM.
  *
- * Both "an agent plays here" values map to seat kind "open", never to server/lobby.js's own "agent"
- * kind: joinMatch refuses a non-"open" seat (seat-not-open), which is exactly the call an MCP
- * agent's join_match makes, AND tools/serve.js's seatsFilled counts a non-"open" seat as already
- * filled — so an "agent" kind would auto-start the match before the agent ever connected. "open" is
- * the kind an agent can really claim; the distinction the dropdown draws is who holds seat 0, and
- * that is hostJoins, not a kind.
+ * An "an agent plays here" seat is now requested as server/lobby.js's own "agent" KIND, which used
+ * to be impossible: joinMatch refused any non-"open" seat, and tools/serve.js's seatsFilled counted
+ * one as already filled, so an "agent" kind would have auto-started the match before the agent ever
+ * arrived. Both are fixed — "agent" is a joinable kind waited on exactly like "open" — so the
+ * dropdown's own distinction can finally reach the server instead of being flattened into "open"
+ * and lost. Not cosmetic: it is what makes a seat report `controller: "agent"` in the lobby
+ * listing, in a watcher's view and in the end-of-match report, rather than every waiting seat
+ * looking alike.
+ *
+ * Two deliberate exceptions. Seat 0 is "open" whenever the host plays it — a human really is
+ * holding it, and hostJoins (not the kind) is what says so. And only an EXPLICIT "agent" value maps
+ * to the agent kind: an unrecognised one falls back to a plain human "open" seat rather than
+ * labelling a seat for an agent nobody asked for.
  *
  * @param {string} seat1 - "me" (host plays) or "agent" (host only watches)
  * @param {string} seat2 - "agent" (a second joiner) or "ai" (the built-in AI)
  * @returns {{seatKinds: string[], hostJoins: boolean}}
  */
 export function hostSeatConfig(seat1, seat2) {
-  return { seatKinds: ["open", seat2 === "ai" ? "ai" : "open"], hostJoins: seat1 !== "agent" };
+  const hostJoins = seat1 !== "agent";
+  const seat2Kind = seat2 === "ai" ? "ai" : seat2 === "agent" ? "agent" : "open";
+  return { seatKinds: [hostJoins ? "open" : "agent", seat2Kind], hostJoins };
 }
 
 /**
@@ -410,6 +449,10 @@ function renderHostCard(container) {
           hostBtn.disabled = false;
         });
       };
+      // Whoever fills these seats does so somewhere this page cannot hear — an MCP agent's
+      // join_match, or a stranger on the shared link. Without this the card kept saying "watch once
+      // they fill" forever, with no way to learn they already had.
+      if (!created.started) watchHostedMatch(created.matchId, status, hostBtn);
       return;
     }
     if (next === "enter") {
@@ -422,6 +465,10 @@ function renderHostCard(container) {
       return;
     }
     status.textContent = "Match created — share the link, or start now against the built-in AI.";
+    // Same reason as the watch branch above: a second player (human or MCP agent) filling the
+    // remaining seat AUTO-STARTS the match server-side, and this card was the last to know — it
+    // went on offering "▶ Start match" for a match that had been running for minutes.
+    if (!created.started) watchHostedMatch(created.matchId, status, hostBtn);
     // FR-4's "the host starts it" clause: POSTs /start (idempotent — a no-op if a second player's
     // own join already auto-started it first, FR-4's OTHER clause) before connecting, so an
     // unfilled seat is genuinely AI-filled (T-035, FR-3) by the time this seat's own client boots.
@@ -443,6 +490,36 @@ function renderHostCard(container) {
   card.appendChild(hostBtn);
 
   container.appendChild(card);
+}
+
+/**
+ * Polls a match this page just created until it actually starts, then says so — and, for a host
+ * who holds a seat, turns the button into the one action that now makes sense. Stops as soon as
+ * the match has started (or vanished): everything after that is the live match's own business.
+ */
+function watchHostedMatch(matchId, status, hostBtn) {
+  if (hostPollTimer) clearInterval(hostPollTimer);
+  const seated = hostBtn.textContent !== "👁 Watch";
+  hostPollTimer = setInterval(async () => {
+    const res = await apiGet(`/api/matches/${encodeURIComponent(matchId)}`);
+    if (!res.ok) { clearInterval(hostPollTimer); hostPollTimer = null; return; }
+    const m = res.json;
+    if (m.status === "open") {
+      // Not started, but a seat may still have been claimed since the last poll — worth saying,
+      // because for a 2-seat match it means the start is imminent and not something to wait on.
+      const waiting = (m.seats || []).filter(s => isJoinableSeatKind(s.kind) && !s.taken).length;
+      if (waiting === 0) status.textContent = "Every seat is claimed — starting…";
+      return;
+    }
+    clearInterval(hostPollTimer);
+    hostPollTimer = null;
+    // A host who never took a seat can only ever watch; the button is already wired for that, so
+    // only the wording needs to catch up.
+    status.textContent = seated
+      ? "Your opponent has joined — the match is live."
+      : `The match is live${m.seats ? ` (${seatSummary(m)})` : ""} — you can watch it now.`;
+    if (seated) hostBtn.textContent = "▶ Enter match";
+  }, LOBBY_POLL_MS);
 }
 
 async function joinMatchById(matchId, statusBtn) {
@@ -480,33 +557,93 @@ function renderOpenMatchesCard(container) {
   card.appendChild(list);
   container.appendChild(card);
 
-  apiGet("/api/matches").then(res => {
-    list.innerHTML = "";
-    const hasOpenSeat = m => m.seats.some(s => s.kind === "open" && !s.taken);
-    const joinable = (res.json ? res.json.matches : []).filter(hasOpenSeat);
-    if (joinable.length === 0) {
+  // include_started=1: a match an MCP agent created usually STARTS the moment it is created (it
+  // claims its own seat in the same call, or its opponent is a built-in AI that needs no joiner),
+  // so it is never OPEN for even one poll. Listing only open matches meant the browser could not
+  // see — let alone watch — the matches its own agents were playing. They are shown here as
+  // watchable rather than joinable, which is what they actually are.
+  const refresh = () => apiGet("/api/matches?include_started=1").then(res => {
+    const all = (res.json ? res.json.matches : []) || [];
+    const joinable = all.filter(m => m.status === "open" && m.seats.some(s => isJoinableSeatKind(s.kind) && !s.taken));
+    const watchable = all.filter(m => m.status === "started" && m.spectatorsEnabled !== false && !m.result);
+    // Every row is built BEFORE the list is cleared, so the clear and the re-fill happen in one
+    // synchronous turn — a poll can never leave the player looking at an empty panel, or blank a
+    // row out from under a cursor that is mid-click.
+    const next = [];
+    if (joinable.length === 0 && watchable.length === 0) {
       const p = document.createElement("p");
       p.className = "setup-hint";
       p.textContent = "No open matches right now — host one instead.";
-      list.appendChild(p);
-      return;
+      next.push(p);
     }
-    for (const m of joinable) {
-      const row = document.createElement("div");
-      row.className = "lobby-match-row";
-      const label = document.createElement("span");
-      const planet = PLANETS.find(p => p.id === m.planetId);
-      label.textContent = planet ? planet.name : m.planetId;
-      row.appendChild(label);
-      const joinBtn = document.createElement("button");
-      joinBtn.className = "btn";
-      joinBtn.type = "button";
-      joinBtn.textContent = "Join";
-      joinBtn.addEventListener("click", () => joinMatchById(m.id, joinBtn));
-      row.appendChild(joinBtn);
-      list.appendChild(row);
+    for (const m of joinable) next.push(matchRow(m, "Join", btn => joinMatchById(m.id, btn)));
+    for (const m of watchable) {
+      next.push(matchRow(m, "👁 Watch", async btn => {
+        btn.disabled = true;
+        const original = btn.textContent;
+        try {
+          await spectateLive(m.id, btn);
+        } catch {
+          btn.textContent = original;
+          btn.disabled = false;
+        }
+      }));
     }
+    list.innerHTML = "";
+    for (const node of next) list.appendChild(node);
   });
+
+  refresh();
+  // POLLED, because matches now appear from somewhere this page never hears about: an MCP client
+  // can create, fill and start one between two renders, and a one-shot fetch at render time left
+  // the browser showing a lobby that had been stale since the moment it loaded. Cleared when the
+  // screen is hidden (see hideLobbyScreen) so a backgrounded tab is not polling forever.
+  lobbyPollTimer = setInterval(refresh, LOBBY_POLL_MS);
+}
+
+// One row of the match list: the world it is on, who is in it, and the single action it offers.
+function matchRow(m, actionLabel, onAction) {
+  const row = document.createElement("div");
+  row.className = "lobby-match-row";
+  const label = document.createElement("span");
+  const planet = PLANETS.find(p => p.id === m.planetId);
+  label.textContent = planet ? planet.name : m.planetId;
+  row.appendChild(label);
+  // WHO is in this match — an agent-vs-AI match and a human-vs-human one are worth telling apart
+  // before clicking, and until now the row said only which world it was on.
+  const who = seatSummary(m);
+  if (who) {
+    const note = document.createElement("span");
+    note.className = "setup-hint";
+    note.textContent = who;
+    row.appendChild(note);
+  }
+  const btn = document.createElement("button");
+  btn.className = "btn";
+  btn.type = "button";
+  btn.textContent = actionLabel;
+  btn.addEventListener("click", () => onAction(btn));
+  row.appendChild(btn);
+  return row;
+}
+
+/**
+ * A short "who is playing this" line from a match's own public seat list — e.g. "agent vs AI".
+ * Exported for its own test: it is the one piece of the row a reader has to be able to trust,
+ * since it is what a player picks a match by.
+ * @param {{seats?: {controller?: string, kind?: string, taken?: boolean}[]}} m
+ * @returns {string}
+ */
+export function seatSummary(m) {
+  if (!Array.isArray(m.seats) || !m.seats.length) return "";
+  const WORDS = { ai: "AI", agent: "agent", human: "human" };
+  return m.seats
+    .map(s => {
+      const controller = s.controller ?? (s.kind === "ai" ? "ai" : s.kind === "agent" ? "agent" : "human");
+      if (controller === "ai") return WORDS.ai;
+      return s.taken ? WORDS[controller] : "open";
+    })
+    .join(" vs ");
 }
 
 function renderJoinByLink(joinMatchId) {
@@ -575,6 +712,9 @@ function renderJoinByLink(joinMatchId) {
  */
 export function renderLobbyScreen(opts = {}) {
   if (!lobbyScreenEl) return;   // import-safe under Node (CONTRIBUTING: follow the dom.js idiom)
+  // A re-render replaces every node the old timers were writing into, so they must stop first —
+  // otherwise each visit to this screen leaves another interval updating detached DOM.
+  stopLobbyPolling();
   if (mapSelectEl) mapSelectEl.classList.add("hidden");
   lobbyScreenEl.classList.remove("hidden");
   lobbyScreenEl.innerHTML = "";
@@ -587,7 +727,7 @@ export function renderLobbyScreen(opts = {}) {
   back.className = "btn ghost lobby-back";
   back.type = "button";
   back.textContent = "← Back";
-  back.addEventListener("click", () => { lobbyScreenEl.classList.add("hidden"); renderMapSelect(); });
+  back.addEventListener("click", () => { stopLobbyPolling(); lobbyScreenEl.classList.add("hidden"); renderMapSelect(); });
   lobbyScreenEl.appendChild(back);
 
   if (opts.joinMatchId) { renderJoinByLink(opts.joinMatchId); return; }

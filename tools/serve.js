@@ -541,11 +541,43 @@ export async function createAppServer() {
     });
   }
 
-  function handleListMatches(req, res) {
+  // The browser lobby's own view of what exists. `?include_started=1` is the HTTP twin of the
+  // list_matches tool's own include_started (server/mcpLobbyTools.js): without it this endpoint
+  // only ever listed matches still OPEN to join, which was fine while every match was created from
+  // this same browser — and became a real blind spot the moment an MCP client could create one,
+  // because an agent's match typically starts the instant it is created (an agent seat claimed in
+  // the same call, or an AI opponent needing no joiner at all). Such a match was never OPEN for a
+  // single poll, so the browser could not see, watch, or even know about the matches its own
+  // agents were playing.
+  function handleListMatches(req, res, url) {
+    const includeStarted = url?.searchParams.get("include_started") === "1";
+    const source = includeStarted
+      ? [...lobby.matches.values()].filter(m => (m.config.clockPolicy ?? "realtime") === "realtime")
+      : lobby.listOpenMatches();
+    const matches = source.map(m => {
+      const result = resultFor(m.id);
+      return { ...publicMatch(m), ...(result ? { result } : {}) };
+    });
     // T-056: agent_apm_cap is a fixed server policy (net/agentApm.js), not per-match data — reported
     // once here, the same as server/mcpLobbyTools.js's own list_matches tool, so a human deciding
     // whether to join a match an agent might occupy can see the published rule up front.
-    respondJson(res, 200, { matches: lobby.listOpenMatches().map(publicMatch), agent_apm_cap: AGENT_APM });
+    respondJson(res, 200, { matches, agent_apm_cap: AGENT_APM });
+  }
+
+  // One match by id — the single-match lookup lobbyScreen.js's own join-by-link card used to say
+  // did not exist ("there's no single-match lookup endpoint to check it against before trying"), so
+  // it had to offer Join and Watch blind and explain the failure after the click. Also what lets a
+  // host card, and a shared link, notice that a seat has been filled or that the match has started
+  // without polling the whole list.
+  function handleGetMatch(req, res, matchId) {
+    const match = lobby.getMatch(matchId);
+    const result = resultFor(matchId);
+    if (!match && !result) { respondJson(res, 404, { error: "no-such-match" }); return; }
+    respondJson(res, 200, {
+      ...(match ? publicMatch(match) : { id: matchId, status: "finished" }),
+      ...(result ? { result } : {}),
+      live: liveMatches.has(matchId),
+    });
   }
 
   // T-059: every match this boot's own workers have seen finish, oldest first — a match that
@@ -607,8 +639,12 @@ export async function createAppServer() {
     const url = new URL(req.url, "http://localhost");
     if (url.pathname === "/mcp") { handleMcp(req, res); return; }
     if (url.pathname === "/api/matches" && req.method === "POST") { handleCreateMatch(req, res); return; }
-    if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res); return; }
+    if (url.pathname === "/api/matches" && req.method === "GET") { handleListMatches(req, res, url); return; }
     if (url.pathname === "/api/results" && req.method === "GET") { handleListResults(req, res); return; }
+    // Registered AFTER the two exact "/api/matches" routes above and BEFORE the /join and /start
+    // ones, so its own single-segment pattern can never swallow either.
+    const getMatch = req.method === "GET" && /^\/api\/matches\/([^/]+)$/.exec(url.pathname);
+    if (getMatch) { handleGetMatch(req, res, decodeURIComponent(getMatch[1])); return; }
     const joinMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/join$/.exec(url.pathname);
     if (joinMatch) { handleJoinMatch(req, res, decodeURIComponent(joinMatch[1])); return; }
     const startMatch = req.method === "POST" && /^\/api\/matches\/([^/]+)\/start$/.exec(url.pathname);

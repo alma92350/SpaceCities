@@ -633,6 +633,12 @@ async function untilLive(port, seat_handle) {
   throw new Error("the match never reported a projection");
 }
 
+// The GET twin of postJson above — several of the parity tests below read plain lobby JSON.
+async function getJson(port, path) {
+  const res = await get(port, path);
+  return { status: res.status, json: res.body ? JSON.parse(res.body) : null };
+}
+
 async function mcpResult(port, name, args) {
   const { json } = await callMcpTool(port, name, args);
   assert.equal(json.error, undefined, `MCP ${name} protocol error: ${JSON.stringify(json.error)}`);
@@ -897,6 +903,98 @@ test("an EXPLICIT set_seat_controller('ai') is not undone by the agent's own obs
 
     const back = await mcpResult(port, "set_seat_controller", { seat_handle, controller: "self" });
     assert.equal(back.structuredContent.ai_controlled, false);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+/* ============================================================
+   BROWSER / MCP PARITY. The lobby is one shared model, but the two front doors onto it did not
+   agree about what was in it: GET /api/matches only ever listed matches still OPEN to join, and a
+   match an MCP client creates typically starts the instant it is created (it claims its own seat in
+   the same call, or its opponent is an AI needing no joiner). Such a match was never OPEN for even
+   one poll, so the browser could not see it, watch it, or know it existed.
+   ============================================================ */
+
+test("GET /api/matches?include_started=1 shows a running MCP-created match that the default listing hides", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0,
+    });
+    const match_id = created.structuredContent.match_id;
+    assert.equal(created.structuredContent.started, true, "this shape of match starts on creation");
+
+    const openOnly = await getJson(port, "/api/matches");
+    assert.equal(openOnly.json.matches.some(m => m.id === match_id), false,
+      "the default listing is 'what can I join', which a running match is not");
+
+    const all = await getJson(port, "/api/matches?include_started=1");
+    const listed = all.json.matches.find(m => m.id === match_id);
+    assert.ok(listed, "the browser must be able to see the matches its own agents are playing");
+    assert.equal(listed.status, "started");
+    assert.deepEqual(listed.seats.map(s => s.controller), ["agent", "ai"]);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("GET /api/matches/:id answers for one match, including after it has finished", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0, client_id: "agent-alpha",
+    });
+    const { match_id, seat_handle } = created.structuredContent;
+    await untilLive(port, seat_handle);
+
+    const live = await getJson(port, `/api/matches/${match_id}`);
+    assert.equal(live.status, 200);
+    assert.equal(live.json.status, "started");
+    assert.equal(live.json.live, true);
+    assert.equal(live.json.result, undefined);
+
+    await mcpResult(port, "surrender", { seat_handle });
+    let finished = null;
+    for (let i = 0; i < 60; i++) {
+      finished = await getJson(port, `/api/matches/${match_id}`);
+      if (finished.json.result) break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.ok(finished.json.result, "a finished match's outcome is readable from the browser too");
+    assert.equal(finished.json.result.winner, "ai");
+
+    assert.equal((await getJson(port, "/api/matches/no-such-id")).status, 404);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("a match hosted from the browser is joinable by an MCP agent, and one created over MCP is joinable from the browser", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    // Browser hosts, agent joins — the direction that already worked, pinned so it stays working.
+    const hosted = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "open"] });
+    const agentJoin = await mcpResult(port, "join_match", { match_id: hosted.json.matchId, client_id: "agent-alpha" });
+    assert.equal(agentJoin.isError, undefined, JSON.stringify(agentJoin));
+    assert.equal(agentJoin.structuredContent.started, true, "the agent's join filled the last seat");
+
+    // Agent creates with a seat left open, browser joins it over plain HTTP — the direction that
+    // did not work: the open seat is an "agent" KIND, which the browser's own joinable rule (and,
+    // before this, the lobby's) refused.
+    const made = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "human" }], join_as: 0, client_id: "agent-beta",
+    });
+    const browserJoin = await postJson(port, `/api/matches/${made.structuredContent.match_id}/join`, {});
+    assert.equal(browserJoin.status, 200, JSON.stringify(browserJoin.json));
+    assert.equal(browserJoin.json.owner, "ai", "seat 1 is the one that was left for a person");
+    assert.equal(browserJoin.json.started, true);
   } finally {
     app.close();
     await new Promise(resolve => app.server.close(resolve));
