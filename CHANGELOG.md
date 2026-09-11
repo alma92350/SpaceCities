@@ -8,6 +8,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
+- **`docs/agent-guide.md` stated the production cost rule backwards.** It claimed ore is debited when
+  a job *starts*, so an unchanged `get_situation` was not evidence the order was dropped. The
+  opposite is true and verified against the engine: `engine/production.js` calls `payCost` inside
+  `queueProduction`, and `engine/supply.js` counts every queued job — **cost and supply are both
+  charged at queue time**. The old wording told agents to ignore the very signal that confirms an
+  order landed, and to treat an honest `cannot-afford` as a phantom bug worth retrying.
+
 - **The browser lobby and the MCP interface disagreed about which matches existed.** They share one
   lobby model, but the two front doors onto it did not show the same thing, so a human could not see
   or join the matches their own agents were playing:

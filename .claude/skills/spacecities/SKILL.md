@@ -1,6 +1,6 @@
 ---
 name: spacecities
-description: Play a SpaceCities match as an agent over the MCP interface — join a seat, observe the fog-limited world, and issue real commands. Use when asked to play, test, or drive the game as an AI player, to set up an agent-vs-agent or agent-vs-human match, or to exercise the MCP tool surface (join_match, get_situation, issue_command, wait_for_event) end to end.
+description: Exercise and verify the SpaceCities MCP tool surface end to end — stand up a server, set up an agent-vs-agent or agent-vs-human match, drive a seat, and check the protocol behaves. Use when asked to TEST, verify, debug or demo the MCP interface, or to set a match up for someone else to play. For actually playing a match to win, use the spacecities-player skill instead.
 ---
 
 # Playing SpaceCities over MCP
@@ -9,7 +9,8 @@ The server exposes a live RTS match to an agent as **17 MCP tools + 4 resources*
 sees a fog-respecting summary and acts through the same server-side validation a human's
 click goes through — there is no privileged access and no direct `engine/` import.
 
-Player handbook (read this first): `docs/mcp-player-handbook.md`. Full protocol reference: `docs/agent-guide.md`. Worked client: `tools/referenceAgent.js` — run it
+Playing to win is a different job: use the **spacecities-player** skill for strategy, build orders
+and the recorded failure modes. Player handbook (protocol, one page): `docs/mcp-player-handbook.md`. Full protocol reference: `docs/agent-guide.md`. Worked client: `tools/referenceAgent.js` — run it
 with no arguments for its usage banner.
 
 ## Start a server

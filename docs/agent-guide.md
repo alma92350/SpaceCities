@@ -205,10 +205,13 @@ Common command shapes (`ids` is an array of 1–400 unit/building ids you own):
 ```
 
 A successful `queueProduction` returns a receipt — `{building, unit, queueIndex, queueLength,
-etaSeconds}` — so you never have to guess whether it landed. (Ore is debited when the job *starts*,
-not when it's queued, so an immediate `get_situation` showing unchanged ore is not evidence the
-order was dropped. Read the receipt, or the building's own `queue` in `list_entities`, instead of
-re-sending.) `setRally` decides where a producer's new units walk to — set it before a fight rather
+etaSeconds}` — so you never have to guess whether it landed. **Cost and supply are both charged the
+moment a job is QUEUED**, not when it starts building (`engine/production.js` calls `payCost` inside
+`queueProduction`, and `engine/supply.js` counts every queued job, not just the one in progress). So
+an immediate `get_situation` really does show the ore gone — that drop is confirmation the order
+landed, not a reason to re-send. It also means a `cannot-afford` rejection at what you thought was
+ample ore is usually honest: something you queued a moment ago already spent it. Re-read
+`get_situation`, and the producer's own `queue` in `list_entities`, before re-issuing. `setRally` decides where a producer's new units walk to — set it before a fight rather
 than moving every spawn by hand.
 
 Wrap several into `{ t: "batch", c: [...] }` (max 16) to apply them together at the same tick —
