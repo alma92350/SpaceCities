@@ -18,13 +18,18 @@
 import { stepToward, keepEscortStation, keepFormationStation, keepFollowingLeader, orderedSpeed } from "./movement.js";
 import { UNITS, BUILDINGS, upgradeMult, rankMults } from "./entities.js";
 import { getEntity, removeEntity } from "./state.js";
-import { queryNeighbors } from "./grid.js";
+import { queryNeighbors, REJECT_SLACK } from "./grid.js";
 import { sampleTerrain, sideMod, TERRAIN } from "./map.js";
 import { UPHILL_FRAC } from "./fog.js";
 import { hashStr } from "./rng.js";
 import { detonateIfAttacked } from "./bomb.js";
 import { depositWreckage } from "./wreckage.js";
 import { controllerFor } from "./aiCommon.js";
+
+// This module's broad-phase result buffers (see engine/grid.js) — one per call
+// site so no two can alias each other's candidates. acquireTarget in particular
+// keeps its list live across a call into spreadEnemy.
+const _threatBuf = [], _splashBuf = [], _acquireBuf = [];
 
 export function updateCombat(state, unit, dt) {
   const def = UNITS[unit.type];
@@ -165,11 +170,14 @@ function maybeKite(state, unit, def, dt) {
 }
 
 function nearestEnemyUnitWithin(state, unit, radius) {
-  const cands = state.unitGrid ? queryNeighbors(state.unitGrid, unit.x, unit.y, radius) : state.units.values();
+  const cands = state.unitGrid ? queryNeighbors(state.unitGrid, unit.x, unit.y, radius, undefined, _threatBuf) : state.units.values();
   let best = null, bestD = Infinity;
   for (const e of cands) {
     if (e.owner === unit.owner || e.hp <= 0 || UNITS[e.type].role !== "combat") continue;
-    const d = Math.hypot(e.x - unit.x, e.y - unit.y);
+    const dx = e.x - unit.x, dy = e.y - unit.y;
+    // Squared-distance pre-reject — see REJECT_SLACK in engine/grid.js.
+    if (dx * dx + dy * dy > radius * radius * REJECT_SLACK) continue;
+    const d = Math.hypot(dx, dy);
     if (d <= radius && d < bestD) { bestD = d; best = e; }
   }
   return best;
@@ -259,12 +267,15 @@ function performAttack(state, attacker, def, target) {
 // same depositWreckage/removeEntity/entityKilled path as an ordinary kill.
 function applySplash(state, attacker, target, dmg, splash) {
   const cands = state.unitGrid
-    ? queryNeighbors(state.unitGrid, target.x, target.y, splash.radius)
+    ? queryNeighbors(state.unitGrid, target.x, target.y, splash.radius, undefined, _splashBuf)
     : state.units.values();
   const hit = [];
   for (const e of cands) {
     if (e.id === target.id || e.owner === attacker.owner || e.hp <= 0) continue;   // never the primary target, never friendly, never an already-dead grid straggler
-    const d = Math.hypot(e.x - target.x, e.y - target.y);
+    const dx = e.x - target.x, dy = e.y - target.y;
+    // Squared-distance pre-reject — see REJECT_SLACK in engine/grid.js.
+    if (dx * dx + dy * dy > splash.radius * splash.radius * REJECT_SLACK) continue;
+    const d = Math.hypot(dx, dy);
     if (d > splash.radius) continue;   // queryNeighbors is a padded superset — the exact-distance check is still ours to make
     e.hp -= dmg * splash.frac * (1 - d / splash.radius);
     e.lastHitAt = state.time;   // splash counts as a landed hit too — see performAttack's own stamp above
@@ -428,7 +439,14 @@ function spreadEnemy(state, entities, unit, def, aggro) {
   const local = [];
   for (const e of entities) {
     if (e.owner === unit.owner || e.hp <= 0) continue;
-    const d = Math.hypot(e.x - unit.x, e.y - unit.y);
+    const dx = e.x - unit.x, dy = e.y - unit.y;
+    // Squared-distance pre-reject — see REJECT_SLACK in engine/grid.js.
+    // Conservative against the cap below because highGroundCap only ever
+    // SHRINKS the reach it is given (to UPHILL_FRAC of it), never widens it —
+    // so anything past `aggro` is past every cap. This also skips the
+    // per-candidate sampleTerrain inside highGroundCap for the rejects.
+    if (dx * dx + dy * dy > aggro * aggro * REJECT_SLACK) continue;
+    const d = Math.hypot(dx, dy);
     if (d > highGroundCap(terrain, acquirerHigh, e, aggro)) continue;
     if (d < nearestD) { nearestD = d; nearest = e; }
     if (d <= highGroundCap(terrain, acquirerHigh, e, band)) local.push({ e, d });
@@ -463,8 +481,11 @@ function acquireTarget(state, unit, def) {
   // uphill concealment's acquisition half internally (highGroundCap above) — the
   // mesa's extra reach cuts both ways: it sees farther, but a lowland unit still
   // can't shoot back at it past UPHILL_FRAC of that same reach.
+  // _acquireBuf, not the shared default: this array is handed on to spreadEnemy
+  // to iterate, so it stays live across a call into other code. Owning the
+  // buffer is what makes that safe no matter what spreadEnemy grows into.
   const unitCandidates = state.unitGrid
-    ? queryNeighbors(state.unitGrid, unit.x, unit.y, aggro)
+    ? queryNeighbors(state.unitGrid, unit.x, unit.y, aggro, undefined, _acquireBuf)
     : state.units.values();
   const u = spreadEnemy(state, unitCandidates, unit, def, aggro);
   const b = nearestEnemy(state, state.buildings.values(), unit, aggro);

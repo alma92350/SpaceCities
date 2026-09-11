@@ -73,7 +73,45 @@ All notable changes to this project are documented here. The format follows
     `nodeDepleted` and `unitIdle` — announce the quietest way a match rots: a seam running dry and
     the gatherer that then had nowhere to go.
 
+- **A perf guard that can actually fail.** The existing wall-clock alarms are ~12x looser than
+  the work they measure, so a 10x regression shipped green — which is how a broad phase scanning
+  13x more area than it needed sat at half the sim's CPU unnoticed. Loosening or tightening those
+  budgets isn't the fix; they are deliberately slack because wall clock on a shared runner is
+  noisy. So the new guard doesn't measure time: it counts the candidates the broad phase visits,
+  which is deterministic, identical on every machine, cannot flake, and moves the instant a query
+  box grows. It asserts a ratio against a committed baseline, in both directions — a big drop
+  fails too, because a stale baseline is a guard that has quietly gone slack again.
+- **`test/grid-superset.test.js` — the broad phase's superset invariant, made mechanical.** A
+  missed candidate is a missed interaction, and nothing in the suite could see one: determinism
+  compares a seed against itself, so both runs miss the same unit identically. Four guards now
+  cover it — the box arithmetic against a brute-force scan, the movement-step bound re-derived
+  from the game's own unit and modifier tables, the full-tick displacement measured on an
+  adversarial fixture, and a static check that every engine call site owns its result buffer.
+
 ### Changed
+
+- **The simulation is ~20% faster at 1000 units, with byte-identical results.** Two changes to
+  the broad phase, both verified against pristine `main` by comparing full `entitySnapshot`
+  fingerprints over four workloads — all four identical, so no replay or balance outcome moves.
+  - The grid's query box was padded by a `-1`/`+1` ring of cells. That ring exists to cover how
+    far a unit can move between the grid being built at the top of `tick()` and a query reading
+    it, but at `CELL = 96` it applied a 96px pad to every query in the game. How stale a bucket
+    position can be depends on WHEN in the tick you ask, so the pad is now two named constants:
+    queries inside the movement pass (`PAD_MOVE_PHASE`, 32px) can only be one movement step
+    stale, which `stepToward` caps at 7.0px for the fastest hull with the largest multipliers in
+    the game; everything after the separation pass keeps the full 96px (`PAD_FULL_TICK`).
+  - Every hot candidate loop now rejects on squared distance before paying for a `Math.hypot`,
+    which was the single largest cost in the sim. Survivors still take the original exact test,
+    and the cheap test is widened by `REJECT_SLACK` (1e-4, twelve orders of magnitude above any
+    float disagreement between the two) so it provably cannot discard a pair the exact test
+    would have kept.
+- **`queryNeighbors` takes a caller-owned result buffer.** It used to return one shared
+  module-level array, safe only by a convention six call sites had to keep. `acquireTarget`
+  already bent it — it hands its candidate list on to `spreadEnemy` to iterate — so any
+  neighbour lookup added under that loop would have overwritten the array mid-iteration, and the
+  symptom would have been silently wrong targeting that no determinism test could see. Each call
+  site now owns its buffer, for the same zero garbage, and a static guard fails the build if a
+  new one forgets.
 
 - **A production or build command now reports whether it actually landed, and why not.**
   `queueProduction` returned an empty success even when the engine had refused, and since ore is
