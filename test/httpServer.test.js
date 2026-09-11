@@ -755,6 +755,59 @@ test("an MCP client hands its live seat to the AI and takes it back, through the
   }
 });
 
+test("a shared link into a match whose remaining seat is an 'agent' KIND is joinable — the browser's own default host shape", async () => {
+  // THE REGRESSION THIS PINS, caught by the multiplayer browser smoke test and by nothing in this
+  // suite: once the host card started requesting seatKinds ["open","agent"] (so a seat meant for an
+  // agent says so), the join endpoint's own auto-pick still required kind === "open" and answered
+  // 409 no-open-seat. Every match hosted from the browser's DEFAULT dropdowns then refused its own
+  // shareable link. The three other auto-pick sites had been widened; this one was missed, because
+  // every test here happened to leave an "open"-kind seat for the joiner to find.
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const hosted = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "agent"] });
+    assert.equal(hosted.status, 201);
+
+    // No seatIndex — exactly what lobbyScreen.js's own "Join match" button sends.
+    const joined = await postJson(port, `/api/matches/${hosted.json.matchId}/join`, {});
+    assert.equal(joined.status, 200, `a shared link must be joinable, got ${joined.status} ${JSON.stringify(joined.json)}`);
+    assert.equal(joined.json.seatIndex, 1);
+    assert.equal(joined.json.started, true, "filling the last seat starts the match, as it always has");
+
+    // And a genuinely full match still says so, rather than this widening making 409 unreachable.
+    const full = await postJson(port, `/api/matches/${hosted.json.matchId}/join`, {});
+    assert.equal(full.status, 409);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("every auto-pick that finds 'the first free seat' agrees about which kinds are free", async () => {
+  // The real defect above was one of four copies of the same rule drifting. This pins the rule
+  // itself across the surfaces that implement it independently, so a future kind cannot be added to
+  // one and missed in another.
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    for (const seatKinds of [["open", "open"], ["open", "agent"], ["agent", "agent"]]) {
+      const hosted = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds, hostJoins: false });
+      const matchId = hosted.json.matchId;
+      // HTTP auto-pick (the browser's Join button) takes seat 0...
+      const viaHttp = await postJson(port, `/api/matches/${matchId}/join`, {});
+      assert.equal(viaHttp.status, 200, `HTTP join refused ${JSON.stringify(seatKinds)}: ${JSON.stringify(viaHttp.json)}`);
+      assert.equal(viaHttp.json.seatIndex, 0);
+      // ...and the MCP auto-pick takes what is left, on the very same match.
+      const viaMcp = await mcpResult(port, "join_match", { match_id: matchId });
+      assert.equal(viaMcp.isError, undefined, `MCP join refused ${JSON.stringify(seatKinds)}: ${JSON.stringify(viaMcp)}`);
+      assert.equal(viaMcp.structuredContent.seat_index, 1);
+    }
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
 /* ============================================================
    THE COMPACTION CASE, end to end through the real server. Observed in a real Sonnet session: the
    agent compacted its context ~10 minutes in, lost its seat_handle, and from then on could not
@@ -995,7 +1048,9 @@ test("a match hosted from the browser is joinable by an MCP agent, and one creat
 
     // Agent creates with a seat left open, browser joins it over plain HTTP — the direction that
     // did not work: the open seat is an "agent" KIND, which the browser's own joinable rule (and,
-    // before this, the lobby's) refused.
+    // before this, the lobby's) refused. NOTE this case leaves a "human" seat, so it does NOT
+    // exercise the auto-pick against an "agent"-kind seat — that gap is what the next test covers,
+    // and what shipped broken.
     const made = await mcpResult(port, "create_match", {
       seats: [{ controller: "agent" }, { controller: "human" }], join_as: 0, client_id: "agent-beta",
     });

@@ -32,7 +32,10 @@ All notable changes to this project are documented here. The format follows
   - Each row now says **who is playing** ("agent vs AI"), and the host card's "an agent plays here"
     dropdown finally requests the `agent` seat kind rather than flattening it to `open` — so that
     intent survives into the lobby listing, a watcher's view and the end-of-match report, instead of
-    every waiting seat looking alike.
+    every waiting seat looking alike. The join endpoint's own auto-pick was widened to match: it
+    still required kind `"open"`, so once the host card started designating agent seats, every match
+    hosted from the browser's DEFAULT dropdowns answered its own shareable link with 409
+    `no-open-seat`. Caught by the multiplayer browser smoke test, which `npm test` does not run.
   - The lobby's polls are torn down on leaving the screen (and `unref`'d under Node), and
     `stopLobbyPolling` is exported so a caller that navigates away by some other route can stop
     them too. A leaked interval went on firing into whatever global `fetch` was installed at the

@@ -596,7 +596,11 @@ export async function createAppServer() {
     if (seatIndex === undefined) {
       // No seat named: pick the first still-open, still-unclaimed one — the common case, a
       // stranger who just followed a shareable link and doesn't know or care about seat indices.
-      seatIndex = match.seats.findIndex(s => s.kind === "open" && !s.owner);
+      // isJoinableKind, not kind === "open": an "agent" seat is equally claimable (server/lobby.js),
+      // and a host card that designates a seat for an agent is exactly the match a human is most
+      // likely to be following a link into. Hardcoding "open" here made every such match refuse
+      // its own shared link with 409 no-open-seat.
+      seatIndex = match.seats.findIndex(s => isJoinableKind(s.kind) && !s.owner);
       if (seatIndex === -1) { respondJson(res, 409, { error: "no-open-seat" }); return; }
     }
     const joined = lobby.joinMatch(matchId, seatIndex);

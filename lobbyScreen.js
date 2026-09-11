@@ -487,7 +487,7 @@ function renderHostCard(container) {
     // Same reason as the watch branch above: a second player (human or MCP agent) filling the
     // remaining seat AUTO-STARTS the match server-side, and this card was the last to know — it
     // went on offering "▶ Start match" for a match that had been running for minutes.
-    if (!created.started) watchHostedMatch(created.matchId, status, hostBtn);
+    if (!created.started) watchHostedMatch(created.matchId, status, hostBtn, created.owner, created.token);
     // FR-4's "the host starts it" clause: POSTs /start (idempotent — a no-op if a second player's
     // own join already auto-started it first, FR-4's OTHER clause) before connecting, so an
     // unfilled seat is genuinely AI-filled (T-035, FR-3) by the time this seat's own client boots.
@@ -516,7 +516,7 @@ function renderHostCard(container) {
  * who holds a seat, turns the button into the one action that now makes sense. Stops as soon as
  * the match has started (or vanished): everything after that is the live match's own business.
  */
-function watchHostedMatch(matchId, status, hostBtn) {
+function watchHostedMatch(matchId, status, hostBtn, hostOwner = null, hostToken = null) {
   if (hostPollTimer) clearInterval(hostPollTimer);
   const seated = hostBtn.textContent !== "👁 Watch";
   hostPollTimer = startPoll(async () => {
@@ -537,7 +537,15 @@ function watchHostedMatch(matchId, status, hostBtn) {
     status.textContent = seated
       ? "Your opponent has joined — the match is live."
       : `The match is live${m.seats ? ` (${seatSummary(m)})` : ""} — you can watch it now.`;
-    if (seated) hostBtn.textContent = "▶ Enter match";
+    if (!seated) return;
+    // Relabel AND rewire: the button's handler still POSTs /start first, which is harmless
+    // (handleStartMatch is idempotent) but is no longer what the button says it does. A button
+    // whose label and behaviour disagree is how the next reader gets misled.
+    hostBtn.textContent = "▶ Enter match";
+    hostBtn.onclick = () => {
+      hostBtn.disabled = true;
+      joinLive(matchId, hostOwner, hostToken, status).catch(() => { hostBtn.disabled = false; });
+    };
   });
 }
 

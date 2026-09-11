@@ -148,9 +148,12 @@ async function main() {
       joinerIn ? "" : (await joiner.evaluate(() => document.querySelector(".setup-hint")?.textContent || "no status")));
 
     /* ---------- the host enters the match it created ---------- */
-    // /start is idempotent: the joiner filling the last seat already auto-started it (FR-4), so
-    // this is the host taking its own seat rather than starting anything.
-    await host.click('button:text-is("▶ Start match")');
+    // The joiner filling the last seat already auto-started it (FR-4), so this is the host taking
+    // its own seat rather than starting anything — which is now what the button SAYS: the host card
+    // polls its own match and relabels itself "▶ Enter match" once it is live. Either label is
+    // accepted because which one is showing depends on whether a poll has landed yet, and the step
+    // being tested (the host reaching its own match) is the same through both.
+    await host.click('button:text-is("▶ Enter match"), button:text-is("▶ Start match")');
     await host.waitForTimeout(4000);
     check("the host lands in the same live match", await canvasLive(host));
 
