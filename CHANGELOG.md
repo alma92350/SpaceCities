@@ -6,7 +6,60 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Nine MCP capabilities drawn from two recorded agent matches on the same map — one lost, one
+  won.** Both agents knew the right strategy; the loss was execution through a request/response
+  transport where an agent's think time is tens of seconds and the sim ticks twenty times a second.
+  Each item below answers a specific, recorded failure:
+
+  - **`set_production_plan`** — a standing production order the worker executes tick by tick, as
+    resources allow, through the identical `admit()`/codec path an agent's own command takes
+    (nothing is queued while it cannot be afforded, is supply-capped, or lacks a prerequisite). Each
+    entry counts down and retires with a `planExhausted` event. A recorded loss decided "mass
+    bastions", could not afford one at that instant, and was out-produced by the time it looked
+    again.
+  - **`wake_on: {ore: 175}`** on `wait_for_event`/`take_turn` — resolves when the treasury crosses a
+    threshold. Nothing in the engine fires on that, so an agent had to ask, be refused, and ask
+    again; one match churned roughly a minute of production doing so, 25 ore short of a Foundry.
+  - **`take_turn`** — `wait_for_event` plus the `get_situation` that always follows it, in one round
+    trip, returning the state AFTER the events. A recorded match was abandoned mid-game with the
+    agent explicitly out of context budget, most of it spent re-reading a barely-changed board.
+  - **`get_situation.economy`** — measured GROSS income per minute (so a large purchase never reads
+    as "you have stopped earning"), gatherer and idle-worker counts, and `workers_at_risk`: named
+    gatherers standing too far from home or beside a recently-seen enemy. Paired with a new
+    **`workerRetargeted`** engine event, fired when a depleted seam re-tasks a worker — the silent
+    mechanism that walked one match's worker line into the open and lost it to a single raider.
+  - **`seconds_until_affordable`** on `get_tech_options`, and a `detail` on every cost-shaped
+    rejection naming the cost, the balance, the shortfall per commodity and the ETA at measured
+    income (or nothing, when that income would never get there). "Affordable in 31s" is a schedule;
+    `affordable: false` is a dead end.
+  - **`enemy_last_seen` / `enemy_currently_visible`** on `list_entities`, each sighting carrying its
+    `age_seconds` — plus `since_tick`, which returns only what changed (and `removed_ids`) instead of
+    the whole world every poll. A recorded match twice declared victory off an empty entity list
+    while the opponent's army was intact and re-forming.
+  - **`estimate_engagement`** — who wins a fight between two named forces, with a margin, over the
+    engine's own unit table. `get_counters` says a Lancer beats a Bastion; it cannot say that one
+    Lancer loses to three. One match fed single units into a four-unit ball three times running.
+  - **`near: {x, y}` on `build`** — the server runs the engine's own placement search and reports the
+    site it chose. One match burned three commands and ~15 seconds hunting a legal turret spot at the
+    moment the turret was the thing that would have saved it. Every `issue_command` result now also
+    carries `apm_remaining`/`apm_cap`, so batching is not guesswork.
+  - **`remember`** — a few kilobytes of scratch notes bound to a SEAT, surviving a compaction, a
+    restart, or a handle recovered through `reclaim_seat`. The plan an agent wrote at 40s was not the
+    plan it was playing at 180s.
+  - **`clock_policy: "deliberation"` + `end_turn`** — T-057's turn-based clock, previously reachable
+    only by a harness spawning a match worker directly, now creatable and playable over MCP. The
+    world advances only once every agent seat has ended its turn, so thinking costs no game time.
+    Refused outright for a match containing a human seat (ADR-0007's own safety property, now
+    enforced at creation rather than only hidden at listing), and hidden from the default
+    `list_matches`.
+
 ### Fixed
+
+- **A filtered `wait_for_event` could spin on microtasks.** A round that resolved immediately with
+  only events the caller had filtered out went straight back into the wait without yielding,
+  starving the timers — including the tick that would have delivered what it was waiting for.
 
 - **`docs/agent-guide.md` stated the production cost rule backwards.** It claimed ore is debited when
   a job *starts*, so an unchanged `get_situation` was not evidence the order was dropped. The

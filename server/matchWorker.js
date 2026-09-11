@@ -159,6 +159,11 @@ import { controllerFor } from "../engine/controllers.js";
 import { surrender } from "../engine/victory.js";
 import { mulberry32 } from "../engine/rng.js";
 import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
+import { findPlacement } from "../engine/colliders.js";
+import { productionRefusalReason } from "../engine/production.js";
+import { UNITS, BUILDINGS } from "../engine/entities.js";
+import { supplyUsed, supplyCap } from "../engine/supply.js";
+import { encode } from "../net/commandEnvelope.js";
 import { createMatch, admit, stepMatch, toCommandResult, TICK_DT, TICK_MS } from "./matchLoop.js";
 import { readSnapshot, writeSnapshot } from "./matchSnapshot.js";
 import { seatFingerprint } from "../net/fingerprint.js";
@@ -210,8 +215,114 @@ let watchdogTimer = null;
 function aiSlotFor(owner) { return owner === "ai" ? "ai" : "playerAi"; }
 
 match.emitAck = rec => {
-  parentPort.postMessage({ type: "commandResult", seat: rec.owner, seq: rec.seq, result: toCommandResult(rec.result) });
+  parentPort.postMessage({ type: "commandResult", seat: rec.owner, seq: rec.seq, result: explainResult(toCommandResult(rec.result), rec) });
 };
+
+// Agent-observability: the NUMBERS behind a refusal, added here because this is the last place a
+// rejection passes through that can still see the state it was judged against. The reason codes
+// themselves ("cannot-afford", "supply-capped", "invalid-placement") already say which rule said
+// no; what they do not say is whether the answer is "wait six seconds" or "you are never getting
+// this" — and a recorded match was lost to exactly that ambiguity: an agent 25 ore short of a
+// Foundry read "cannot-afford", retried blind four times over a minute, and never learned it was
+// twenty seconds of mining away from the thing that would have saved it.
+function explainResult(result, rec) {
+  if (result.ok || !result.reason) return result;
+  const cmd = rec.cmd;
+  const detail = shortfallFor(rec.owner, cmd, result.reason);
+  return detail ? { ...result, detail } : result;
+}
+
+// What a cost-shaped refusal actually costs, and how long the seat's CURRENT treasury is from
+// covering it. The rate is measured over this match's own recent history (see incomeWindow below)
+// rather than assumed, so "60 seconds away" reflects the economy the seat really has, including
+// one that has stopped earning entirely (reported as null: not slow, never).
+function shortfallFor(owner, cmd, reason) {
+  const player = match.state.players[owner];
+  if (!player) return null;
+  if (reason === "cannot-afford") {
+    const cost = costOf(cmd);
+    if (!cost) return null;
+    const short = {};
+    for (const [com, amount] of Object.entries(cost)) {
+      const have = player.resources[com] ?? 0;
+      if (amount > have) short[com] = Math.ceil(amount - have);
+    }
+    const eta = etaForShortfall(owner, short);
+    return { cost, have: { ...player.resources }, short, ...(eta === null ? {} : { seconds_until_affordable: eta }) };
+  }
+  if (reason === "supply-capped") {
+    // Names the fix rather than the symptom: which building raises the cap, and by how much.
+    // The cheapest building that actually raises the cap (engine/supply.js reads supplyGrants),
+    // Command Centers excluded — nobody is founding a second one to train one more Bastion.
+    const supplyBuilding = Object.values(BUILDINGS)
+      .filter(b => (b.supplyGrants || 0) > 0 && !b.isCommandCenter)
+      .sort((a, b) => (a.cost?.ore ?? Infinity) - (b.cost?.ore ?? Infinity))[0];
+    return {
+      supply: supplyUsed(match.state, owner), supply_cap: supplyCap(match.state, owner),
+      ...(supplyBuilding ? { fix: `build ${supplyBuilding.id}`, adds_supply: supplyBuilding.supplyGrants } : {}),
+    };
+  }
+  if (reason === "invalid-placement" && cmd?.t === "build") {
+    // A placement refusal is the one refusal with a mechanical answer, so give it: the nearest
+    // spot that WOULD have worked. Three commands were burned hunting for one by hand in a
+    // recorded match, at the exact moment the building was needed.
+    const site = findPlacement(match.state, cmd.b, cmd.x, cmd.y);
+    return site
+      ? { nearest_legal_site: { x: Math.round(site.x), y: Math.round(site.y) },
+          hint: "re-issue the build there, or pass `near` instead of x/y and the server picks it for you" }
+      : { hint: "nowhere near this point can hold that building — pick a different area" };
+  }
+  return null;
+}
+
+function costOf(cmd) {
+  if (cmd?.t === "build") return BUILDINGS[cmd.b]?.cost ?? null;
+  if (cmd?.t === "queueProduction") {
+    const def = UNITS[cmd.u];
+    if (!def) return null;
+    return (cmd.alt && def.altCost) ? def.altCost : def.cost;
+  }
+  return null;
+}
+
+// A rolling per-owner sample of the treasury, the worker-side twin of the estimate
+// server/mcpObservationCache.js publishes to observation tools — kept here too because a rejection
+// is answered inside the worker, where that cache does not reach.
+const incomeWindowSeconds = 30;
+/** @type {Map<string, {time: number, resources: Object}[]>} */
+const incomeSamples = new Map();
+function sampleIncome() {
+  for (const owner of match.state.owners) {
+    const samples = incomeSamples.get(owner) ?? [];
+    const last = samples[samples.length - 1];
+    if (last && match.state.time - last.time < 1) continue;
+    samples.push({ time: match.state.time, resources: { ...match.state.players[owner].resources } });
+    while (samples.length > 1 && match.state.time - samples[0].time > incomeWindowSeconds) samples.shift();
+    incomeSamples.set(owner, samples);
+  }
+}
+
+function etaForShortfall(owner, short) {
+  const samples = incomeSamples.get(owner) ?? [];
+  if (samples.length < 2) return null;
+  const seconds = samples[samples.length - 1].time - samples[0].time;
+  if (seconds <= 0) return null;
+  let worst = 0;
+  for (const [com, amount] of Object.entries(short)) {
+    // GROSS delivery rate, summed from the positive steps only — the same reasoning
+    // server/mcpObservationCache.js's own incomeFor uses: a seat that just spent its treasury has
+    // a negative NET rate, and "you will never afford this" is the wrong answer to give someone
+    // whose workers are mining perfectly well.
+    let gained = 0;
+    for (let i = 1; i < samples.length; i++) {
+      gained += Math.max(0, (samples[i].resources[com] ?? 0) - (samples[i - 1].resources[com] ?? 0));
+    }
+    const rate = gained / seconds;
+    if (rate <= 0) return null;   // not earning this at all — "soon" would be a lie
+    worst = Math.max(worst, amount / rate);
+  }
+  return Math.round(worst);
+}
 
 parentPort.on("message", msg => {
   // "Say that again": re-answers the ready message above for a parent that attached too late to
@@ -231,6 +342,25 @@ parentPort.on("message", msg => {
       const seq = msg.envelope && Number.isInteger(msg.envelope.seq) ? msg.envelope.seq : null;
       if (seq !== null) parentPort.postMessage({ type: "commandResult", seat: msg.seat, seq, result: { ok: false, code: admitted.code } });
     }
+    return;
+  }
+  if (msg.type === "findBuildSite") {
+    // The nearest spot that would actually accept this building, using the engine's OWN placement
+    // rule (engine/colliders.js) rather than a second, drifting copy of it on the main thread —
+    // which has no state to check against in any case.
+    const site = findPlacement(match.state, msg.buildingType, msg.x, msg.y);
+    parentPort.postMessage({ type: "buildSite", reqId: msg.reqId,
+      site: site ? { x: Math.round(site.x), y: Math.round(site.y) } : null });
+    return;
+  }
+  if (msg.type === "productionPlan") {
+    // A STANDING ORDER: "keep making these, paying for them as the ore arrives." See
+    // applyProductionPlans below for why this is the single highest-value thing an agent can be
+    // given over this transport.
+    if (!match.state.owners.includes(msg.seat)) return;
+    if (msg.action === "set") productionPlans.set(msg.seat, normalisePlan(msg.plan));
+    if (msg.action === "clear") productionPlans.delete(msg.seat);
+    parentPort.postMessage({ type: "productionPlan", seat: msg.seat, reqId: msg.reqId, plan: productionPlans.get(msg.seat) ?? [] });
     return;
   }
   if (msg.type === "describeMap") {
@@ -368,8 +498,72 @@ parentPort.postMessage(readyMessage());
 // AI-driven owners get applied at the same relative tick position). Shared verbatim by both clock
 // policies below — advancing the sim by exactly one tick is the same operation either way; only
 // WHEN it happens, and whether every intermediate tick gets its own state push, differs.
+// ===== Standing production orders (agent-observability) =====
+// An agent's think time is measured in tens of seconds and this sim ticks twenty times a second,
+// so the single most expensive thing about playing over a request/response transport is that
+// every decision only holds until the next one. Both recorded matches show the same shape: an
+// agent decides "keep making Bastions", cannot afford one at the instant it looks, and by the
+// time it looks again it has been out-produced — not out-thought. A standing order survives that
+// gap. It is not a second command path: each attempt is funnelled through admit() as an ordinary
+// envelope, so it is validated, logged, rate-limited by supply and cost, and replayable exactly
+// like a command the agent typed itself.
+/** @type {Map<string, Array<{building:string, unit:string, alt:boolean, remaining:number, maxQueued:number}>>} */
+const productionPlans = new Map();
+// Plan-issued envelopes need seq numbers that can never collide with the seat's own client seqs
+// (admit() dedupes by (owner, seq), so a collision would silently swallow a real command).
+let planSeq = 1e9;
+
+function normalisePlan(plan) {
+  if (!Array.isArray(plan)) return [];
+  return plan.slice(0, 8).map(entry => ({
+    building: String(entry.building ?? ""),
+    unit: String(entry.unit ?? ""),
+    alt: !!entry.alt,
+    // A plan is a commitment, not a subscription: it counts down and stops, so an agent that
+    // stops paying attention cannot leave a match spending its whole economy on one unit type
+    // forever. `repeat` is clamped rather than refused so a caller asking for 1000 gets 50.
+    remaining: Math.max(1, Math.min(50, Math.floor(Number(entry.repeat ?? 1)) || 1)),
+    // How deep this plan is willing to fill one building's queue. Default 2: enough that the
+    // building never idles between jobs, shallow enough that the plan cannot swallow the ore a
+    // tech building or an expansion was being saved for.
+    maxQueued: Math.max(1, Math.min(8, Math.floor(Number(entry.max_queued ?? 2)) || 2)),
+  })).filter(entry => entry.building && entry.unit);
+}
+
+function applyProductionPlans() {
+  for (const [owner, plan] of [...productionPlans]) {
+    for (const entry of plan) {
+      if (entry.remaining <= 0) continue;
+      const building = match.state.buildings.get(entry.building);
+      // A plan whose building is gone (razed, or never owned) is finished, not retried forever.
+      if (!building || building.owner !== owner) { entry.remaining = 0; continue; }
+      if (building.queue.length >= entry.maxQueued) continue;
+      // The engine's own refusal check, asked BEFORE spending an admit: a plan that fires blindly
+      // every tick would fill the command log with rejections and teach an observer nothing.
+      if (productionRefusalReason(match.state, entry.building, entry.unit, entry.alt) !== null) continue;
+      admit(match, encode({ t: "queueProduction", building: entry.building, u: entry.unit, ...(entry.alt ? { alt: true } : {}) }, planSeq++, null), owner);
+      entry.remaining -= 1;
+      if (entry.remaining === 0) {
+        // Announced, because the whole point of a plan is that the agent is not watching: it needs
+        // to learn that the thing it set up has run out, at the moment it runs out. Owner-scoped,
+        // so it reaches that seat's projection and no one else's (engine/projection.js).
+        match.state.events.push({ type: "planExhausted", owner, id: entry.building, unitType: entry.unit,
+                                  x: building.x, y: building.y });
+      }
+    }
+    const live = plan.filter(entry => entry.remaining > 0);
+    if (live.length === 0) productionPlans.delete(owner);
+    else productionPlans.set(owner, live);
+  }
+}
+
 function stepOnce() {
   if (match.state.playerAi) runAI(match.state, TICK_DT, "player");
+  // Plans are tried BEFORE the step that applies commands, so a standing order behaves exactly
+  // like an agent that happened to be watching at this tick — same admission path, same
+  // INPUT_DELAY_TICKS, same ordering against everything else due.
+  applyProductionPlans();
+  sampleIncome();
   stepMatch(match, TICK_DT);
 }
 

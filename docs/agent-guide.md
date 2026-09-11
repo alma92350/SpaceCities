@@ -78,7 +78,7 @@ it, just store and resend it.
 | `leave_match` | `seat_handle` | Give up a seat before the match starts. Fails once it has. |
 | `find_my_seats` | `client_id` | Every seat that client_id holds, with working handles and any finished match's own result — recovery when you have lost everything but your own id (§2.2). |
 | `reclaim_seat` | `match_id`, `seat_index?`, `client_id?` | Take back a seat whose holder has gone silent — the recovery path that needs no prior `client_id` (§2.2). |
-| `get_match_report` | `match_id` | How a match ended: winner, reason, duration, who played each seat, each side's final standing. Works long after the match and its worker are gone (§5.1). |
+| `get_match_report` | `match_id` | How a match ended: winner, reason, duration, who played each seat, each side's final standing. Works long after the match and its worker are gone (§5.5). |
 | `watch_match` | `match_id` | A `watch_handle`: observe a match unfogged, from both sides, without taking a seat (§2.3). |
 
 **If your own `join_match` still reports `started: false`**, another seat is still open and
@@ -161,11 +161,56 @@ reveals: its own units/buildings unconditionally, an opponent's only if currentl
 
 | Tool | Returns |
 |---|---|
-| `get_situation` | `tick`, `time`, `over`, `winner`, this seat's `resources`, `supply`/`supply_cap`, its own `units_by_type`/`buildings_by_type` counts, `idle_unit_ids`, who you are (`you`) and who you're playing (`opponents`), plus the map's `width`/`height`/`tickRate`. |
-| `list_entities` | Every visible entity as `{id, type, owner, x, y, hp}`; your OWN entities also carry `activity` (`idle`/`gathering`/`moving`/`attacking`/`building`/`producing`/`under-construction`), `orderTarget`, a producer's `queue` and a site's `buildProgress`. Optional `owner`/`type`/`activity` arguments narrow a large list — `activity: "idle"` is how you find units that have stopped working. |
+| `get_situation` | `tick`, `time`, `over`, `winner`, this seat's `resources`, `supply`/`supply_cap`, its own `units_by_type`/`buildings_by_type` counts, `idle_unit_ids`, an `economy` block (below), who you are (`you`) and who you're playing (`opponents`), plus the map's `width`/`height`/`tickRate`. |
+| `list_entities` | Every visible entity as `{id, type, owner, x, y, hp}`; your OWN entities also carry `activity` (`idle`/`gathering`/`moving`/`attacking`/`building`/`producing`/`under-construction`), `orderTarget`, a producer's `queue` and a site's `buildProgress`. Optional `owner`/`type`/`activity` arguments narrow a large list — `activity: "idle"` is how you find units that have stopped working. `since_tick` returns only what CHANGED since a tick you already read, plus `removed_ids`. Also reports `enemy_currently_visible` and `enemy_last_seen` (below). |
 | `get_map_overview` | Every discovered resource node as `{id, com, amount, max, x, y, distance_from_base}`, **nearest first**, plus `commodities_available`, every visible base's `{owner, x, y}`, and the map bounds. `com` is the commodity the node actually yields — you never have to scout a node to learn what it is. |
 | `get_tech_options` | Every unit/building type with `cost`, full `stats` (hp, attack, range, cooldown, speed, sight, buildTime, supplyCost, bonusVs…), `produced_by`/`buildable`, `prereqs_met` **and `missing_prereqs`** (which requirement is missing, by name), and `affordable` for THIS seat right now. |
 | `get_counters` | The real counter table — every `{attacker, target, bonus}` matchup, derived from the same `bonusVs` data the engine's combat math reads. Static; read it once. |
+| `estimate_engagement` | Who wins a fight between `your_ids` and `enemy_ids` (omit the latter for every enemy currently in fog): `predicted_winner`, a `margin`, both sides' dps/hp, and how long each side lasts. |
+
+`get_tech_options` also carries `seconds_until_affordable` on anything you cannot pay for yet —
+computed from your own MEASURED income, and absent entirely when that income would never get there.
+"Affordable in 31s" is a schedule you can plan against; `affordable: false` on its own is a dead end.
+
+### 3.1 The economy is a FLOW, not a number
+
+`get_situation`'s `economy` block reports what the treasury is actually doing:
+
+```
+economy: {
+  income_per_min: { ore: 224, crystals: 0, ... },   // GROSS delivery, measured over ~30s
+  income_window_seconds: 30,
+  gatherers: 6,               // workers actually on a node right now
+  idle_workers: 0,
+  workers_at_risk: [ { id, x, y, distance_from_base, near_enemy } ],
+}
+```
+
+`income_per_min` is gross — what your workers are delivering — not the treasury's net movement, so
+a big purchase never makes it read as if you had stopped earning. `null` means there is not yet
+enough history to say.
+
+`workers_at_risk` is the one that decides matches. When a seam runs dry, `engine/gather.js`
+re-tasks that worker to the nearest surviving node of the same commodity — which, once the safe
+seams are gone, is routinely one deep in contested ground. You also get a `workerRetargeted` event
+(`{id, fromNode, toNode, com, x, y, distance}`) at the moment it happens. Both exist because a
+worker line walking itself into the open, one depletion at a time, is how two recorded matches were
+actually lost.
+
+### 3.2 Fog is not information about the enemy's base
+
+An empty enemy list means **you cannot see them**, never that they are gone. `list_entities`
+reports this explicitly:
+
+```
+enemy_currently_visible: false,
+enemy_last_seen: [ { id, type, owner, x, y, hp, tick, age_seconds: 42 } ],
+```
+
+Every entry was genuinely in your fog at the tick it was recorded, and `age_seconds` says how stale
+it is — a four-minute-old sighting is a rumour, not intelligence, and expires. **The only things
+that decide a match is over are `get_situation`'s own `over`/`winner` and `get_match_report`.** A
+recorded match was twice declared won off an empty entity list while the opponent's army was intact.
 
 None of these ever include an enemy's internal `order`/`orderQueue` — intent isn't something fog
 reveals, only position, type, and hp. That's why `activity`/`orderTarget` appear on your own
@@ -181,6 +226,17 @@ same shape the browser client sends for a human, validated by the identical serv
 `malformed` · `unknown-type` · `not-owner` · `no-target` · `not-visible` · `empty-selection` ·
 `too-many` · `out-of-bounds` · `refused` (the engine itself said no — cost or prerequisite unmet,
 bad placement).
+
+Alongside the `hint` (what to do), a refusal carries a `detail` with the NUMBERS behind it, so you
+can tell "wait six seconds" from "never on this economy" without probing: `cannot-afford` names the
+`cost`, what you `have`, the `short`fall per commodity and `seconds_until_affordable` at your
+measured income; `supply-capped` names the building that raises the cap and by how much;
+`invalid-placement` names the `nearest_legal_site`. (For placement, prefer `near: {x, y}` on the
+build command itself — the server runs the engine's own placement search and tells you which site it
+chose.)
+
+Every `issue_command` result — accepted or rejected — also carries `apm_remaining`/`apm_cap`, and
+`seconds_until_next_action` when the budget is spent, so batching is not guesswork.
 
 A `refused` from `build`, `queueProduction` or a research command also carries a `reason` in
 `result.structuredContent`, naming the check that actually failed rather than leaving you to probe
@@ -220,6 +276,7 @@ Common command shapes (`ids` is an array of 1–400 unit/building ids you own):
 { t: "stop",        ids }
 { t: "hold",        ids }
 { t: "build",       worker, b, x, y }
+{ t: "build",       worker, b, near: {x, y} }   // the server picks the nearest LEGAL site
 { t: "queueProduction", building, u, alt? }
 { t: "cancelProduction", building, i }
 { t: "setRally",    building, x, y }
@@ -316,8 +373,9 @@ Events carry entity ids, not just coordinates, so you never have to reconstruct 
 two `list_entities` calls: `entityKilled` has the dead entity's `id` (plus `killerId`/`killerOwner`),
 `attackHit` has `sourceId`/`targetId`, `unitSpawned` has the new unit's `id` and `fromBuildingId`,
 and `buildingComplete` has the finished building's `id`. Two events exist specifically to stop an
-economy rotting unnoticed: `nodeDepleted` (a node just ran dry) and `unitIdle` (a gatherer stopped
-because there was nothing left to retarget to). A
+economy rotting unnoticed: `nodeDepleted` (a node just ran dry), `unitIdle` (a gatherer stopped
+because there was nothing left to retarget to) and `workerRetargeted` (a gatherer re-tasked itself
+to another seam — check how far from home it has just been sent). A
 timeout is a normal, successful result (`timed_out: true`, `events: []`), never an error: just
 call it again. Call this in your main loop instead of `get_situation`-polling in a tight loop.
 
@@ -327,7 +385,7 @@ without knowing how the engine spells things:
 ```jsonc
 { "by_type": { "attackHit": 3, "buildingComplete": 1 },
   "groups": ["combat", "construction"],
-  "under_attack": true,
+  "under_attack": true,   // YOUR entities, never your own attack landing
   "attacked":  [{ "id": "u12", "x": 300, "y": 540, "attacker_id": "e4" }],
   "completed": [{ "type": "buildingComplete", "id": "b3", "entity_type": "barracks" }] }
 ```
@@ -343,7 +401,54 @@ const { structuredContent } = await client.callTool("wait_for_event", { seat_han
 if (!structuredContent.timed_out) { /* structuredContent.events has what changed */ }
 ```
 
-### 5.1 The end of the match
+### 5.1 `take_turn` — the whole loop in one call
+
+Your loop is almost always "wait, then look" — two round trips and two full re-reads of the same
+board, every game-second, for a whole match. `take_turn` takes the same arguments as
+`wait_for_event` and returns the wait's events AND the resulting `get_situation` (the state AFTER
+those events) as one result. Prefer it.
+
+### 5.2 Waking on a resource threshold, and not needing to wake at all
+
+Nothing in the engine fires when a treasury crosses a number, so `wait_for_event`/`take_turn` take
+`wake_on: { ore: 175 }` — resolves as soon as you hold at least that much of every named commodity
+(`resources_reached: true`). Asked on its own, an unrelated event will not end that wait; combined
+with `types`/`groups`, whichever lands first wins.
+
+Better still, for "keep making these": **`set_production_plan`** is a standing order the server
+executes for you, tick by tick, as the resources arrive:
+
+```js
+await client.callTool("set_production_plan", { seat_handle, plan: [
+  { building: barracksId, unit: "bastion", repeat: 6, max_queued: 2 },
+] });
+```
+
+Each attempt goes through the identical validation and costs the identical resources your own
+`issue_command` would; nothing is queued while you cannot afford it, are supply-capped, or lack the
+prerequisite. `repeat` counts down and the entry retires — you get a `planExhausted` event when it
+does, and `action: "list"` shows what is still standing. This exists because your think time is
+measured in tens of seconds and the sim ticks twenty times a second: a decision that only holds
+until your next call is a decision that keeps arriving too late.
+
+### 5.3 Notes that outlive your context: `remember`
+
+`remember({ seat_handle, notes })` stores a few kilobytes against YOUR SEAT; calling it without
+`notes` reads them back. It survives a compaction, a restart, and a handle you had to recover with
+`reclaim_seat`. Keep the plan there — the build you committed to, the trigger you are waiting for,
+what you have learned about the opponent — and re-read it when you come back, rather than
+re-deriving it from the board. Nobody else can read it and it has no effect on the game.
+
+### 5.4 Turn-based pacing: `clock_policy: "deliberation"` and `end_turn`
+
+A realtime match does not care how long you think. Create a match with
+`clock_policy: "deliberation"` and the world instead FREEZES between turns: it advances one round
+only once every agent seat has called `end_turn` (or a server watchdog fires), so a 38-second build
+costs the same whoever is playing. Only allowed when no seat is a human — a frozen clock turns your
+think time into someone else's dead air. These matches are hidden from the default `list_matches`;
+ask for them with `clock_policy: "deliberation"` (or `"any"`).
+
+### 5.5 The end of the match
 
 `wait_for_event` returns IMMEDIATELY on a finished match, with a `matchEnded` event and
 `summary.match_over` — it never blocks on a decided match, and never filters that event out however

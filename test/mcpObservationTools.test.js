@@ -63,9 +63,9 @@ function mcpFor(lobby, matchId, projByOwner, mapMeta = null) {
   return createMcpServer({ tools: createObservationTools(lobby, mId => (mId === matchId ? cache : null)) });
 }
 
-test("createObservationTools registers exactly the five named tools", () => {
+test("createObservationTools registers exactly the six named tools", () => {
   const tools = createObservationTools(createLobby(), () => null);
-  assert.deepEqual(tools.map(t => t.name).sort(), ["get_counters", "get_map_overview", "get_situation", "get_tech_options", "list_entities"]);
+  assert.deepEqual(tools.map(t => t.name).sort(), ["estimate_engagement", "get_counters", "get_map_overview", "get_situation", "get_tech_options", "list_entities"]);
 });
 
 test("get_situation on a match id with NO live cache at all (never started) is a distinct, clear tool execution error", async () => {
@@ -477,4 +477,179 @@ test("get_tech_options refuses a watch handle — affordability and prerequisite
   const { body } = await callTool(mcp, "get_tech_options", { seat_handle: mintWatchHandle(match.id) });
   assert.equal(body.result.isError, true);
   assert.match(body.result.content[0].text, /watch-only-handle/);
+});
+
+/* ============================================================
+   Agent-observability: the observation-side improvements drawn from two recorded matches — income
+   as a FLOW rather than a stock, gatherers that have wandered somewhere fatal, a delta instead of
+   the whole world every wake, a memory of enemies that have left fog (and the loud reminder that
+   an empty list is fog, not victory), and an answer to "am I currently losing this fight".
+
+   The fake cache here answers the three new cache capabilities the same way
+   server/mcpObservationCache.js does in production; that file's own tests prove it derives them
+   correctly from a real projection stream.
+   ============================================================ */
+
+function richCache(projByOwner, extra = {}) {
+  return {
+    latestProjFor: owner => projByOwner[owner] ?? null,
+    mapMeta: () => null,
+    incomeFor: () => extra.income ?? null,
+    lastSeenFor: () => extra.lastSeen ?? [],
+    changesSince: (owner, tick) => extra.changes?.(owner, tick) ?? null,
+  };
+}
+
+function mcpWith(lobby, matchId, projByOwner, extra) {
+  const cache = richCache(projByOwner, extra);
+  return createMcpServer({ tools: createObservationTools(lobby, mId => (mId === matchId ? cache : null)) });
+}
+
+test("get_situation reports the economy's FLOW, not just the treasury — income per minute and how many workers are gathering", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") },
+    { income: { per_min: { ore: 210 }, window_seconds: 30 } });
+
+  const { body } = await callTool(mcp, "get_situation", { seat_handle });
+  const economy = body.result.structuredContent.economy;
+  assert.deepEqual(economy.income_per_min, { ore: 210 });
+  assert.equal(economy.income_window_seconds, 30);
+  assert.equal(typeof economy.gatherers, "number");
+  assert.match(body.result.content[0].text, /Income\/min: ore 210/);
+});
+
+test("get_situation NAMES the gatherers that have wandered out of reach of home — the way a worker line actually dies", async () => {
+  const { state } = fixture();
+  const base = state.map.bases.player;
+  // A worker mining a seam clear across the map: exactly what engine/gather.js's own depletion
+  // retarget produces, one dry node at a time.
+  const strayed = makeUnit("worker", "player", base.x + 1200, base.y);
+  strayed.order = { type: "gather", nodeId: state.map.nodes[0].id, phase: "toNode" };
+  state.units.set(strayed.id, strayed);
+  const homebody = makeUnit("worker", "player", base.x + 40, base.y);
+  homebody.order = { type: "gather", nodeId: state.map.nodes[0].id, phase: "toNode" };
+  state.units.set(homebody.id, homebody);
+
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "get_situation", { seat_handle });
+  const atRisk = body.result.structuredContent.economy.workers_at_risk;
+  assert.deepEqual(atRisk.map(w => w.id), [strayed.id]);
+  assert.ok(atRisk[0].distance_from_base > 700);
+  assert.match(body.result.content[0].text, /1 gatherer\(s\) exposed/);
+});
+
+test("list_entities says whether an empty enemy list is fog or absence, and remembers where they were last seen", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const remembered = [{ id: "u21", type: "bastion", owner: "ai", x: 895, y: 481, hp: 300, tick: 7200, age_seconds: 42 }];
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") }, { lastSeen: remembered });
+
+  const { body } = await callTool(mcp, "list_entities", { seat_handle });
+  const sc = body.result.structuredContent;
+  assert.equal(sc.enemy_currently_visible, false, "the fixture's only enemy sits well outside player's fog");
+  assert.deepEqual(sc.enemy_last_seen, remembered);
+  // The text has to say it too: a recorded match was declared won twice off an empty list.
+  assert.match(body.result.content[0].text, /NOT proof they are gone/);
+  // And the remembered sighting is never mistaken for a live entity in `entities`.
+  assert.equal(sc.entities.find(e => e.id === "u21"), undefined);
+});
+
+test("list_entities with since_tick returns only what changed, and says so honestly when it cannot", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const proj = projectFor(state, "player");
+  const movedId = proj.units[0].id;
+  const mcp = mcpWith(lobby, match.id, { player: proj },
+    { changes: (owner, tick) => (tick === 100 ? { changed: new Set([movedId]), removed: ["u99"] } : null) });
+
+  const { body } = await callTool(mcp, "list_entities", { seat_handle, since_tick: 100 });
+  const sc = body.result.structuredContent;
+  assert.equal(sc.delta_available, true);
+  assert.deepEqual(sc.entities.map(e => e.id), [movedId]);
+  assert.deepEqual(sc.removed_ids, ["u99"]);
+
+  // A tick the cache has no history for must return the FULL list flagged as such — an empty
+  // delta would read as "nothing changed", which is a different and wrong answer.
+  const stale = await callTool(mcp, "list_entities", { seat_handle, since_tick: 5 });
+  assert.equal(stale.body.result.structuredContent.delta_available, false);
+  assert.ok(stale.body.result.structuredContent.entities.length > 1);
+});
+
+test("get_tech_options says WHEN the seat's measured income covers something it cannot afford yet", async () => {
+  const { state } = fixture();
+  state.players.player.resources.ore = 100;
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") },
+    { income: { per_min: { ore: 300 }, window_seconds: 30 } });
+
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle });
+  const foundry = body.result.structuredContent.buildings.find(b => b.type === "foundry");
+  assert.equal(foundry.affordable, false);
+  assert.equal(foundry.seconds_until_affordable, 15, "175 ore, 100 in hand, 300/min = 75 ore = 15s");
+  const habitat = body.result.structuredContent.buildings.find(b => b.type === "habitat");
+  assert.equal(habitat.affordable, true);
+  assert.equal(habitat.seconds_until_affordable, undefined, "no ETA on something already affordable");
+});
+
+test("get_tech_options gives NO eta for a commodity this seat is not earning at all — 'soon' would be a lie", async () => {
+  const { state } = fixture();
+  state.players.player.resources.ore = 10;
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") }, { income: { per_min: { ore: 0 }, window_seconds: 30 } });
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle });
+  assert.equal(body.result.structuredContent.buildings.find(b => b.type === "foundry").seconds_until_affordable, undefined);
+});
+
+test("estimate_engagement answers the question a counter table cannot: a 1-versus-3 you are losing", async () => {
+  const { state } = fixture();
+  const base = state.map.bases.player;
+  const mine = makeUnit("lancer", "player", base.x, base.y);
+  state.units.set(mine.id, mine);
+  const theirs = [];
+  for (let i = 0; i < 3; i++) {
+    // Close enough to sit inside this seat's own fog, so they are legitimately visible to it.
+    const enemy = makeUnit("bastion", "ai", base.x + 30 + i * 5, base.y + 10);
+    state.units.set(enemy.id, enemy);
+    theirs.push(enemy.id);
+  }
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "estimate_engagement", { seat_handle, your_ids: [mine.id], enemy_ids: theirs });
+  const sc = body.result.structuredContent;
+  assert.equal(sc.predicted_winner, "enemy", "one Lancer loses to three Bastions despite its counter bonus");
+  assert.equal(sc.enemy_force, 3);
+  assert.match(body.result.content[0].text, /YOU LOSE THIS FIGHT/);
+
+  // The same Lancer against ONE Bastion is the fight the counter table promises.
+  const even = await callTool(mcp, "estimate_engagement", { seat_handle, your_ids: [mine.id], enemy_ids: [theirs[0]] });
+  assert.equal(even.body.result.structuredContent.predicted_winner, "you");
+});
+
+test("estimate_engagement refuses ids this seat cannot see rather than quietly weighing a smaller fight", async () => {
+  const { state, hiddenEnemyId } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+  const { body } = await callTool(mcp, "estimate_engagement", { seat_handle, enemy_ids: [hiddenEnemyId] });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /not-visible/);
 });

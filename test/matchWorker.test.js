@@ -1000,3 +1000,106 @@ test("a worker answers describeMap with every node's commodity and position, plu
     assert.ok(meta.nodes.some(n => n.hidden), "hidden caches are reported too — the consumer, not this reply, applies fog");
   } finally { await worker.terminate(); }
 });
+
+/* ============================================================
+   Agent-observability: the three things this worker now answers that only it CAN answer, because
+   only it holds the live State — where a building would actually fit, what a refusal costs in
+   real numbers, and a standing production order that keeps spending while the agent that set it
+   is busy thinking. All three are driven here against a REAL worker running the REAL engine.
+   ============================================================ */
+
+test("findBuildSite answers with a spot the engine would really accept, sliding off an occupied one", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    const state = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const cc = state.proj.buildings.find(b => b.owner === "player");
+    // Asked for a point right on top of the Command Center — never legal, and exactly the mistake
+    // that cost a recorded match three commands at the moment it needed a turret.
+    worker.postMessage({ type: "findBuildSite", buildingType: "barracks", x: cc.x, y: cc.y, reqId: 1 });
+    const answer = await waitFor(worker, m => m.type === "buildSite" && m.reqId === 1);
+    assert.ok(answer.site, "a legal site exists near a base");
+    assert.ok(Math.hypot(answer.site.x - cc.x, answer.site.y - cc.y) > 20, "the answer is not the illegal point it was handed");
+  } finally { await worker.terminate(); }
+});
+
+test("a cannot-afford rejection carries the real numbers: the cost, what is in the bank, and the shortfall", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    const state = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const workerUnit = state.proj.units.find(u => u.owner === "player" && u.type === "worker");
+    // A second Command Center (400 ore) costs more than a fresh match's own starting treasury.
+    worker.postMessage({ type: "command", seat: "player", envelope: encode({ t: "build", worker: workerUnit.id, b: "command", x: workerUnit.x + 200, y: workerUnit.y }, 5, null) });
+    const ack = await waitFor(worker, m => m.type === "commandResult" && m.seq === 5);
+    assert.equal(ack.result.ok, false);
+    assert.equal(ack.result.reason, "cannot-afford");
+    assert.ok(ack.result.detail.cost.ore > 0);
+    assert.ok(ack.result.detail.short.ore > 0, "it says HOW SHORT, which is the part that decides what to do next");
+    assert.ok(ack.result.detail.have.ore >= 0);
+  } finally { await worker.terminate(); }
+});
+
+test("an invalid-placement rejection names the nearest site that WOULD have worked", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    const state = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const cc = state.proj.buildings.find(b => b.owner === "player");
+    const workerUnit = state.proj.units.find(u => u.owner === "player" && u.type === "worker");
+    worker.postMessage({ type: "command", seat: "player", envelope: encode({ t: "build", worker: workerUnit.id, b: "habitat", x: cc.x, y: cc.y }, 6, null) });
+    const ack = await waitFor(worker, m => m.type === "commandResult" && m.seq === 6);
+    assert.equal(ack.result.reason, "invalid-placement");
+    assert.ok(ack.result.detail.nearest_legal_site, JSON.stringify(ack.result.detail));
+  } finally { await worker.terminate(); }
+});
+
+test("a standing production order keeps queueing as resources allow, counts down, and announces when it runs out", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    const state = await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    const cc = state.proj.buildings.find(b => b.owner === "player" && b.queue);
+    // Every event this seat sees, accumulated from BEFORE the plan is even set: a plan that can
+    // afford both jobs immediately spends itself within a tick or two, so a one-shot waitFor
+    // registered afterwards would race with the very event it is looking for.
+    const events = [];
+    let sawQueue = false;
+    worker.on("message", m => {
+      if (m.type !== "state" || m.seat !== "player") return;
+      events.push(...(m.proj.events ?? []));
+      // Nothing else is driving this seat: every job that appears in that queue was queued by the
+      // plan, on the worker's own tick, with no further tool call from anyone.
+      const queue = m.proj.buildings.find(b => b.id === cc.id)?.queue ?? [];
+      if (queue.length > 0 && queue.every(j => j.unitType === "worker")) sawQueue = true;
+    });
+    worker.postMessage({ type: "productionPlan", seat: "player", action: "set", reqId: 1,
+                         plan: [{ building: cc.id, unit: "worker", repeat: 2 }] });
+    const ack = await waitFor(worker, m => m.type === "productionPlan" && m.reqId === 1);
+    assert.equal(ack.plan[0].remaining, 2);
+
+    // And it is a commitment that ends, not a subscription: the seat is told when it runs dry.
+    // The exhaustion notice comes first (the plan spends its last entry at ADMISSION), the jobs
+    // themselves appear a few ticks later when those commands actually apply — so both are waited
+    // for, in the order they really happen.
+    await waitFor(worker, m => m.type === "state" && m.seat === "player"
+      && events.some(e => e.type === "planExhausted"), 15000);
+    assert.equal(events.find(e => e.type === "planExhausted").owner, "player");
+    await waitFor(worker, m => m.type === "state" && m.seat === "player" && sawQueue, 15000);
+
+    worker.postMessage({ type: "productionPlan", seat: "player", action: "list", reqId: 2 });
+    const after = await waitFor(worker, m => m.type === "productionPlan" && m.reqId === 2);
+    assert.deepEqual(after.plan, [], "a spent plan is gone, not left queueing forever");
+  } finally { await worker.terminate(); }
+});
+
+test("a standing order never queues what the seat cannot pay for, and dies with the building it names", async () => {
+  const worker = spawnMatchWorker();
+  try {
+    await waitFor(worker, m => m.type === "state" && m.seat === "player");
+    worker.postMessage({ type: "productionPlan", seat: "player", action: "set", reqId: 3,
+                         plan: [{ building: "b-does-not-exist", unit: "worker", repeat: 5 }] });
+    await waitFor(worker, m => m.type === "productionPlan" && m.reqId === 3);
+    // One tick is enough for the plan to discover the building isn't its own and retire.
+    await waitFor(worker, m => m.type === "state" && m.seat === "player" && m.proj.tick > 2);
+    worker.postMessage({ type: "productionPlan", seat: "player", action: "list", reqId: 4 });
+    const after = await waitFor(worker, m => m.type === "productionPlan" && m.reqId === 4);
+    assert.deepEqual(after.plan, []);
+  } finally { await worker.terminate(); }
+});

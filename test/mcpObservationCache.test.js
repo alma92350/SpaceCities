@@ -294,3 +294,76 @@ test("attachProjectionCache tolerates a worker double with no postMessage at all
   const cache = attachProjectionCache(worker);
   assert.equal(cache.mapMeta(), null);
 });
+
+/* ============================================================
+   Agent-observability: three things derived from the SAME per-tick projection stream this cache
+   was already consuming — the economy's flow, a memory of enemies that have left fog, and a
+   per-entity change log so a caller can poll a long match without re-reading the whole world.
+   None of them reaches past what a seat's own projection already contained.
+   ============================================================ */
+
+function push(worker, seat, proj) { worker.emit("message", { type: "state", seat, proj }); }
+
+const projWith = (tick, over = {}) => ({ tick, time: tick / 20, units: [], buildings: [], players: {}, ...over });
+
+test("incomeFor measures GROSS delivery, so a big purchase never reads as 'you will never afford this'", async () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  const sample = ore => projWith(1, { players: { player: { resources: { ore } } } });
+
+  push(worker, "player", sample(100));
+  assert.equal(cache.incomeFor("player"), null, "one sample is not a rate");
+  // Samples are taken at most once a second (see INCOME_SAMPLE_MS), so a window has to be waited
+  // out rather than faked — kept to two short steps so the test stays fast.
+  await new Promise(r => setTimeout(r, 1100));
+  push(worker, "player", sample(200));           // +100 earned
+  await new Promise(r => setTimeout(r, 1100));
+  push(worker, "player", sample(25));            // spent 175 on a Foundry
+
+  const income = cache.incomeFor("player");
+  assert.ok(income.per_min.ore > 0, `gross income stays positive across a purchase, got ${income.per_min.ore}`);
+  assert.ok(income.window_seconds >= 2);
+});
+
+test("lastSeenFor remembers an enemy that has LEFT fog, with how stale the sighting is — and never invents one", () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+
+  push(worker, "player", projWith(10, { units: [{ id: "u21", type: "bastion", owner: "ai", x: 900, y: 480, hp: 300 }] }));
+  push(worker, "player", projWith(20));   // they walked back out of fog
+
+  const seen = cache.lastSeenFor("player");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].id, "u21");
+  assert.equal(seen[0].x, 900);
+  assert.equal(seen[0].tick, 10, "the tick it was ACTUALLY seen at, not the current one");
+  assert.ok(seen[0].age_seconds >= 0);
+  // Nothing is remembered for a seat that never saw anything, and a seat's own entities are not
+  // "sightings" at all.
+  assert.deepEqual(cache.lastSeenFor("ai"), []);
+  push(worker, "player", projWith(30, { units: [{ id: "u2", type: "worker", owner: "player", x: 10, y: 10, hp: 50 }] }));
+  assert.deepEqual(cache.lastSeenFor("player").map(e => e.id), ["u21"]);
+});
+
+test("changesSince reports only entities that actually moved or changed, plus the ones that vanished", () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  const at = (tick, units) => push(worker, "player", projWith(tick, { units }));
+
+  at(10, [{ id: "u1", type: "worker", owner: "player", x: 100, y: 100, hp: 50 },
+          { id: "u2", type: "worker", owner: "player", x: 200, y: 200, hp: 50 }]);
+  at(20, [{ id: "u1", type: "worker", owner: "player", x: 400, y: 100, hp: 50 }]);   // u1 moved, u2 died
+
+  const delta = cache.changesSince("player", 15);
+  assert.deepEqual([...delta.changed], ["u1"]);
+  assert.deepEqual(delta.removed, ["u2"]);
+  // A seat with no tracking at all gets null — "no delta available", never a misleading empty one.
+  assert.equal(cache.changesSince("nobody", 15), null);
+});
+
+test("a spectator's own unfiltered stream is never turned into 'sightings' — it sees everything already", () => {
+  const worker = new EventEmitter();
+  const cache = attachProjectionCache(worker);
+  push(worker, SPECTATOR_SEAT, projWith(10, { units: [{ id: "u21", type: "bastion", owner: "ai", x: 900, y: 480, hp: 300 }] }));
+  assert.deepEqual(cache.lastSeenFor(SPECTATOR_SEAT), []);
+});

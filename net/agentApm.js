@@ -38,7 +38,8 @@ export const AGENT_APM = DIFFICULTY_OPTIONS.find(d => d.label === "Hard").aiApm;
  * @param {number} [apm] published actions-per-minute ceiling; defaults to AGENT_APM. Overridable
  *   only for tests that need a small, fast-to-exhaust budget — production callers always use the
  *   one published default.
- * @returns {{tryConsume: (owner: string, nowMs: number) => boolean}}
+ * @returns {{tryConsume: (owner: string, nowMs: number) => boolean,
+ *            remaining: (owner: string, nowMs: number) => {actions: number, cap: number, seconds_until_next: number}}}
  */
 export function createAgentApmGuard(apm = AGENT_APM) {
   const cap = Math.max(2, apm * APM_BURST_FRAC);
@@ -61,5 +62,23 @@ export function createAgentApmGuard(apm = AGENT_APM) {
     return true;
   }
 
-  return { tryConsume };
+  // Agent-observability: how much budget is actually left, WITHOUT spending any of it. An agent
+  // previously learned its budget only by being refused — so batching was guesswork, and the
+  // honest strategy ("fire and see") is the one that wastes the budget fastest. Accrual is lazy
+  // here exactly as in tryConsume, so asking is free and never itself changes the answer beyond
+  // crediting time that had already passed.
+  function remaining(owner, nowMs) {
+    const budget = bySeat.get(owner);
+    if (!budget) return { actions: Math.floor(cap), cap, seconds_until_next: 0 };
+    const elapsedSeconds = Math.max(0, (nowMs - budget.lastMs) / 1000);
+    const balance = Math.min(budget.actionBudget + (apm / 60) * elapsedSeconds, cap);
+    return {
+      actions: Math.floor(balance),
+      cap,
+      // Zero whenever an action is available right now; otherwise how long until one is.
+      seconds_until_next: balance >= 1 ? 0 : Math.round(((1 - balance) / (apm / 60)) * 10) / 10,
+    };
+  }
+
+  return { tryConsume, remaining };
 }

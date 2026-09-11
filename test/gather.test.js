@@ -543,3 +543,46 @@ test("a gatherer left with nowhere to go emits unitIdle naming itself", () => {
   assert.equal(idle.owner, "player");
   assert.equal(idle.reason, "node-depleted");
 });
+
+/* Agent-observability: a silent retarget is how a worker line walks itself into the open and dies
+   — two recorded matches were decided that way, one depletion at a time, with nothing announcing
+   any of it. The event carries WHERE the worker is now headed so an observer can measure that walk
+   against its own bases; this file's own job is that the event is emitted, with the right ids. */
+test("a depleted seam emits workerRetargeted naming both nodes and how far the worker is being sent", () => {
+  const state = createGameState({ planetId: "ferros", rng: () => 0.5 });
+  const worker = [...state.units.values()].find(u => u.owner === "player" && u.type === "worker");
+  const node = firstNode(state, "ore");
+  node.amount = 4;
+  worker.x = node.x; worker.y = node.y;
+  worker.order = { type: "gather", nodeId: node.id, phase: "mining" };
+
+  for (let i = 0; i < 50 && worker.order && worker.order.nodeId === node.id; i++) updateGather(state, worker, 0.05);
+
+  const retargeted = state.events.find(e => e.type === "workerRetargeted");
+  assert.ok(retargeted, "the retarget must be announced, not silent");
+  assert.equal(retargeted.id, worker.id);
+  assert.equal(retargeted.owner, "player");
+  assert.equal(retargeted.fromNode, node.id);
+  assert.equal(retargeted.toNode, worker.order.nodeId);
+  assert.equal(retargeted.com, "ore");
+  assert.ok(retargeted.distance >= 0);
+  // The pairing case: a worker with nowhere left to go idles instead, and that is unitIdle's job,
+  // never this event's.
+  assert.equal(state.events.filter(e => e.type === "workerRetargeted" && e.id === worker.id).length, 1);
+});
+
+test("a worker with nowhere left to retarget emits unitIdle and NOT workerRetargeted", () => {
+  const state = createGameState({ planetId: "ferros", rng: () => 0.5 });
+  const worker = [...state.units.values()].find(u => u.owner === "player" && u.type === "worker");
+  const node = firstNode(state, "ore");
+  for (const n of state.map.nodes) if (n.com === "ore") n.amount = 0;
+  node.amount = 4;
+  worker.x = node.x; worker.y = node.y;
+  worker.order = { type: "gather", nodeId: node.id, phase: "mining" };
+
+  for (let i = 0; i < 50 && worker.order; i++) updateGather(state, worker, 0.05);
+
+  assert.equal(worker.order, null);
+  assert.ok(state.events.some(e => e.type === "unitIdle" && e.id === worker.id));
+  assert.equal(state.events.find(e => e.type === "workerRetargeted"), undefined);
+});

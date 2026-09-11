@@ -288,6 +288,11 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // ever reached from tools/serve.js/server/mcpActionTools.js/server/mcpLobbyTools.js, never
     // from any browser-side import chain).
     "net/agentApm.js",
+    // server/mcpSeatMemory.js — same class again: a seat's own scratch notes, held for an MCP
+    // agent by tools/serve.js's own wiring. A browser client has a whole tab to remember things
+    // in, so unlike the modules that left this list when their UI landed, nothing will ever wire
+    // this one into index.html.
+    "server/mcpSeatMemory.js",
   ]);
   // Separator normalized to "/" so these compare against the EXEMPT literals above: node:path
   // yields "server\mcpResources.js" on Windows, which matches none of them, so every exempted

@@ -506,3 +506,49 @@ test("find_my_seats carries a finished match's own result, so recovering never n
   assert.equal(seat.status, "finished");
   assert.deepEqual(seat.result, result);
 });
+
+/* ============================================================
+   Agent-observability: the deliberation clock (T-057) made reachable from MCP, with ADR-0007's own
+   safety property enforced where a match is CREATED rather than only hidden at listing time — a
+   frozen clock turns one seat's think time into everyone else's dead air, which is fine between
+   agents and never fine for a person.
+   ============================================================ */
+
+test("create_match can ask for the deliberation clock, and the match reports which clock it runs on", async () => {
+  const lobby = createLobby();
+  const mcp = mcpFor(lobby, async () => false);
+  const { body } = await callTool(mcp, "create_match", {
+    seats: [{ controller: "agent" }, { controller: "ai" }], clock_policy: "deliberation",
+  });
+  assert.equal(body.result.isError, undefined, JSON.stringify(body.result));
+  assert.equal(body.result.structuredContent.match.clockPolicy, "deliberation");
+  assert.equal(lobby.getMatch(body.result.structuredContent.match_id).config.clockPolicy, "deliberation");
+});
+
+test("a deliberation match containing a HUMAN seat is refused outright", async () => {
+  const lobby = createLobby();
+  const mcp = mcpFor(lobby, async () => false);
+  const { body } = await callTool(mcp, "create_match", {
+    seats: [{ controller: "human" }, { controller: "agent" }], clock_policy: "deliberation",
+  });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /deliberation-needs-agent-seats/);
+  assert.equal(lobby.matches.size, 0, "nothing may be created by a refused call");
+});
+
+test("an ordinary match still defaults to the realtime clock, and deliberation matches stay out of the default listing", async () => {
+  const lobby = createLobby();
+  const mcp = mcpFor(lobby, async () => false);
+  await callTool(mcp, "create_match", { seats: [{ controller: "agent" }, { controller: "agent" }] });
+  await callTool(mcp, "create_match", { seats: [{ controller: "agent" }, { controller: "agent" }], clock_policy: "deliberation" });
+
+  const plain = await callTool(mcp, "list_matches", {});
+  assert.deepEqual(plain.body.result.structuredContent.matches.map(m => m.clockPolicy), ["realtime"]);
+
+  // Asked for by name, it is findable — a second agent has to be able to join the match the first
+  // one made.
+  const asked = await callTool(mcp, "list_matches", { clock_policy: "deliberation" });
+  assert.deepEqual(asked.body.result.structuredContent.matches.map(m => m.clockPolicy), ["deliberation"]);
+  const both = await callTool(mcp, "list_matches", { clock_policy: "any" });
+  assert.equal(both.body.result.structuredContent.matches.length, 2);
+});

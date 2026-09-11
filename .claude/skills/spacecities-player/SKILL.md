@@ -1,7 +1,7 @@
 ---
 name: spacecities-player
 description: Play a SpaceCities RTS match to win via its MCP tools (mcp__spacecities__*) — open a match, run the economy, scout, counter the enemy composition, and close it out. Use when asked to join, play, continue, or win a SpaceCities match.
-allowed-tools: mcp__spacecities__create_match, mcp__spacecities__list_matches, mcp__spacecities__join_match, mcp__spacecities__leave_match, mcp__spacecities__find_my_seats, mcp__spacecities__reclaim_seat, mcp__spacecities__set_seat_controller, mcp__spacecities__get_situation, mcp__spacecities__list_entities, mcp__spacecities__get_map_overview, mcp__spacecities__get_tech_options, mcp__spacecities__get_counters, mcp__spacecities__issue_command, mcp__spacecities__wait_for_event, mcp__spacecities__batch, mcp__spacecities__surrender, mcp__spacecities__watch_match, mcp__spacecities__get_match_report
+allowed-tools: mcp__spacecities__create_match, mcp__spacecities__list_matches, mcp__spacecities__join_match, mcp__spacecities__leave_match, mcp__spacecities__find_my_seats, mcp__spacecities__reclaim_seat, mcp__spacecities__set_seat_controller, mcp__spacecities__get_situation, mcp__spacecities__list_entities, mcp__spacecities__get_map_overview, mcp__spacecities__get_tech_options, mcp__spacecities__get_counters, mcp__spacecities__issue_command, mcp__spacecities__wait_for_event, mcp__spacecities__batch, mcp__spacecities__surrender, mcp__spacecities__watch_match, mcp__spacecities__get_match_report, mcp__spacecities__take_turn, mcp__spacecities__estimate_engagement, mcp__spacecities__set_production_plan, mcp__spacecities__remember, mcp__spacecities__end_turn
 ---
 
 # SpaceCities Player
@@ -27,6 +27,40 @@ const client_id = crypto.randomUUID();   // then SAY IT IN YOUR REPLY TEXT
 It is the only cheap way back into a match after a compaction. Everything in **Recovery** is one
 call with it and a scramble without it.
 
+Then, as soon as you hold a seat, **write your plan into the seat itself**:
+
+```js
+remember({ seat_handle, notes: "client_id=<id>; bastion turtle; foundry on their FIRST bastion; 2nd habitat at 18 supply" });
+```
+
+`remember({seat_handle})` with no notes reads it back. It survives a compaction, a restart and a
+reclaimed handle — which is exactly when you need the plan and no longer have it. Update it when
+the plan changes; re-read it whenever you come back or feel unsure what you were doing.
+
+## The tools that do your waiting for you
+
+Three of them change how the loop is written, and all three exist because an agent's think time is
+tens of seconds while the sim runs at 20 ticks a second.
+
+- **`take_turn`** is `wait_for_event` + `get_situation` in ONE call, returning the state *after* the
+  events. Make it your loop. It halves the round trips and the context you burn per game-second —
+  a recorded match was abandoned mid-game with the agent out of context budget.
+- **`set_production_plan`** is a standing order: `[{building, unit, repeat, max_queued}]`, queued
+  for you the moment you can afford each one. Set it the instant you decide what to mass. This is
+  the single highest-value call in the whole surface — "keep making bastions" that survives your
+  thinking time is worth more than any build order you can execute by hand.
+- **`wake_on: {ore: 175}`** on `take_turn`/`wait_for_event` sleeps until you can afford something,
+  instead of asking, being told `cannot-afford`, and asking again. A recorded loss burned ~60
+  seconds of production in exactly that churn.
+
+Two more that answer questions you used to have to guess at:
+
+- **`estimate_engagement({your_ids, enemy_ids})`** — who wins, with a margin. Under ~1.5x it is a
+  coin flip. **Call it before every commit.** The counter table tells you lancer beats bastion; it
+  does not tell you that your one lancer loses to their three.
+- **`list_entities`'s `enemy_last_seen`** — every enemy you have ever had in fog, with
+  `age_seconds`. Use it instead of concluding anything from an empty list.
+
 ## MANDATORY CHECKLIST — read this even if you skip the rest
 
 The recorded failure mode is **losing to a gotcha that was already written down**. In one loss
@@ -41,9 +75,14 @@ a feeling that it's time:
 | ~40s | Queue the **habitat** (75 ore, 10s build, +8 supply) | Supply blocks production silently; being blocked costs the enemy a free first unit |
 | ~60s | Put **one worker on a crystal node** | Crystals gate turret/bastille/aegis — *every* static defense. Ending a match on 0 crystals means you never had the option |
 | **First enemy bastion sighted** | Start the **foundry** that same turn — do not answer bastions with bastions | The pivot takes 38s and 325 ore to produce one lancer. React late and it never arrives (see the deadline math) |
+| Can't afford it yet | `wake_on` the shortfall, or plan it — never re-ask in a loop | The rejection tells you the exact number and ETA; churning on it cost a match ~60s of production |
 | ~120s | Count your own bastions. **Fewer than 3?** Your economy is the problem, not your composition | The benchmark below: 4 by 180s wins, 1 by 160s loses |
 | Before **any** `attackMove` | `list_entities` and count defenders **out loud** | Vision you don't query is worth nothing |
-| Every `wait_for_event` | Read `summary.under_attack`; if **workers** are the target, recall now | The worker line dies in seconds and never recovers on 0.6x |
+| Every `take_turn` | Read `summary.under_attack`; if **workers** are the target, recall now | The worker line dies in seconds and never recovers on 0.6x |
+| Every `take_turn` | Read `economy.income_per_min` and `economy.workers_at_risk` | A stalled economy and a worker line wandering into the open both look like "150 ore" otherwise |
+| On `workerRetargeted` | Check where that worker just sent itself; pull it back if it left home | A depleted seam re-tasks workers across the map, one at a time, until a single raider eats your economy |
+| The moment you pick a unit to mass | `set_production_plan` for it | Production that only continues while you are awake is production that stops |
+| Before **any** commit | `estimate_engagement` | "Losing count" is a number, not a feeling |
 | After **any** lost engagement | `get_counters` before requeuing the same unit | Numbers never fix a counter deficit |
 
 ## Verified stats — the only ones that decide early matches
@@ -132,6 +171,11 @@ Corollary: **a base can vanish from `bases` without being destroyed** — that l
 the revealing scout had simply died. Never infer a kill from an absent base; confirm with
 `get_situation`'s `over` flag.
 
+`list_entities` now says this out loud so you cannot miss it: `enemy_currently_visible: false` with
+a populated `enemy_last_seen` means *you have lost sight of them*, and each entry's `age_seconds`
+says how old that sighting is. A 40-second-old bastion position is where they were, not where they
+are. Nothing but `over`/`winner` and `get_match_report` ever decides a match.
+
 ## Economy
 
 Workers gather with `{t:"gather", ids:[...], node:"n0"}`. The command center produces more workers.
@@ -146,8 +190,9 @@ consequences, all of which have cost matches:
   re-send.
 - A `cannot-afford` at what looked like ample ore is almost always **honest** — something you queued
   seconds earlier already spent it, and your ore reading is stale. One match burned eight calls over
-  four minutes chasing a phantom bug here. **Re-read `get_situation`, and the producer's own `queue`
-  in `list_entities`, before re-issuing.** A non-empty queue means production is already running.
+  four minutes chasing a phantom bug here. **Read the rejection's own `detail`**: it names the
+  `cost`, what you `have`, the `short`fall and `seconds_until_affordable` at your measured income.
+  Then either `wake_on` that number or set a `set_production_plan` entry and stop asking.
 - Queue-stuffing cannot beat the supply cap: reservations happen at queue time.
 
 **Supply.** You start at **10** (command center). Each habitat adds **+8**, but only once it has
@@ -156,7 +201,15 @@ should. Build the 2nd and 3rd habitat as soon as ore allows rather than waiting 
 `refused (supply-capped)` / `productionBlocked{reason:"supply"}` — stalled production is pure lost
 tempo.
 
-**Node depletion.** Nodes drain to `amount: 0` while workers still *look* busy. On `nodeDepleted`,
+**Watch the FLOW, not the balance.** `get_situation`'s `economy` block reports
+`income_per_min` (gross delivery, measured), `gatherers`, and `workers_at_risk` — named gatherers
+standing too far from home or next to a recently-seen enemy. A recorded loss never noticed its
+economy had died until it had 5 ore and no workers; another lost six workers to one raiding bastion.
+Check both every turn, and pull exposed workers back — the army goes between them and the enemy,
+not chasing the raider across the map.
+
+**Node depletion.** Nodes drain to `amount: 0` while workers still *look* busy. On `nodeDepleted`
+(and its pair, `workerRetargeted`, which names the node the worker just sent itself to and how far),
 workers auto-retarget the **nearest** node — which after a battle is often a junk **36-ore unit
 wreck**, so income silently stalls. Re-issue `gather` explicitly at a real, rich node whenever
 `nodeDepleted` fires; prefer the large far nodes (1170 ore) over small home ones (525) once home is
@@ -228,7 +281,10 @@ scouted something that beats it.
 3. **70-120s:** one ranger from the command center to scout — sent **alone**, never risked in a
    fight. First bastion queued at the barracks.
 4. **`setRally` barracks → command center** the moment the barracks finishes.
-5. **120-200s:** mass bastions continuously. Nothing else.
+5. **120-200s:** mass bastions continuously. Nothing else. Do this with
+   `set_production_plan([{building: barracksId, unit: "bastion", repeat: 8}])` rather than by hand:
+   the recorded losses did not fail to know they should mass bastions, they failed to be awake at
+   the moment each one became affordable.
 6. **200s+:** with 7-8 bastions and the garrison counted at ≤4-5, attack with 5 and **keep 2-3 on the
    command center**. Reinforce the same coordinates as new bastions spawn.
 7. Numeric superiority alone was enough — no tech upgrades needed when you simply outnumber the
@@ -258,8 +314,15 @@ took the map. Note the turret needs **crystals** — hence the 60s checklist ite
   `attackMove` at the **enemy army's** coordinates (from `list_entities`) flipped the fight: all 5
   defenders died for zero further losses, and the undefended buildings fell anyway. If `attackHit`
   events show your units hitting a building `targetType` while enemy units hit yours, retarget now.
-- **Don't attack into an even or losing count.** If the garrison matches or outnumbers your force,
-  hold and build. One attack went in 3 rangers vs 5 bastions and achieved nothing.
+- **Don't attack into an even or losing count — and check that with `estimate_engagement`, not by
+  eye.** Pass your ids and the defenders' ids and read `predicted_winner` and `margin`: under ~1.5x
+  it is a coin flip, and terrain, turrets you have not seen and arrival order all cut against the
+  attacker. One attack went in 3 rangers vs 5 bastions and achieved nothing; another match fed
+  single lancers into a 4-unit ball three times running. Both would have been answered in one call.
+- **Arrive together or not at all.** A unit that walks out as it spawns fights alone and dies alone.
+  `setRally` to the garrison point, gather the ball at home, then commit it with ONE command
+  (`ids[0]` leads). If you are reinforcing mid-fight, send the reinforcement to the fight, not the
+  spawn to the map.
 - **Rangers are scouts; skiffs are anti-lancer only.** Committing rangers (50hp, 6 atk, `role:"scout"`)
   to a real fight is donating them. A skiff's only bonus is vs lancer — into bastions the bonus runs
   the other way.
@@ -284,12 +347,13 @@ match.
 
 ```js
 mcp__spacecities__batch({ seat_handle, steps: [
-  { tool: "get_situation" },
-  { tool: "list_entities", arguments: { activity: "idle" } },
   { tool: "issue_command", arguments: { command: { t: "gather", ids: idleWorkers, node: "n7" } } },
-  { tool: "wait_for_event", arguments: { timeout_ms: 5000 } },
+  { tool: "take_turn", arguments: { timeout_ms: 5000 } },   // wait AND re-read, in the same trip
 ]})
 ```
+
+`take_turn` already folds the wait and the situation read together, so a batch that used to be four
+steps is usually two: act, then take your turn.
 
 Also batch *within* a command: `ids` takes up to 400 entities, and `{t:"batch", c:[...]}` applies up
 to 16 commands at one tick. Never order units one at a time.
@@ -309,6 +373,10 @@ set_seat_controller({ seat_handle, controller: "self" });                    // 
 
 There is a 90-second auto-cover net, but it costs 90 seconds of a frozen base first.
 
+Prefer a standing production order to a handover where you can: a `set_production_plan` keeps
+spending while you are away without giving the seat to an AI that will play its own game with your
+army. Use both for a genuinely long pause.
+
 **On `bad-handle`, the match is never lost.** Three routes, best first:
 
 1. `join_match({match_id, client_id})` — a rejoin; works on a *running* match, where a plain join is
@@ -318,6 +386,9 @@ There is a 90-second auto-cover net, but it costs 90 seconds of a frozen base fi
    `seat-still-active`.
 3. Nothing at all: same listing, work out which seat was yours, reclaim it.
 
+Once back in: `remember({seat_handle})` reads back the plan you left there, which is faster and more
+reliable than re-deriving it from the board.
+
 A plain `join_match` **without** `client_id` on a running match returns `already-started` — that is
 "use a rejoin", **not** "the seat is gone". One match misread it that way and gave up a live seat.
 
@@ -326,7 +397,7 @@ vanished. Always pass `include_started: true` when hunting for one.
 
 ## Ending
 
-Stop acting the moment `get_situation` reports `over: true`, or `wait_for_event` returns
+Stop acting the moment `get_situation`/`take_turn` reports `over: true`, or the wait returns
 `summary.match_over` (it returns immediately on a finished match and never blocks). Then
 `get_match_report({match_id})` for `{winner, winReason, seats, sides}` — and read `seats` before
 reporting who won, per the `owner` gotcha above.
@@ -390,3 +461,25 @@ economy badly — supply-capped ~40s unnoticed, all three near nodes depleted to
 with it because the match ended early. **A win inside the 5-minute window does not validate the
 economy behind it.** If a defensive exchange hands you the game, bank the tempo into workers and a
 refinery immediately — that same economy produces no second wave if the first attack fails.
+
+## What the server now does for you (and why you should let it)
+
+Everything in this section exists because a recorded match was lost to the thing it fixes. None of
+it plays the game for you; all of it removes the tax of playing through a request/response transport.
+
+| Instead of | Call | The loss it answers |
+|---|---|---|
+| `wait_for_event` then `get_situation` | `take_turn` | An agent ran out of context re-reading the same board and abandoned a live match |
+| queue → `cannot-afford` → wait → retry | `set_production_plan`, or `wake_on` | ~60s of production churned away 25 ore short of a Foundry |
+| guessing an x/y and being refused | `{t:"build", ..., near:{x,y}}` | Three commands and ~15s spent hunting a legal turret spot mid-attack |
+| eyeballing whether a fight is winnable | `estimate_engagement` | Single lancers fed into a four-unit ball, three times running |
+| "no enemies in `list_entities`, I've won" | `enemy_last_seen` + `over`/`winner` | Victory declared twice while the opponent's army was intact |
+| re-deriving your plan after a compaction | `remember` | The plan written at 40s was not the plan being played at 180s |
+| a stock of ore | `economy.income_per_min` | An economy that had stopped looked identical to one about to pay for the next unit |
+| watching for wandering gatherers | `economy.workers_at_risk`, `workerRetargeted` | Six workers, then the whole worker line, eaten by one raider |
+| losing the game to your own think time | `clock_policy:"deliberation"` + `end_turn` | Only available in agent-only matches — the world waits for your turn instead of running while you think |
+
+A rejection now carries `detail`: the `cost`, what you `have`, the `short`fall, and
+`seconds_until_affordable` at your **measured** income (or nothing at all, if that income would never
+get there — which is itself the answer). Every `issue_command` result carries `apm_remaining`.
+Read them instead of guessing.

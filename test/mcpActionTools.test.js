@@ -10,6 +10,7 @@ import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 import { createActionTools } from "../server/mcpActionTools.js";
 import { REJECT } from "../net/commandCodec.js";
 import { createAgentApmGuard } from "../net/agentApm.js";
+import { createSeatMemory, MEMORY_MAX_BYTES } from "../server/mcpSeatMemory.js";
 
 /* ============================================================
    T-053 (FR-15): this task's own exit criterion is explicit: "an agent commands 20 units in one
@@ -60,9 +61,9 @@ async function callTool(mcp, name, args) {
   });
 }
 
-test("createActionTools registers issue_command, surrender and set_seat_controller", () => {
+test("createActionTools registers the acting tools", () => {
   const tools = createActionTools(createLobby(), () => null);
-  assert.deepEqual(tools.map(t => t.name), ["issue_command", "surrender", "set_seat_controller"]);
+  assert.deepEqual(tools.map(t => t.name), ["issue_command", "surrender", "set_seat_controller", "set_production_plan", "end_turn", "remember"]);
 });
 
 test("REAL end to end: issue_command moves the seat's own units, applied by the real codec inside a real worker", async () => {
@@ -405,4 +406,154 @@ test("a WATCH handle can never act — not a command, not a surrender, not a han
     assert.match(body.result.content[0].text, /watch-only-handle/);
   }
   assert.equal(bridgeUsed, false, "a watcher's call must never reach the match's own bridge at all");
+});
+
+/* ============================================================
+   Agent-observability: the acting-side half of the improvements drawn from two recorded matches —
+   a build that names an AREA rather than an exact pixel, a budget an agent can read without being
+   refused, a standing production order that keeps spending while the agent is thinking, and a
+   scratchpad that outlives its context. Each is proven here at the tool boundary; the worker-side
+   behaviour they lean on (the placement search, the plan's own per-tick queueing) is proven
+   against a REAL worker in test/matchWorker.test.js.
+   ============================================================ */
+
+function seatOn(lobby, match, index = 0) {
+  return mintSeatHandle(match.id, index, lobby.joinMatch(match.id, index).token);
+}
+
+test("build with `near` resolves to the nearest LEGAL site before the command is submitted, and reports which one", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = seatOn(lobby, match);
+  let submitted = null;
+  const fakeBridge = {
+    findBuildSite: async (b, x, y) => ({ site: { x: x + 40, y } }),   // the engine slid it off an obstruction
+    sendCommand: async (seat, cmd) => { submitted = cmd; return { ok: true, result: { buildingId: "b9" } }; },
+  };
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge) });
+  const { body } = await callTool(mcp, "issue_command", {
+    seat_handle, command: { t: "build", worker: "u2", b: "barracks", near: { x: 300, y: 500 } },
+  });
+  assert.equal(body.result.isError, undefined);
+  // `near` never reaches the codec — it is resolved here into the x/y the wire shape actually has.
+  assert.deepEqual(submitted, { t: "build", worker: "u2", b: "barracks", x: 340, y: 500 });
+  assert.deepEqual(body.result.structuredContent.site, { x: 340, y: 500 });
+});
+
+test("build with `near` where nothing can be placed is a clear rejection, not a silently dropped command", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = seatOn(lobby, match);
+  let sent = 0;
+  const fakeBridge = { findBuildSite: async () => ({ site: null }), sendCommand: async () => { sent++; return { ok: true }; } };
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge) });
+  const { body } = await callTool(mcp, "issue_command", {
+    seat_handle, command: { t: "build", worker: "u2", b: "barracks", near: { x: 10, y: 10 } },
+  });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /no-legal-site/);
+  assert.equal(sent, 0, "nothing may be submitted when no site was found");
+});
+
+test("every issue_command result carries the REMAINING action budget, so batching is not guesswork", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = seatOn(lobby, match);
+  const fakeBridge = { sendCommand: async () => ({ ok: true }) };
+  // ONE guard for the match, looked up per call — the lifetime tools/serve.js gives it. (A factory
+  // that minted a fresh guard per call would hand out a full budget every time.)
+  const apmGuard = createAgentApmGuard(60);   // cap = 4
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge, () => apmGuard) });
+  const first = await callTool(mcp, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
+  const second = await callTool(mcp, "issue_command", { seat_handle, command: { t: "stop", ids: ["u1"] } });
+  assert.equal(first.body.result.structuredContent.apm_cap, 4);
+  assert.equal(first.body.result.structuredContent.apm_remaining, 3);
+  assert.equal(second.body.result.structuredContent.apm_remaining, 2);
+});
+
+test("a rejection's own numbers (what it costs, what you are short, when you can afford it) survive to the caller", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = seatOn(lobby, match);
+  const fakeBridge = {
+    sendCommand: async () => ({ ok: false, code: "refused", reason: "cannot-afford",
+      detail: { cost: { ore: 175 }, have: { ore: 150 }, short: { ore: 25 }, seconds_until_affordable: 7 } }),
+  };
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge) });
+  const { body } = await callTool(mcp, "issue_command", { seat_handle, command: { t: "build", worker: "u2", b: "foundry", x: 300, y: 500 } });
+  assert.equal(body.result.isError, true);
+  assert.deepEqual(body.result.structuredContent.detail.short, { ore: 25 });
+  assert.equal(body.result.structuredContent.detail.seconds_until_affordable, 7);
+  // The ETA also reaches the TEXT, because the difference between "wait 7 seconds" and "never on
+  // this economy" is the whole decision. (The shortfall itself is left to the `hint`, which already
+  // says it in words — repeating it would only make the sentence longer.)
+  assert.match(body.result.content[0].text, /Affordable in ~7s/);
+});
+
+test("set_production_plan hands the plan to the worker and reads it back in the vocabulary it accepts", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = seatOn(lobby, match);
+  const calls = [];
+  const fakeBridge = {
+    setProductionPlan: async (seat, action, plan) => {
+      calls.push({ seat, action, plan });
+      return { plan: action === "clear" ? [] : [{ building: "b3", unit: "bastion", alt: false, remaining: 4, maxQueued: 2 }] };
+    },
+  };
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => fakeBridge) });
+  const set = await callTool(mcp, "set_production_plan", { seat_handle, plan: [{ building: "b3", unit: "bastion", repeat: 4 }] });
+  assert.deepEqual(set.body.result.structuredContent.plan, [{ building: "b3", unit: "bastion", remaining: 4, max_queued: 2 }]);
+  assert.equal(calls[0].action, "set");
+  assert.equal(calls[0].seat, "player");
+
+  const cleared = await callTool(mcp, "set_production_plan", { seat_handle, action: "clear" });
+  assert.deepEqual(cleared.body.result.structuredContent.plan, []);
+  assert.equal(calls[1].action, "clear");
+});
+
+test("remember stores and reads back a seat's own notes, and one seat can never read another's", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat0 = seatOn(lobby, match, 0);
+  const seat1 = seatOn(lobby, match, 1);
+  const memory = createSeatMemory();
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => ({}), () => null, () => {}, memory) });
+
+  const empty = await callTool(mcp, "remember", { seat_handle: seat0 });
+  assert.equal(empty.body.result.structuredContent.notes, null);
+
+  await callTool(mcp, "remember", { seat_handle: seat0, notes: "foundry on their first bastion" });
+  const read = await callTool(mcp, "remember", { seat_handle: seat0 });
+  assert.equal(read.body.result.structuredContent.notes, "foundry on their first bastion");
+  // The other seat in the SAME match sees nothing of it.
+  const other = await callTool(mcp, "remember", { seat_handle: seat1 });
+  assert.equal(other.body.result.structuredContent.notes, null);
+});
+
+test("remember refuses an oversized note rather than silently truncating the plan it was asked to keep", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = seatOn(lobby, match);
+  const memory = createSeatMemory();
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => ({}), () => null, () => {}, memory) });
+  const { body } = await callTool(mcp, "remember", { seat_handle, notes: "x".repeat(MEMORY_MAX_BYTES + 1) });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /memory-too-large/);
+  assert.equal(memory.read(match.id, "player").notes, null, "nothing may be stored for a refused write");
+});
+
+test("end_turn reaches the worker for the calling seat, and a watch-only handle can never send one", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"], clockPolicy: "deliberation" });
+  const seat_handle = seatOn(lobby, match);
+  const ended = [];
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => ({ endTurn: seat => ended.push(seat) })) });
+  const { body } = await callTool(mcp, "end_turn", { seat_handle });
+  assert.equal(body.result.isError, undefined);
+  assert.deepEqual(ended, ["player"]);
+
+  const watcher = await callTool(mcp, "end_turn", { seat_handle: mintWatchHandle(match.id) });
+  assert.equal(watcher.body.result.isError, true);
+  assert.deepEqual(ended, ["player"], "a watcher may not pace someone else's match");
 });

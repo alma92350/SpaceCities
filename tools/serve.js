@@ -86,6 +86,7 @@ import { createEventTools } from "../server/mcpEventTools.js";
 import { createBatchTools } from "../server/mcpBatchTools.js";
 import { createSeatPresence } from "../server/seatPresence.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
+import { createSeatMemory } from "../server/mcpSeatMemory.js";
 import { createGameResources } from "../server/mcpResources.js";
 import { AGENT_APM, createAgentApmGuard } from "../net/agentApm.js";
 
@@ -241,6 +242,9 @@ export async function createAppServer() {
   // this SAME map by reference — matches start (and get an entry here) well after boot, so the
   // tools need the live, growing Map itself, never a snapshot taken at construction time.
   const liveMatches = new Map();
+  // A seat's own private scratch notes, held for the life of the process and dropped with the
+  // match (server/mcpSeatMemory.js) — never engine state, never visible to another seat.
+  const seatMemory = createSeatMemory();
   // T-051/T-052/T-053/T-054: the real lobby tools (list_matches/join_match/leave_match),
   // observation tools (get_situation/list_entities/get_map_overview/get_tech_options), action
   // tools (issue_command), and the event-wait tool (wait_for_event) — all closing over this SAME
@@ -284,6 +288,11 @@ export async function createAppServer() {
     },
   };
 
+  // Registered into mcpTools below like every other group; held in its own binding first because
+  // take_turn (server/mcpEventTools.js) reuses get_situation's OWN handler rather than a second
+  // copy of that summary.
+  const observationTools = createObservationTools(toolLobby, matchId => liveMatches.get(matchId)?.projCache ?? null);
+
   mcpTools.push(
     // Bugfix: join_match used to never start a match on its own (docs/agent-guide.md's own §2
     // told an agent to expect this gap: "the host still has to start the match separately"),
@@ -309,14 +318,22 @@ export async function createAppServer() {
       // access to it. Set SEAT_RECLAIM=off for a deployment strangers share.
       seatReclaim: { enabled: process.env.SEAT_RECLAIM !== "off" },
     }),
-    ...createObservationTools(toolLobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    ...observationTools,
     ...createActionTools(
       toolLobby,
       matchId => liveMatches.get(matchId)?.cmdBridge ?? null,
       matchId => liveMatches.get(matchId)?.apmGuard ?? null,
       (matchId, owner, wantAi) => seatPresence.setManual(matchId, owner, wantAi),
+      seatMemory,
     ),
-    ...createEventTools(toolLobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    // take_turn (the third argument) composes wait_for_event with the REGISTERED get_situation
+    // handler rather than a second copy of that summary — one round trip per agent turn instead
+    // of two, with no chance of the two answers drifting apart.
+    ...createEventTools(
+      toolLobby,
+      matchId => liveMatches.get(matchId)?.projCache ?? null,
+      observationTools.find(t => t.name === "get_situation").handler,
+    ),
     // `batch` is registered LAST and reads the registry lazily, so a batch step can name any tool
     // above it — including one registered after this line, should any ever be.
     ...createBatchTools(() => mcpTools),
@@ -372,6 +389,10 @@ export async function createAppServer() {
     const worker = new Worker(MATCH_WORKER_FILE, {
       workerData: {
         matchId: match.id,
+        // T-057's deliberation clock, now reachable from MCP create_match (clock_policy) rather
+        // than only from a harness that spawns this worker directly. Defaults to realtime for
+        // every match that does not ask, which is every match a human can see or join.
+        ...(match.config.clockPolicy === "deliberation" ? { clockPolicy: "deliberation" } : {}),
         createGameStateOpts: {
           planetId: match.config.planetId, sizeMult: match.config.sizeMult, resourceMult: match.config.resourceMult,
           matchTimeLimit: match.config.matchTimeLimit, seed,
@@ -683,13 +704,16 @@ export async function createAppServer() {
     // seat's fog (this engine's ordinary two-base-apart skirmish layout), making "did state.buildings
     // for owner ai grow" an unreliable, slow proxy for a property this already answers directly.
     liveMatches,
+    // Exposed for the same reason: a test needs to read back what a seat stored without going
+    // through a tool call to do it.
+    seatMemory,
     // Exposed for the same reason liveMatches above is: a test needs to drive the idle sweep at an
     // explicit clock rather than waiting out a real 5s interval and a real 90s idle window.
     seatPresence,
     close() {
       if (snapshotTimer) clearInterval(snapshotTimer);
       seatPresence.stop();
-      for (const { worker, wsMatch } of liveMatches.values()) { wsMatch.close(); worker.terminate(); }
+      for (const [matchId, { worker, wsMatch }] of liveMatches) { wsMatch.close(); worker.terminate(); seatMemory.forget(matchId); }
       liveMatches.clear();
     },
   };

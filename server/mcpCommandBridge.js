@@ -25,6 +25,9 @@ import { encode } from "../net/commandEnvelope.js";
  *   sendCommand: (seat: string, cmd: Object) => Promise<{ok:boolean, code?:string, result?:Object}>,
  *   surrender: (seat: string) => void,
  *   setSeatAi: (seat: string, enabled: boolean, opts?: {strategy?: string, difficulty?: string}) => Promise<{ai: boolean}>,
+ *   findBuildSite: (buildingType: string, x: number, y: number) => Promise<{site: {x:number,y:number}|null}>,
+ *   setProductionPlan: (seat: string, action: "set"|"clear"|"list", plan?: Object[]) => Promise<{plan: Object[]|null}>,
+ *   endTurn: (seat: string) => void,
  * }}
  */
 export function attachCommandBridge(worker, ackTimeoutMs = 5000) {
@@ -112,5 +115,45 @@ export function attachCommandBridge(worker, ackTimeoutMs = 5000) {
     });
   }
 
-  return { sendCommand, surrender, setSeatAi };
+  // ===== Agent-observability round-trips =====
+  // Three more request/response pairs on the same worker port, each correlated the same way
+  // sendCommand already correlates a command ack. They are here rather than as WireCommands
+  // because none of them is a command: two are questions about the match, and the third
+  // (a standing production order) is a policy the worker applies on the agent's behalf, tick by
+  // tick, through the ordinary command path.
+  let nextReqId = 1;
+  /** @type {Map<number, (payload: Object) => void>} */
+  const pendingReq = new Map();
+
+  worker.on("message", msg => {
+    if (!msg || (msg.type !== "buildSite" && msg.type !== "productionPlan")) return;
+    const resolve = pendingReq.get(msg.reqId);
+    if (!resolve) return;
+    pendingReq.delete(msg.reqId);
+    resolve(msg);
+  });
+
+  function request(message, fallback) {
+    const reqId = nextReqId++;
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { pendingReq.delete(reqId); resolve(fallback); }, ackTimeoutMs);
+      pendingReq.set(reqId, payload => { clearTimeout(timer); resolve(payload); });
+      worker.postMessage({ ...message, reqId });
+    });
+  }
+
+  const findBuildSite = (buildingType, x, y) =>
+    request({ type: "findBuildSite", buildingType, x, y }, { site: null });
+
+  const setProductionPlan = (seat, action, plan) =>
+    request({ type: "productionPlan", seat, action, plan }, { plan: null });
+
+  // Fire-and-forget like surrender, and for the same reason: the worker answers an end-of-turn
+  // with the ROUND's own advance (an endTurnResult and then a state push), which the caller
+  // observes through its ordinary situation/event tools rather than through this reply.
+  function endTurn(seat) {
+    worker.postMessage({ type: "endTurn", seat });
+  }
+
+  return { sendCommand, surrender, setSeatAi, findBuildSite, setProductionPlan, endTurn };
 }

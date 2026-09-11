@@ -28,6 +28,8 @@
 
 "use strict";
 
+import { SPECTATOR_SEAT } from "../engine/projection.js";
+
 // Agent-observability (post-T-054 gap, observed in real agent play): the worker drains
 // state.events after EVERY tick, and checkWaiters only delivers to a waiter registered at the
 // moment a push lands — so an event firing while NO wait_for_event call is in flight used to be
@@ -37,6 +39,24 @@
 // delivers the ones the latest projection no longer carries (waitForEvent's own comment). Bounded,
 // because a match can produce events faster than an agent polls.
 const UNDELIVERED_EVENTS_CAP = 256;
+
+// Agent-observability: how far back the income estimate below looks. A seat's resources are
+// reported as a STOCK ("you have 150 ore"), which is the one number an agent can already see and
+// the wrong one to plan against — a recorded loss ran its whole economy into the ground without
+// ever noticing, because 150 ore looks identical whether it took 10 seconds or 90 to accumulate.
+// A flow needs two samples over a window: long enough that a single 40-ore haul landing doesn't
+// read as a boom, short enough to notice a worker line dying. 30s is roughly three haul cycles.
+const INCOME_WINDOW_MS = 30000;
+// One sample per push would be 20/s of pure garbage; the estimate only needs the ends of the
+// window, so samples are taken at this cadence and old ones dropped.
+const INCOME_SAMPLE_MS = 1000;
+
+// Agent-observability: how long an enemy sighting stays in the seat's memory after it leaves fog.
+// Nothing is invented here — every entry was genuinely visible to this seat at the tick it was
+// recorded — but a sighting from four minutes ago is not intelligence, it is a rumour, so it
+// expires rather than accumulating into a false map of a base that has since moved or died.
+const LAST_SEEN_TTL_MS = 180000;
+const LAST_SEEN_CAP = 256;
 
 /**
  * @param {import("node:worker_threads").Worker} worker
@@ -59,6 +79,17 @@ export function attachProjectionCache(worker) {
   let mapMeta = null;
   /** @type {Map<string, Set<{baseline: Set<string>, settle: (r: Object) => void}>>} */
   const waitersBySeat = new Map();
+  // Agent-observability, all three derived from the SAME per-tick projections this cache already
+  // receives — no new worker traffic, no new fog reasoning, and nothing recorded for a seat that
+  // was not already handed it in its own projection.
+  /** @type {Map<string, {atMs: number, tick: number, resources: Object}[]>} */
+  const incomeSamplesBySeat = new Map();
+  /** @type {Map<string, Map<string, Object>>} */
+  const lastSeenBySeat = new Map();
+  /** @type {Map<string, Map<string, {sig: string, tick: number}>>} */
+  const entitySigBySeat = new Map();
+  /** @type {Map<string, {tick: number, ids: string[]}[]>} */
+  const removedBySeat = new Map();
   /** @type {Map<string, {tick: number, evs: Object[]}[]>} */
   const undeliveredBySeat = new Map();
 
@@ -79,6 +110,67 @@ export function attachProjectionCache(worker) {
     const buffer = undeliveredBySeat.get(seat);
     undeliveredBySeat.set(seat, []);
     return buffer ?? [];
+  }
+
+  function recordIncome(seat, proj) {
+    const resources = proj.players?.[seat]?.resources;
+    if (!resources) return;   // a spectator projection has no single "your resources" to sample
+    const now = Date.now();
+    const samples = incomeSamplesBySeat.get(seat) ?? [];
+    const last = samples[samples.length - 1];
+    if (last && now - last.atMs < INCOME_SAMPLE_MS) return;
+    samples.push({ atMs: now, tick: proj.tick, resources: { ...resources } });
+    while (samples.length > 1 && now - samples[0].atMs > INCOME_WINDOW_MS) samples.shift();
+    incomeSamplesBySeat.set(seat, samples);
+  }
+
+  // Only entities the projection ACTUALLY CARRIED are remembered, so this can never see further
+  // than the seat itself did: engine/projection.js has already dropped every enemy outside fog by
+  // the time this runs.
+  function recordSightings(seat, proj) {
+    if (seat === SPECTATOR_SEAT) return;   // a watcher sees everything already; remembering it adds nothing
+    const seen = lastSeenBySeat.get(seat) ?? new Map();
+    const now = Date.now();
+    // Every field is read defensively: a projection is shaped by engine/projection.js in
+    // production, but this cache is also driven by deliberately minimal test doubles, and a
+    // missing field must degrade to "nothing to record" rather than throwing inside a message
+    // listener where nobody can catch it.
+    for (const e of [...(proj.units ?? []), ...(proj.buildings ?? [])]) {
+      if (e.owner === seat) continue;
+      // Re-inserted (delete first) so Map order stays "oldest sighting first" for the eviction below.
+      seen.delete(e.id);
+      seen.set(e.id, { id: e.id, type: e.type, owner: e.owner, x: e.x, y: e.y, hp: e.hp, tick: proj.tick, time: proj.time, atMs: now });
+    }
+    for (const [id, entry] of [...seen]) if (now - entry.atMs > LAST_SEEN_TTL_MS) seen.delete(id);
+    while (seen.size > LAST_SEEN_CAP) seen.delete(seen.keys().next().value);
+    lastSeenBySeat.set(seat, seen);
+  }
+
+  // A per-entity "what did this look like last time" signature, so a caller can ask for what
+  // CHANGED since a tick it already knows instead of re-reading the whole world every wake. The
+  // signature is deliberately coarse (position rounded, hp rounded) — an agent does not need to
+  // hear that a unit moved four pixels, and a strict comparison would report every entity every
+  // tick, which is the thing this exists to avoid.
+  function recordChanges(seat, proj) {
+    const sigs = entitySigBySeat.get(seat) ?? new Map();
+    const present = new Set();
+    for (const e of [...(proj.units ?? []), ...(proj.buildings ?? [])]) {
+      present.add(e.id);
+      const sig = `${Math.round(e.x / 16)},${Math.round(e.y / 16)},${Math.round(e.hp)},${e.order?.type ?? e.activity ?? ""}`;
+      const prev = sigs.get(e.id);
+      if (!prev || prev.sig !== sig) sigs.set(e.id, { sig, tick: proj.tick });
+    }
+    const gone = [];
+    for (const id of [...sigs.keys()]) if (!present.has(id)) { sigs.delete(id); gone.push(id); }
+    entitySigBySeat.set(seat, sigs);
+    if (gone.length) {
+      // Kept as a short trail rather than a single last value: a caller asking "what changed since
+      // tick N" needs every disappearance since N, not only the most recent one.
+      const trail = removedBySeat.get(seat) ?? [];
+      trail.push({ tick: proj.tick, ids: gone });
+      while (trail.length > 64) trail.shift();
+      removedBySeat.set(seat, trail);
+    }
   }
 
   function checkWaiters(seat, proj) {
@@ -107,6 +199,9 @@ export function attachProjectionCache(worker) {
     // Before this it was dropped entirely, which is why watching a match over MCP was impossible
     // even though the worker had been publishing the stream for it all along.
     bySeat.set(msg.seat, msg.proj);
+    recordIncome(msg.seat, msg.proj);
+    recordSightings(msg.seat, msg.proj);
+    recordChanges(msg.seat, msg.proj);
     recordUndelivered(msg.seat, msg.proj.tick, msg.proj.events || []);
     checkWaiters(msg.seat, msg.proj);
   });
@@ -168,5 +263,55 @@ export function attachProjectionCache(worker) {
   // a real worker_threads Worker, and one that can't be asked simply leaves mapMeta null.
   if (typeof worker.postMessage === "function") worker.postMessage({ type: "describeMap" });
 
-  return { latestProjFor: seat => bySeat.get(seat) ?? null, waitForEvent, mapMeta: () => mapMeta };
+  // Per-minute income per commodity, measured across the sampling window above — null for a
+  // commodity (or a seat) with too little history to say anything honest yet, never a made-up 0.
+  function incomeFor(seat) {
+    const samples = incomeSamplesBySeat.get(seat) ?? [];
+    if (samples.length < 2) return null;
+    const first = samples[0], last = samples[samples.length - 1];
+    const minutes = (last.atMs - first.atMs) / 60000;
+    if (minutes <= 0) return null;
+    // GROSS income, summed from the positive step between consecutive samples — deliberately not
+    // the treasury's net movement over the window. A seat that earned 400 ore and spent 500 on a
+    // Foundry has a net rate of -100/min, and answering "how long until you can afford the next
+    // one" with a negative rate says "never", which is both wrong and exactly the answer that
+    // would have talked a recorded match out of the build that could have saved it. What a
+    // purchase decision needs is the rate the workers are actually delivering at.
+    const rates = {};
+    for (const com of Object.keys(last.resources)) {
+      let gained = 0;
+      for (let i = 1; i < samples.length; i++) {
+        gained += Math.max(0, (samples[i].resources[com] ?? 0) - (samples[i - 1].resources[com] ?? 0));
+      }
+      rates[com] = Math.round(gained / minutes);
+    }
+    return { per_min: rates, window_seconds: Math.round((last.atMs - first.atMs) / 100) / 10 };
+  }
+
+  // Every enemy entity this seat has ever had in fog, newest sighting per id, with how stale each
+  // one is. The staleness is the whole point — see LAST_SEEN_TTL_MS.
+  function lastSeenFor(seat) {
+    const seen = lastSeenBySeat.get(seat);
+    if (!seen) return [];
+    const now = Date.now();
+    return [...seen.values()]
+      .map(e => ({ id: e.id, type: e.type, owner: e.owner, x: e.x, y: e.y, hp: e.hp, tick: e.tick,
+                   age_seconds: Math.round((now - e.atMs) / 100) / 10 }))
+      .sort((a, b) => a.age_seconds - b.age_seconds);
+  }
+
+  // Which entity ids changed (or vanished) since a tick the caller already has. A caller passing a
+  // tick this cache has no history for gets `null`, meaning "no delta available, read it all" —
+  // never a silently empty delta, which would read as "nothing changed".
+  function changesSince(seat, sinceTick) {
+    const sigs = entitySigBySeat.get(seat);
+    if (!sigs) return null;
+    const changed = new Set();
+    for (const [id, entry] of sigs) if (entry.tick > sinceTick) changed.add(id);
+    const removed = (removedBySeat.get(seat) ?? []).filter(e => e.tick > sinceTick).flatMap(e => e.ids);
+    return { changed, removed: [...new Set(removed)] };
+  }
+
+  return { latestProjFor: seat => bySeat.get(seat) ?? null, waitForEvent, mapMeta: () => mapMeta,
+           incomeFor, lastSeenFor, changesSince };
 }

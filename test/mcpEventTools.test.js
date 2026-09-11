@@ -322,3 +322,111 @@ test("a WATCH handle can wait on a match's events, and gets counts with no 'mine
   assert.deepEqual(summary.by_type, { attackHit: 1 });
   assert.equal(summary.under_attack, false, "a watcher owns nothing, so nothing being hit is theirs");
 });
+
+/* ============================================================
+   Agent-observability: two additions to the waiting loop itself — a wait that ends on a RESOURCE
+   THRESHOLD (nothing in the engine fires when a treasury crosses a number, so an agent had no
+   choice but to ask, be refused, and ask again), and take_turn, which folds the wait and the
+   situation read that always follows it into one round trip.
+   ============================================================ */
+
+function cacheWithResources(getResources, waitForEvent) {
+  return {
+    waitForEvent: waitForEvent ?? (async (seat, ms) => { await new Promise(r => setTimeout(r, Math.min(ms, 50))); return { tick: 7, events: [], timedOut: true }; }),
+    latestProjFor: owner => ({ tick: 7, players: { [owner]: { resources: getResources() } } }),
+  };
+}
+
+test("wait_for_event with wake_on returns AT ONCE when the threshold is already met", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, cacheWithResources(() => ({ ore: 300 })));
+
+  const { body } = await callTool(mcp, "wait_for_event", { seat_handle, wake_on: { ore: 175 }, timeout_ms: 5000 });
+  assert.equal(body.result.isError, undefined);
+  assert.equal(body.result.structuredContent.resources_reached, true);
+  assert.equal(body.result.structuredContent.timed_out, false);
+});
+
+test("wait_for_event with wake_on sleeps through the shortfall and wakes on the crossing", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  let ore = 100;
+  const mcp = mcpFor(lobby, match.id, cacheWithResources(() => ({ ore })));
+  setTimeout(() => { ore = 200; }, 250);
+
+  const started = Date.now();
+  const { body } = await callTool(mcp, "wait_for_event", { seat_handle, wake_on: { ore: 175 }, timeout_ms: 5000 });
+  assert.equal(body.result.structuredContent.resources_reached, true);
+  assert.ok(Date.now() - started >= 200, "it must actually have waited, not returned on the first poll");
+});
+
+test("a wait asked ONLY for a resource threshold is not ended by an unrelated event", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  let ore = 100;
+  // The cache is chattering with events the caller never asked about.
+  const noisy = async () => ({ tick: 9, events: [{ type: "unitSpawned", owner: "player", id: "u9" }], timedOut: false });
+  const mcp = mcpFor(lobby, match.id, cacheWithResources(() => ({ ore }), noisy));
+  setTimeout(() => { ore = 200; }, 200);
+
+  const { body } = await callTool(mcp, "wait_for_event", { seat_handle, wake_on: { ore: 175 }, timeout_ms: 4000 });
+  assert.equal(body.result.structuredContent.resources_reached, true, "the unrelated spawn must not have ended this wait");
+});
+
+test("wake_on times out normally (never an error) when the threshold is never reached", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpFor(lobby, match.id, cacheWithResources(() => ({ ore: 10 })));
+  const { body } = await callTool(mcp, "wait_for_event", { seat_handle, wake_on: { ore: 175 }, timeout_ms: 300 });
+  assert.equal(body.result.isError, undefined);
+  assert.equal(body.result.structuredContent.timed_out, true);
+  assert.equal(body.result.structuredContent.resources_reached, undefined);
+});
+
+test("take_turn returns the wait AND the resulting situation in one call — the state AFTER the events", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const cache = cacheWithResources(() => ({ ore: 10 }), async () => ({ tick: 12, events: [{ type: "unitSpawned", owner: "player", id: "u9" }], timedOut: false }));
+  // The registered get_situation handler, stood in for here the same way the cache is: take_turn's
+  // own claim is that it CALLS it and merges the two answers, not what that handler computes.
+  const getSituation = async ({ seat_handle: h }) => ({
+    content: [{ type: "text", text: "Tick 12. 4 units (1 idle), 2 buildings." }],
+    structuredContent: { tick: 12, handle_seen: h, units_by_type: { worker: 4 }, idle_unit_ids: ["u3"] },
+  });
+  const mcp = createMcpServer({ tools: createEventTools(lobby, mid => (mid === match.id ? cache : null), getSituation) });
+
+  const { body } = await callTool(mcp, "take_turn", { seat_handle, timeout_ms: 500 });
+  const sc = body.result.structuredContent;
+  assert.equal(sc.tick, 12);
+  assert.deepEqual(sc.units_by_type, { worker: 4 });
+  assert.deepEqual(sc.idle_unit_ids, ["u3"]);
+  assert.equal(sc.events.length, 1);
+  assert.equal(sc.summary.by_type.unitSpawned, 1);
+  assert.equal(sc.handle_seen, seat_handle, "the same seat drives both halves");
+  assert.match(body.result.content[0].text, /4 units/);
+});
+
+test("take_turn is not registered at all when no get_situation handler was supplied", () => {
+  const tools = createEventTools(createLobby(), () => null);
+  assert.equal(tools.find(t => t.name === "take_turn"), undefined);
+  assert.ok(createEventTools(createLobby(), () => null, async () => ({})).find(t => t.name === "take_turn"));
+});
+
+test("take_turn surfaces a bad handle as the error it is, rather than asking for a situation on top of it", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  let situationCalls = 0;
+  const mcp = createMcpServer({
+    tools: createEventTools(lobby, () => cacheWithResources(() => ({})), async () => { situationCalls++; return {}; }),
+  });
+  const { body } = await callTool(mcp, "take_turn", { seat_handle: "garbage" });
+  assert.equal(body.result.isError, true);
+  assert.equal(situationCalls, 0);
+  void match;
+});

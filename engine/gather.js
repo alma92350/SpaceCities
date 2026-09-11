@@ -75,6 +75,20 @@ function nextNodeAfterDepletion(state, unit, node) {
     if (better) { best = n; bestUnderCap = underCap; bestDist = dist; }
   }
   unit.order = best ? { type: "gather", nodeId: best.id, phase: "toNode" } : null;
+  // workerRetargeted (agent-observability): the OTHER half of a depletion, and the dangerous one.
+  // A gatherer whose seam runs dry silently re-tasks itself to the nearest surviving node of the
+  // same commodity — which, once the safe seams near home are gone, is routinely one deep in
+  // contested ground. Two recorded matches were decided by exactly this: a worker line that
+  // walked itself out to the middle of the map, one depletion at a time, and was picked apart
+  // there by a single raider while its owner was reading its own base. Nothing announced it,
+  // because from the engine's own point of view nothing went wrong. Carries the new node's
+  // position so an observer can measure the walk against its own bases — this file has no
+  // business deciding what counts as "too far".
+  if (best) {
+    state.events.push({ type: "workerRetargeted", id: unit.id, unitType: unit.type, owner: unit.owner,
+                        fromNode: node.id, toNode: best.id, com: best.com, x: best.x, y: best.y,
+                        distance: Math.round(bestDist) });
+  }
   // unitIdle (agent-observability): a worker whose seam ran dry with nothing left to retarget to
   // simply stopped, silently — no event, and nothing in a unit's projected shape an observer could
   // poll for it either, so a match could quietly rot with half an economy standing still. Emitted

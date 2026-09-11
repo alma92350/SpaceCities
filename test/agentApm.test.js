@@ -91,3 +91,28 @@ test("createAgentApmGuard accepts an explicit apm override, for tests that need 
   for (let i = 0; i < 10; i++) { if (guard.tryConsume("player", now)) successes++; }
   assert.equal(successes, 4);
 });
+
+/* Agent-observability: an agent could previously only learn its ceiling by being refused, which
+   makes "fire and find out" the cheapest strategy — the exact behaviour the ceiling exists to
+   discourage. remaining() answers the same question without spending anything. */
+test("remaining() reports the budget without consuming any of it", () => {
+  const guard = createAgentApmGuard(60);   // cap = 4
+  const now = 1_000_000;
+  assert.equal(guard.remaining("player", now).actions, 4, "a seat that has never acted has its full burst");
+  assert.equal(guard.remaining("player", now).actions, 4, "asking twice must not cost an action");
+  guard.tryConsume("player", now);
+  assert.equal(guard.remaining("player", now).actions, 3);
+  assert.equal(guard.remaining("player", now).cap, 4);
+});
+
+test("remaining() says HOW LONG until the next action once the budget is spent", () => {
+  const guard = createAgentApmGuard(60);   // 1 credit/sec
+  const now = 1_000_000;
+  while (guard.tryConsume("player", now));
+  const drained = guard.remaining("player", now);
+  assert.equal(drained.actions, 0);
+  assert.ok(drained.seconds_until_next > 0 && drained.seconds_until_next <= 1, `expected ~1s, got ${drained.seconds_until_next}`);
+  // And a second later there is one to spend again, with nothing owed.
+  assert.equal(guard.remaining("player", now + 1000).seconds_until_next, 0);
+  assert.equal(guard.remaining("player", now + 1000).actions, 1);
+});

@@ -41,6 +41,8 @@ const COMMAND_SCHEMA = {
     "A WireCommand (net/commandShapes.js). The discriminator field `t` selects the shape; " +
     "common ones: {t:'move',ids,x,y,q?}, {t:'attackMove',ids,x,y,q?}, {t:'attack',ids,target,q?}, " +
     "{t:'gather',ids,node,q?}, {t:'stop',ids}, {t:'hold',ids}, {t:'build',worker,b,x,y}, " +
+    "{t:'build',worker,b,near:{x,y}} (the server picks the nearest LEGAL spot to `near` and tells you which — " +
+    "prefer this to guessing x/y and being refused with invalid-placement), " +
     "{t:'queueProduction',building,u,alt?}, {t:'cancelProduction',building,i}, " +
     "{t:'setRally',building,x,y} (where a producer's new units walk to — set it before a fight " +
     "rather than moving each spawn by hand), {t:'researchTech',building,tech}. " +
@@ -71,7 +73,7 @@ const COMMAND_SCHEMA = {
  *   other (see that file's own header). Defaults to a no-op for every caller that has no presence
  *   tracking at all.
  */
-export function createActionTools(lobby, getBridge, getApmGuard = () => null, onSeatControllerSet = () => {}) {
+export function createActionTools(lobby, getBridge, getApmGuard = () => null, onSeatControllerSet = () => {}, seatMemory = null) {
   return [
     {
       name: "issue_command",
@@ -97,21 +99,58 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null, on
         if (!bridge) return rejection("match-not-live: this match hasn't started yet — wait_for_event until every seat is filled, then re-issue");
         const apmGuard = getApmGuard(seat.matchId);
         if (apmGuard && !apmGuard.tryConsume(seat.owner, Date.now())) {
-          return rejection("agent-apm-exceeded: you are issuing commands faster than this match's actions-per-minute budget — pace your orders, or batch several into one command, and retry in a few seconds");
+          // Says what to do about it AND how long it will be: an agent that only hears "too fast"
+          // has to guess whether to retry in a second or a minute.
+          const left = apmGuard.remaining?.(seat.owner, Date.now());
+          return rejection(`agent-apm-exceeded: you are issuing commands faster than this match's actions-per-minute budget — pace your orders, or batch several into one command${left ? `, and retry in ~${left.seconds_until_next}s (cap ${left.cap})` : ", and retry in a few seconds"}`);
         }
-        const result = await bridge.sendCommand(seat.owner, command);
+        // `near` is resolved to a real, legal x/y BEFORE the command is submitted — using the
+        // engine's own placement search inside the worker, never a second copy of the rule out
+        // here. A recorded match burned three commands and ~15 seconds hunting for a legal turret
+        // spot by hand, at the exact moment the turret was the thing that would have saved it.
+        let chosenSite = null;
+        let outgoing = command;
+        if (command && command.t === "build" && command.near && typeof command.near === "object") {
+          if (!bridge.findBuildSite) return rejection("near-unsupported: this match's server cannot search for a site — pass x/y instead");
+          const { site } = await bridge.findBuildSite(command.b, command.near.x, command.near.y);
+          if (!site) return rejection("no-legal-site: nowhere near that point can hold this building — try a different area");
+          chosenSite = site;
+          const { near, ...rest } = command;
+          outgoing = { ...rest, x: site.x, y: site.y };
+        }
+        const result = await bridge.sendCommand(seat.owner, outgoing);
+        // The budget AFTER this call, on success and failure alike: an agent could previously only
+        // discover its ceiling by being refused, which makes "fire and find out" the cheapest
+        // strategy — exactly the behaviour the ceiling exists to discourage.
+        const budget = apmGuard?.remaining?.(seat.owner, Date.now()) ?? null;
+        const apm = budget ? { apm_remaining: budget.actions, apm_cap: budget.cap, ...(budget.seconds_until_next ? { seconds_until_next_action: budget.seconds_until_next } : {}) } : {};
         if (result.ok) {
-          return { content: [{ type: "text", text: "Command applied." }], structuredContent: result.result ?? {} };
+          return {
+            content: [{ type: "text", text: `Command applied.${chosenSite ? ` Building site chosen at (${chosenSite.x}, ${chosenSite.y}).` : ""}` }],
+            structuredContent: { ...(result.result ?? {}), ...(chosenSite ? { site: chosenSite } : {}), ...apm },
+          };
         }
         const detail = result.reason ? `${result.code} (${result.reason})` : result.code;
-        // The hint is the actionable half of the rejection: the code says WHICH rule said no, the
-        // hint says what to do about it ("requires a completed Foundry — build one first"). An
-        // agent that gets only a code guesses, and usually re-sends the identical command.
+        // Two halves of the same answer, and neither replaces the other: the `hint` says what to DO
+        // about the rule that said no ("requires a completed Foundry — build one first"), while
+        // `detail` carries the NUMBERS behind it from the worker, which is the only place that can
+        // see them (server/matchWorker.js's explainResult) — what it costs, what you have, what you
+        // are short, and when your measured income covers it. An agent that gets only a code
+        // guesses and re-sends the identical command; one that gets only the hint still cannot tell
+        // "wait six seconds" from "never on this economy".
         const hint = result.hint || hintForCode(result.code);
+        const numbers = result.detail ?? null;
+        // The hint already says the shortfall and the fix in words ("you need 20 more Ore…",
+        // "supply is capped — build a Habitat"), so the text adds only what it cannot: WHEN this
+        // seat's measured income covers it, and the site that would have worked. The full numbers
+        // are in `detail` regardless, for a caller that wants to compute with them.
+        const numbersText = numbers
+          ? `${numbers.seconds_until_affordable !== undefined ? ` Affordable in ~${numbers.seconds_until_affordable}s at your current income.` : ""}${numbers.nearest_legal_site ? ` Nearest legal site: (${numbers.nearest_legal_site.x}, ${numbers.nearest_legal_site.y}).` : ""}`
+          : "";
         return {
-          content: [{ type: "text", text: `Command rejected: ${detail} — ${hint}` }],
+          content: [{ type: "text", text: `Command rejected: ${detail} — ${hint}${numbersText}` }],
           isError: true,
-          structuredContent: { code: result.code, ...(result.reason ? { reason: result.reason } : {}), hint },
+          structuredContent: { code: result.code, ...(result.reason ? { reason: result.reason } : {}), hint, ...(numbers ? { detail: numbers } : {}), ...apm },
         };
       }),
     },
@@ -199,6 +238,140 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null, on
             ? "The game's AI is playing your seat now. Call set_seat_controller with controller:'self' when you are ready to play again."
             : "You are driving your seat again. Call get_situation before acting — the position may have moved on." }],
           structuredContent: { controller: ai ? "ai" : "self", owner: seat.owner, ai_controlled: ai },
+        };
+      }),
+    },
+    {
+      // ===== Standing production orders =====
+      // The single highest-leverage thing this transport can offer an agent, and the one it most
+      // conspicuously lacked. An agent's decision only holds until its next call; the sim ticks
+      // twenty times a second in between. Both recorded matches show the same losing shape —
+      // "keep making Bastions" decided, unaffordable at the instant it was decided, and by the
+      // next look the window had closed. A plan spends on the agent's behalf, the moment the ore
+      // lands, through the identical validated command path.
+      name: "set_production_plan",
+      title: "Keep producing these as resources allow",
+      description:
+        "A standing order: the server queues these units for you, at these buildings, as soon as you can afford each " +
+        "one — so production never stalls in the gap between your calls. Each entry is " +
+        "{building, unit, repeat, max_queued?}: repeat is how many MORE of that unit to make before the entry " +
+        "retires (1-50), max_queued is how deep it will fill that building's queue (default 2, so a plan cannot " +
+        "swallow the ore you were saving for a tech building). Every queue attempt goes through the same validation " +
+        "and costs the same resources as your own issue_command would; nothing is queued while you cannot afford it, " +
+        "are supply-capped, or lack the prerequisite. You get a planExhausted event when an entry runs out — renew it " +
+        "then. Call with plan:[] or action:'clear' to stop, action:'list' to see what is still standing. " +
+        "This does NOT replace deciding what to build; it replaces having to be awake at the instant you can pay for it.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          seat_handle: { type: "string" },
+          action: { type: "string", enum: ["set", "clear", "list"], description: "Default 'set'." },
+          plan: {
+            type: "array", maxItems: 8,
+            items: {
+              type: "object",
+              properties: {
+                building: { type: "string", description: "One of YOUR building ids (e.g. the barracks that will make these)." },
+                unit: { type: "string", description: "Unit type to produce." },
+                repeat: { type: "number", description: "How many more to make (1-50, default 1)." },
+                max_queued: { type: "number", description: "Never let this building's queue exceed this many jobs (1-8, default 2)." },
+                alt: { type: "boolean", description: "Pay the unit's alternative cost, where it has one." },
+              },
+              required: ["building", "unit"],
+            },
+          },
+        },
+        required: ["seat_handle"],
+      },
+      handler: withSeat(lobby, async ({ seat, action, plan }) => {
+        const watching = requirePlayingSeat(seat);
+        if (watching) return watching;
+        const bridge = getBridge(seat.matchId);
+        if (!bridge) return rejection("match-not-live: this match hasn't started yet");
+        if (!bridge.setProductionPlan) return rejection("plans-unsupported: this match's server cannot hold a standing order");
+        const verb = action === "clear" || action === "list" ? action : "set";
+        const result = await bridge.setProductionPlan(seat.owner, verb, verb === "set" ? (plan ?? []) : []);
+        if (result.plan === null) return rejection("plan-timeout: the match worker did not answer — try again");
+        // Reported back in the same snake_case vocabulary the tool accepts, rather than the
+        // worker's own internal field names — a caller should be able to feed a listed plan
+        // straight back in.
+        const live = result.plan.map(e => ({ building: e.building, unit: e.unit, remaining: e.remaining, max_queued: e.maxQueued, ...(e.alt ? { alt: true } : {}) }));
+        return {
+          content: [{ type: "text", text: live.length
+            ? `Standing order: ${live.map(e => `${e.remaining}x ${e.unit} at ${e.building}`).join("; ")}. These are queued for you as resources allow.`
+            : "No standing production order is active." }],
+          structuredContent: { plan: live },
+        };
+      }),
+    },
+    {
+      // ===== Turn-based pacing =====
+      // The structural answer to the mismatch this whole file works around: a human clicks in
+      // real time, an agent thinks for tens of seconds, and the sim does not care. In a match
+      // created with clock_policy:'deliberation' the world does not advance until every agent in
+      // it says it has finished its turn — so thinking is free, and a build order that takes 38
+      // seconds of game time costs the same whoever is playing.
+      name: "end_turn",
+      title: "End your turn (deliberation matches only)",
+      description:
+        "In a match created with clock_policy:'deliberation', the world is FROZEN until every agent seat has called " +
+        "this — then it advances one round and freezes again. Call it once you have issued everything you mean to " +
+        "issue this turn, then read the result with take_turn or get_situation. It does nothing in an ordinary " +
+        "realtime match, where the clock never waits for anyone (there, a long think costs you the game time it " +
+        "took — use set_seat_controller if you need to step away). A seat that never calls it is not allowed to " +
+        "stall the match forever: the server advances the round on its own watchdog.",
+      inputSchema: { type: "object", properties: { seat_handle: { type: "string" } }, required: ["seat_handle"] },
+      handler: withSeat(lobby, async ({ seat }) => {
+        const watching = requirePlayingSeat(seat);
+        if (watching) return watching;
+        const bridge = getBridge(seat.matchId);
+        if (!bridge) return rejection("match-not-live: this match hasn't started yet");
+        if (!bridge.endTurn) return rejection("end-turn-unsupported: this match's server cannot pace turns");
+        bridge.endTurn(seat.owner);
+        return {
+          content: [{ type: "text", text: "Turn ended. The round advances once every other agent seat has ended its turn too (or the watchdog fires); read the result with take_turn." }],
+          structuredContent: { ended: true, owner: seat.owner },
+        };
+      }),
+    },
+    {
+      // ===== Seat memory =====
+      // See server/mcpSeatMemory.js for why the SERVER holds a few kilobytes of the agent's own
+      // notes: a match outlives a context window, and a plan that is no longer in context is a
+      // plan the agent is no longer playing.
+      name: "remember",
+      title: "Write or read your own notes for this seat",
+      description:
+        "A few kilobytes of private scratch memory tied to THIS SEAT, which survives anything that happens to your " +
+        "context: a compaction, a restart, a lost handle you recovered with reclaim_seat. Pass `notes` to overwrite " +
+        "what is stored; call it with no notes to read back what you wrote. Keep your plan here — the build you " +
+        "committed to, the trigger you are waiting for, what you learned about the opponent — and re-read it when you " +
+        "come back, rather than re-deriving it from the board. Nobody else can read it, it is gone when the match " +
+        "ends, and it has no effect on the game.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          seat_handle: { type: "string" },
+          notes: { type: "string", description: "The text to store, replacing whatever was there. Omit to read." },
+        },
+        required: ["seat_handle"],
+      },
+      handler: withSeat(lobby, ({ seat, notes }) => {
+        const watching = requirePlayingSeat(seat);
+        if (watching) return watching;
+        if (!seatMemory) return rejection("memory-unsupported: this server holds no seat memory");
+        if (notes === undefined) {
+          const stored = seatMemory.read(seat.matchId, seat.owner);
+          return {
+            content: [{ type: "text", text: stored.notes === null ? "Nothing stored for this seat yet." : stored.notes }],
+            structuredContent: stored,
+          };
+        }
+        const written = seatMemory.write(seat.matchId, seat.owner, notes);
+        if (!written.ok) return rejection(written.code);
+        return {
+          content: [{ type: "text", text: `Stored ${written.bytes} bytes for this seat.` }],
+          structuredContent: { stored_bytes: written.bytes },
         };
       }),
     },

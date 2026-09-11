@@ -321,5 +321,9 @@ export function publicMatch(match) {
       ...(s.token && s.lastSeenAt ? { idle_seconds: Math.round(Math.max(0, Date.now() - s.lastSeenAt) / 1000) } : {}),
     })),
     spectatorsEnabled: match.config.spectatorsEnabled !== false,
+    // Which clock this match runs on — "realtime" for every match a human can see or join, and
+    // "deliberation" for an agents-only match whose world waits for every seat's end_turn. A
+    // joiner has to know which it is BEFORE it joins: the two are played completely differently.
+    clockPolicy: match.config.clockPolicy ?? "realtime",
   };
 }

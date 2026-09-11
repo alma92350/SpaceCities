@@ -120,6 +120,11 @@ signal, so check for it rather than assuming success.
 | `get_map_overview` | `{nodes:[{id,amount}], bases:[...]}` |
 | `get_tech_options` | `{units:[{type,cost,prereqs_met,affordable}], ...}` — per-seat, right now |
 | `get_counters` | `{counters:[{attacker,target,bonus}]}` — what beats what. Static: read once, not per round. |
+| `estimate_engagement` | `{predicted_winner, margin, your_dps, enemy_dps, ...}` for `your_ids` vs `enemy_ids` — the go/no-go a counter table can't give |
+| `take_turn` | `wait_for_event` + `get_situation` in one round trip. The loop primitive. |
+| `set_production_plan` | a standing order: `[{building, unit, repeat, max_queued}]`, queued by the server as resources allow |
+| `remember` | a few KB of scratch notes on the seat; survives compaction, restart, reclaim |
+| `end_turn` | in a `clock_policy:"deliberation"` match only: the world advances once every agent seat has called it |
 | `issue_command` | applies a `WireCommand` (below) |
 | `surrender` | concedes the match |
 | `wait_for_event` | blocks up to `timeout_ms`, returns `{tick, events, timed_out, summary}`. `summary.under_attack` names which of your entities are being hit; `summary.match_over` means the match is decided. Narrow with `types`/`groups`. |
@@ -139,19 +144,22 @@ is the authority. Common shapes:
 { t:"attackMove", ids:["u2","u3"], x:900, y:300 }
 { t:"gather", ids:["u2"], node:"n0" }
 { t:"build",  worker:"u2", b:"barracks", x:300, y:520 }
+{ t:"build",  worker:"u2", b:"turret", near:{x:300,y:520} }   // server picks the nearest legal site
 { t:"queueProduction", building:"b1", u:"worker" }
 { t:"researchTech", building:"b4", tech:"..." }
 { t:"batch", c:[ /* 1..16 commands, applied at one tick, never nested */ ] }
 ```
 
-**Reading the result.** Success is `content:"Command applied."` with an *empty*
-`structuredContent:{}` (a `queueProduction` success carries a receipt instead). Rejection is
-`isError:true` with `structuredContent.code` (e.g. `unknown-type`), an optional finer-grained
-`reason` (e.g. `prereq-not-met`), and a `hint` — one sentence naming the actual cause and the
-fix ("it requires a completed Barracks…", "you need 130 more Ore…", "supply is capped (10/10) —
-build a Habitat"). **Read the `hint` before retrying**: re-sending an identical command that was
-just refused burns your APM budget and changes nothing. So **do not test success by truthiness
-of `structuredContent`** — check `isError`.
+**Reading the result.** Success is `content:"Command applied."` with a `structuredContent` carrying
+the command's own receipt (a `queueProduction` receipt, a chosen build `site`) plus
+`apm_remaining`/`apm_cap`. Rejection is `isError:true` with `structuredContent.code` (e.g.
+`unknown-type`), an optional finer-grained `reason` (e.g. `prereq-not-met`), a `hint` — one sentence
+naming the actual cause and the fix ("it requires a completed Barracks…", "supply is capped
+(10/10) — build a Habitat") — and, for a cost/placement refusal, a `detail` with the numbers (cost,
+what you have, the shortfall, `seconds_until_affordable`, or the `nearest_legal_site`). **Read the
+`hint` and `detail` before retrying**: re-sending an identical command that was just refused burns
+your APM budget and changes nothing. Both shapes carry a `structuredContent`, so **do not test
+success by its truthiness** — check `isError`.
 
 Rate limit: every `issue_command` is subject to a fixed server-wide APM ceiling
 (`net/agentApm.js`), published as `agent_apm_cap` by `list_matches`. Batch related orders
@@ -176,7 +184,11 @@ rather than firing them individually.
   `list_matches({include_started:true})` and `reclaim_seat` the seat with the high `idle_seconds`.
 - **Fog is real.** `list_entities` shows only what your seat can see; early on that is your
   own 3 workers and 1 command center and nothing else. An empty enemy list means *not
-  visible*, not *not present*.
+  visible*, not *not present* — the tool says so itself now, via `enemy_currently_visible` and
+  `enemy_last_seen` (each sighting carrying how many seconds stale it is).
+- **A deliberation match is invisible to the default listing.** `clock_policy:"deliberation"`
+  matches (the agents-only, world-waits-for-`end_turn` clock) are hidden from `list_matches` unless
+  you pass `clock_policy:"deliberation"` or `"any"`, and cannot be created with a human seat at all.
 
 ## Playing to win
 

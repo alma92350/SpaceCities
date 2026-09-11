@@ -136,12 +136,26 @@ export function createLobbyTools(lobby, onSeatsFilled, opts = {}) {
           resource_mult: { type: "number", description: "Resource richness multiplier." },
           match_time_limit: { type: "number", description: "Match length in seconds; omit for no limit." },
           spectators_enabled: { type: "boolean", description: "Whether watch_match may observe this match (default true)." },
+          clock_policy: {
+            type: "string", enum: ["realtime", "deliberation"],
+            description:
+              "'realtime' (default) is the ordinary game: the world advances 20 times a second whether or not you are " +
+              "thinking. 'deliberation' FREEZES the world between turns — it advances one round only once every agent " +
+              "seat has called end_turn (or a server watchdog fires), so thinking costs no game time. Only allowed " +
+              "when no seat is a human: a person is never made to sit and wait on an agent's think time.",
+          },
         },
         additionalProperties: false,
       },
-      handler: async ({ seats, join_as, client_id, planet_id, size_mult, resource_mult, match_time_limit, spectators_enabled }) => {
+      handler: async ({ seats, join_as, client_id, planet_id, size_mult, resource_mult, match_time_limit, spectators_enabled, clock_policy }) => {
         const seatConfig = seatConfigFrom(seats);
         if (seatConfig.error) return rejection(seatConfig.error);
+        // ADR-0007's own safety property, enforced where the match is CREATED rather than only
+        // hidden at listing time: a deliberation match may contain agents and scripted AI, never a
+        // human, because a frozen clock turns someone else's think time into your dead air.
+        if (clock_policy === "deliberation" && seatConfig.seatKinds.includes("open")) {
+          return rejection("deliberation-needs-agent-seats: a deliberation match cannot contain a human seat");
+        }
         let match;
         try {
           match = lobby.createMatch({
@@ -150,6 +164,7 @@ export function createLobbyTools(lobby, onSeatsFilled, opts = {}) {
             ...(Number.isFinite(resource_mult) ? { resourceMult: resource_mult } : {}),
             ...(Number.isFinite(match_time_limit) ? { matchTimeLimit: match_time_limit } : {}),
             ...(typeof spectators_enabled === "boolean" ? { spectatorsEnabled: spectators_enabled } : {}),
+            ...(clock_policy === "deliberation" ? { clockPolicy: "deliberation" } : {}),
             seatKinds: seatConfig.seatKinds, seatAi: seatConfig.seatAi,
           });
         } catch (e) { return rejection(`bad-config: ${e.message}`); }
@@ -192,13 +207,20 @@ export function createLobbyTools(lobby, onSeatsFilled, opts = {}) {
         type: "object",
         properties: {
           include_started: { type: "boolean", description: "Also list matches that have already started or finished (default false)." },
+          clock_policy: {
+            type: "string", enum: ["realtime", "deliberation", "any"],
+            description: "Which clock to list (default 'realtime'). Deliberation matches — where the world waits for every agent's end_turn — are hidden from the default listing, so ask for them by name if that is what you are looking for.",
+          },
         },
         additionalProperties: false,
       },
-      handler: ({ include_started } = {}) => {
+      handler: ({ include_started, clock_policy } = {}) => {
+        const wanted = clock_policy === "deliberation" || clock_policy === "any" ? clock_policy : "realtime";
+        const clockOf = m => m.config.clockPolicy ?? "realtime";
+        const matchesClock = m => wanted === "any" || clockOf(m) === wanted;
         const source = include_started
-          ? [...lobby.matches.values()].filter(m => (m.config.clockPolicy ?? "realtime") === "realtime")
-          : lobby.listOpenMatches();
+          ? [...lobby.matches.values()].filter(matchesClock)
+          : (wanted === "realtime" ? lobby.listOpenMatches() : [...lobby.matches.values()].filter(m => m.status === "open" && matchesClock(m)));
         const matches = source.map(m => ({ ...publicMatch(m), ...(getResult(m.id) ? { result: getResult(m.id) } : {}) }));
         return {
           content: [{ type: "text", text: matches.length

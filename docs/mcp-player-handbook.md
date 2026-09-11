@@ -21,22 +21,23 @@ const { seat_handle, started } = (await call("create_match", {
   join_as: 0, client_id,
 })).structuredContent;
 
-for (;;) {
-  const [situation, entities, events] = (await call("batch", {
-    seat_handle,
-    steps: [
-      { tool: "get_situation" },
-      { tool: "list_entities", arguments: { activity: "idle" } },
-      { tool: "wait_for_event", arguments: { timeout_ms: 5000 } },
-    ],
-  })).structuredContent.results.map(r => r.structuredContent);
+// write down the plan where a compaction cannot take it from you
+await call("remember", { seat_handle, notes: "bastion turtle; foundry on their FIRST bastion" });
 
-  if (situation.over) break;
-  // ... decide, then issue commands (batched too) ...
+// keep producing without having to be awake for it
+await call("set_production_plan", { seat_handle, plan: [{ building: barracksId, unit: "bastion", repeat: 6 }] });
+
+for (;;) {
+  // one call: waits for something to happen, then hands back the situation AFTER it
+  const turn = (await call("take_turn", { seat_handle, timeout_ms: 5000 })).structuredContent;
+  if (turn.over) break;
+  if (turn.summary?.under_attack) { /* respond */ }
+  if (turn.idle_unit_ids.length) { /* re-task them, batched */ }
+  if (turn.economy.workers_at_risk.length) { /* pull them back before they are picked off */ }
 }
 ```
 
-That is the whole shape. Everything below is detail on the four calls in it.
+That is the whole shape. Everything below is detail on the calls in it.
 
 ---
 
@@ -197,7 +198,30 @@ events you excluded instead of returning empty.
 
 Raw events carry ids, not just coordinates: `attackHit` (`sourceId`/`targetId`), `entityKilled`
 (`id`, `killerId`), `unitSpawned` (`id`, `fromBuildingId`), `buildingComplete` (`id`),
-`researchComplete`, `nodeDepleted`, `unitIdle`.
+`researchComplete`, `nodeDepleted`, `unitIdle`, `workerRetargeted` (a gatherer re-tasked itself to
+another seam — look at how far from home it just sent itself) and `planExhausted` (a standing
+production order ran out; renew it).
+
+**`take_turn` is the same wait plus the `get_situation` that always follows it, in one round trip.**
+Use it as your loop. Both it and `wait_for_event` also take `wake_on: { ore: 175 }` — resolve as
+soon as you can afford something, instead of asking and being refused four times.
+
+### Keep producing while you think — `set_production_plan`
+
+Your think time is tens of seconds; the sim ticks 20 times a second. A standing order spends on
+your behalf the moment the ore lands:
+
+```js
+await call("set_production_plan", { seat_handle, plan: [
+  { building: barracksId, unit: "bastion", repeat: 6, max_queued: 2 },
+] });
+```
+
+Same validation and same costs as your own `issue_command`; nothing is queued while you cannot
+afford it, are supply-capped, or lack the prerequisite. `repeat` counts down, then you get a
+`planExhausted` event. `action: "list"` shows what is still standing, `action: "clear"` stops it.
+This does not replace deciding what to build — it replaces having to be awake at the instant you
+can pay for it.
 
 ## 7. When the match ends
 
@@ -225,11 +249,14 @@ All fog-respecting: your own entities always, an enemy's only while visible.
 
 | Tool | Use it for |
 |---|---|
-| `get_situation` | Tick, `over`/`winner`, your resources and supply, unit/building counts, **`idle_unit_ids`**, who you are, map bounds. |
-| `list_entities` | Every visible entity. Yours also carry `activity`, `orderTarget`, `queue`, `buildProgress`. Filter by `owner`/`type`/`activity`. |
+| `take_turn` | **Your loop.** Waits like `wait_for_event`, then returns the resulting situation — one round trip instead of two. |
+| `get_situation` | Tick, `over`/`winner`, your resources and supply, unit/building counts, **`idle_unit_ids`**, the **`economy`** block (income per minute, gatherers, **`workers_at_risk`**), who you are, map bounds. |
+| `list_entities` | Every visible entity. Yours also carry `activity`, `orderTarget`, `queue`, `buildProgress`. Filter by `owner`/`type`/`activity`, or `since_tick` for just what changed. Reports `enemy_currently_visible` and `enemy_last_seen` — **an empty enemy list is fog, not victory.** |
 | `get_map_overview` | Discovered nodes with their **commodity**, amount and distance from your base, nearest first; visible bases. |
-| `get_tech_options` | Every unit/building with cost, stats, `prereqs_met` + `missing_prereqs`, `affordable`. |
+| `get_tech_options` | Every unit/building with cost, stats, `prereqs_met` + `missing_prereqs`, `affordable`, and `seconds_until_affordable` when you cannot pay yet. |
 | `get_counters` | The unit counter table. Static — read once. |
+| `estimate_engagement` | Who wins a fight, with a margin. The question the counter table cannot answer: a counter bonus says nothing about a 1-versus-4. |
+| `remember` | Your own notes for this seat — survives a compaction, a restart, a reclaimed handle. |
 
 Static reference also lives in MCP **resources** (`game://units`, `game://buildings`,
 `game://counters`, `game://tech-tree`): read once per process, never per turn.
@@ -256,6 +283,16 @@ seat, so it never blocks a real player. Fails if the host disabled spectators.
    what actually limits you.
 4. **Idle workers.** Check `idle_unit_ids` every turn and watch for `unitIdle`/`nodeDepleted`. An
    economy that stopped is invisible in every other field.
+
+And three more, each of which really decided a recorded match:
+
+5. **Reading an empty enemy list as a win.** It means fog. Only `get_situation`'s `over`/`winner`
+   and `get_match_report` decide a match. Check `enemy_last_seen` before you believe they are gone.
+6. **Letting the worker line walk into the open.** A depleted seam re-tasks that worker to the
+   nearest surviving node, which is eventually one in the middle of the map. Watch
+   `workerRetargeted` and `economy.workers_at_risk`, and pull them back.
+7. **Feeding units in one at a time.** Ask `estimate_engagement` before you commit. Every unit that
+   arrives alone arrives into a fight it was always going to lose.
 
 ## Do this first, before anything else
 
