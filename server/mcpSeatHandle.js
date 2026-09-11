@@ -156,7 +156,31 @@ export function withSeat(lobby, handler) {
 // decide what to try next, rather than a generic failure it can only retry blindly. Shared here
 // (not duplicated per tool file) the moment a SECOND file needed the identical shape.
 export function rejection(code) {
-  return { content: [{ type: "text", text: `Could not complete: ${code}` }], isError: true };
+  return { content: [{ type: "text", text: `Could not complete: ${code}${guidanceFor(code)}` }], isError: true };
+}
+
+/* What to DO about each lobby/session-level rejection — the counterpart to net/refusalHints.js,
+   which does the same job for a rejected in-match command. A bare code ("seat-taken",
+   "already-started") tells an agent only that it failed, so its next move is a guess or a blind
+   retry of the identical call; naming the recovery ("someone else took that seat — list_matches
+   and join another") turns each of these into one more round trip instead of a dead end.
+   Appended, never substituted: the machine-readable code stays first in the text, unchanged. */
+const CODE_GUIDANCE = Object.freeze({
+  "no-such-match":   "that match id is not in the lobby — call list_matches for live ids.",
+  "no-open-seat":    "every seat in that match is taken — call list_matches and pick one still showing an open seat.",
+  "no-such-seat":    "that seat index does not exist in this match — list_matches shows how many seats it has.",
+  "seat-not-open":   "that seat is reserved for a human or an AI, not an agent — pick a seat listed as open.",
+  "seat-taken":      "another player claimed that seat first — call list_matches and join a different one.",
+  "already-started": "the match has already started, so seats can no longer be joined or left — use surrender to concede an in-progress match.",
+  "bad-token":       "that seat_handle does not match this seat — use the handle join_match returned for it.",
+  "bad-handle":      "the seat_handle is not a handle this server issued — call join_match again to get a fresh one.",
+});
+
+/** @param {string} code @returns {string} the guidance clause, or "" when the code already carries its own */
+function guidanceFor(code) {
+  if (typeof code !== "string" || code.includes(": ")) return "";   // the caller already spelled out the recovery
+  const guidance = CODE_GUIDANCE[code];
+  return guidance ? ` — ${guidance}` : "";
 }
 
 /**

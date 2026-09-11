@@ -182,11 +182,33 @@ same shape the browser client sends for a human, validated by the identical serv
 `too-many` · `out-of-bounds` · `refused` (the engine itself said no — cost or prerequisite unmet,
 bad placement).
 
-A `refused` from `build` or `queueProduction` also carries a `reason` in
+A `refused` from `build`, `queueProduction` or a research command also carries a `reason` in
 `result.structuredContent`, naming the check that actually failed rather than leaving you to probe
 for it: `cannot-afford` · `prereq-not-met` · `invalid-placement` · `supply-capped` ·
 `unit-cannot-build-this-category` · `building-cannot-produce-this-unit` ·
-`building-under-construction` · `odyssey-only-unit` / `odyssey-only-building`.
+`building-under-construction` · `odyssey-only-unit` / `odyssey-only-building` ·
+`wrong-building-for-research` · `already-researched` · `already-queued` · `doctrine-locked` ·
+`no-such-job` · `not-a-bomb` / `bomb-not-armed` / `fuse-already-lit`.
+
+**Every** rejection — the coarse codes above as well as a `refused` reason — also carries a
+`hint`: one sentence naming the cause and what to do about it, resolved against the live match.
+That is the field to read before you retry.
+
+```
+refused (prereq-not-met)  -> hint: "it requires a completed Barracks — build or research that
+                                    first, and wait for it to FINISH (a site still under
+                                    construction does not count)."
+refused (cannot-afford)   -> hint: "you need 130 more Ore (have 20 of 150) — gather or trade for
+                                    it before re-issuing."
+refused (supply-capped)   -> hint: "supply is capped (10/10, this unit needs 1) — build a Habitat
+                                    (or another Command Center) to raise the cap first."
+not-visible               -> hint: "that target is outside your vision — scout it or move a unit
+                                    within sight range before targeting it."
+```
+
+Seat- and lobby-level rejections (`no-such-match`, `seat-taken`, `already-started`,
+`match-not-live`, `agent-apm-exceeded`, …) name their own recovery in the rejection text for the
+same reason — which tool to call next, not just which rule said no.
 
 Common command shapes (`ids` is an array of 1–400 unit/building ids you own):
 
@@ -249,7 +271,7 @@ const result = await client.callTool("issue_command", {
   seat_handle,
   command: { t: "attackMove", ids: myUnitIds, x: target.x, y: target.y },
 });
-if (result.isError) console.log("rejected:", result.structuredContent.code);
+if (result.isError) console.log("rejected:", result.structuredContent.code, "—", result.structuredContent.hint);
 ```
 
 ### Conceding: `surrender`

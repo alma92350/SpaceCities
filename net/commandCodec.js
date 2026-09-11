@@ -22,8 +22,9 @@
 "use strict";
 
 import * as cmd from "../engine/commands.js";
-import { queueProduction, cancelProduction, researchUpgrade, productionRefusalReason } from "../engine/production.js";
-import { researchTech, cancelResearch } from "../engine/techtree.js";
+import { queueProduction, cancelProduction, researchUpgrade, productionRefusalReason, researchUpgradeRefusalReason } from "../engine/production.js";
+import { researchTech, cancelResearch, researchTechRefusalReason } from "../engine/techtree.js";
+import { hintFor } from "./refusalHints.js";
 import { lightFuse } from "../engine/bomb.js";
 import { BUILDINGS, UNITS } from "../engine/entities.js";
 import { FORMATION_SHAPES, LEADER_POSITIONS } from "../engine/formation.js";
@@ -389,34 +390,52 @@ const SCHEMA = {
   cancelProduction: { run(state, owner, c) {
     if (!Number.isInteger(c.i) || c.i < 0) return err(REJECT.MALFORMED);
     const b = ownBuilding(state, owner, c.building); if (!b.ok) return b;
-    cancelProduction(state, b.result.id, c.i);
+    // Same agent-observability shape as queueProduction: a cancel that hit an index the queue
+    // doesn't have used to report success, so a caller couldn't tell "cancelled and refunded"
+    // from "your index was stale" — and re-sent it.
+    if (!cancelProduction(state, b.result.id, c.i)) return { ok: false, code: REJECT.REFUSED, reason: "no-such-job" };
     return ok();
   }},
 
   researchUpgrade: { run(state, owner, c) {
     if (typeof c.up !== "string") return err(REJECT.MALFORMED);
     const b = ownBuilding(state, owner, c.building); if (!b.ok) return b;
-    researchUpgrade(state, b.result.id, c.up);
+    // Research used to report success unconditionally — a doctrine-locked, unaffordable or
+    // already-queued upgrade looked exactly like a queued one. Report WHY instead (the same
+    // checks engine/production.js just ran), so a caller can fix the order rather than repeat it.
+    if (!researchUpgrade(state, b.result.id, c.up)) {
+      return { ok: false, code: REJECT.REFUSED, reason: researchUpgradeRefusalReason(state, b.result.id, c.up) };
+    }
     return ok();
   }},
 
   researchTech: { run(state, owner, c) {
     if (typeof c.tech !== "string") return err(REJECT.MALFORMED);
     const b = ownBuilding(state, owner, c.building); if (!b.ok) return b;
-    researchTech(state, b.result.id, c.tech);
+    if (!researchTech(state, b.result.id, c.tech)) {   // same shape/rationale as researchUpgrade above
+      return { ok: false, code: REJECT.REFUSED, reason: researchTechRefusalReason(state, b.result.id, c.tech) };
+    }
     return ok();
   }},
 
   cancelResearch: { run(state, owner, c) {
     if (!Number.isInteger(c.i) || c.i < 0) return err(REJECT.MALFORMED);
     const b = ownBuilding(state, owner, c.building); if (!b.ok) return b;
-    cancelResearch(state, b.result.id, c.i);
+    if (!cancelResearch(state, b.result.id, c.i)) return { ok: false, code: REJECT.REFUSED, reason: "no-such-job" };
     return ok();
   }},
 
   lightFuse: { run(state, owner, c) {
     const u = ownUnit(state, owner, c.unit); if (!u.ok) return u;
-    lightFuse(state, u.result);
+    // Only a BOMB has a fuse. engine/bomb.js's lightFuse takes the bomb it is given on trust
+    // (every in-game caller already holds one), so without this gate a mistyped id quietly
+    // stamped `fuseUntil` onto an ordinary unit and answered "ok" — the worst kind of silent
+    // failure for a caller driving the match over the wire.
+    const bomb = u.result;
+    if (UNITS[bomb.type]?.role !== "bomb")  return { ok: false, code: REJECT.REFUSED, reason: "not-a-bomb" };
+    if (!bomb.armed)                        return { ok: false, code: REJECT.REFUSED, reason: "bomb-not-armed" };
+    if (bomb.fuseUntil != null)             return { ok: false, code: REJECT.REFUSED, reason: "fuse-already-lit" };
+    lightFuse(state, bomb);
     return ok();
   }},
 };
@@ -431,6 +450,17 @@ export const COMMAND_TYPES = Object.freeze(Object.keys(SCHEMA));
  * @returns {CommandResult}
  */
 export function apply(state, owner, command) {
+  const r = run(state, owner, command);
+  // Every rejection — from this file's own shape/ownership/fog gates AND from the engine's
+  // refusal reasons — carries one action-oriented sentence saying what to do about it
+  // (net/refusalHints.js). Purely additive: `code` and `reason` are untouched and remain the
+  // fields to branch on; `hint` is for whoever reads the result, human or agent.
+  if (r.ok || r.hint) return r;   // a batch member's rejection already carries its OWN hint
+  return { ...r, hint: hintFor(state, owner, command, r) };
+}
+
+/** @param {Object} state @param {string} owner @param {WireCommand} command @returns {CommandResult} */
+function run(state, owner, command) {
   if (!command || typeof command !== "object" || typeof command.t !== "string") return err(REJECT.MALFORMED);
   if (command.t === "batch") {
     if (!Array.isArray(command.c) || !command.c.length) return err(REJECT.MALFORMED);
@@ -446,7 +476,9 @@ export function apply(state, owner, command) {
       const entry = SCHEMA[sub.t];
       if (!entry) return err(REJECT.UNKNOWN_TYPE);
       const r = entry.run(state, owner, sub);
-      if (!r.ok) return r;
+      // The hint is built from the MEMBER that actually failed, not the batch wrapper — the
+      // wrapper has no `b`/`u`/coords to explain the refusal with.
+      if (!r.ok) return { ...r, hint: hintFor(state, owner, sub, r) };
       results.push(r.result);
     }
     return ok(results);

@@ -126,14 +126,19 @@ test("join_match reports a clear TOOL EXECUTION error for an unknown match, a ta
   assert.equal(noSuchMatch.status, 200);
   assert.equal(noSuchMatch.body.result.isError, true);
   assert.match(noSuchMatch.body.result.content[0].text, /no-such-match/);
+  // The code alone leaves a caller guessing its next call; every lobby rejection also names the
+  // recovery (server/mcpSeatHandle.js CODE_GUIDANCE), same contract as a rejected command's hint.
+  assert.match(noSuchMatch.body.result.content[0].text, /list_matches/);
 
   const seatTaken = await callTool(mcp, "join_match", { match_id: match.id, seat_index: 0 });
   assert.equal(seatTaken.body.result.isError, true);
   assert.match(seatTaken.body.result.content[0].text, /seat-taken/);
+  assert.match(seatTaken.body.result.content[0].text, /list_matches/);
 
   const alreadyStarted = await callTool(mcp, "join_match", { match_id: startedMatch.id });
   assert.equal(alreadyStarted.body.result.isError, true);
   assert.match(alreadyStarted.body.result.content[0].text, /already-started/);
+  assert.match(alreadyStarted.body.result.content[0].text, /client_id|watch_match/, "…and points at what DOES apply to a started match");
 });
 
 test("join_match reports a clear tool execution error when every seat is already taken (no open seat left to auto-pick)", async () => {

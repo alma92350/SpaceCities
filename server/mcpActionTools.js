@@ -33,6 +33,7 @@
 "use strict";
 
 import { withSeat, rejection, requirePlayingSeat } from "./mcpSeatHandle.js";
+import { hintForCode } from "../net/refusalHints.js";
 
 const COMMAND_SCHEMA = {
   type: "object",
@@ -79,7 +80,9 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null, on
         "Submits a command for the calling seat's own units/buildings — the same wire command " +
         "a human player's client sends, validated by the identical server-side codec (ownership, " +
         "fog, affordability, rate limits). A rejected command reports the same machine-readable " +
-        "reject code a human's own rejected click would get, so you can adjust and retry. Subject " +
+        "reject code a human's own rejected click would get — plus a `hint` saying what actually " +
+        "blocked it and what to do instead (which building is missing, how much ore you are short, " +
+        "why the placement failed), so you can adjust and retry. Subject " +
         "to a published actions-per-minute ceiling — a burst of calls beyond that budget is " +
         "rejected the same way, not silently queued.",
       inputSchema: {
@@ -91,20 +94,24 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null, on
         const watching = requirePlayingSeat(seat);
         if (watching) return watching;
         const bridge = getBridge(seat.matchId);
-        if (!bridge) return rejection("match-not-live: this match hasn't started yet");
+        if (!bridge) return rejection("match-not-live: this match hasn't started yet — wait_for_event until every seat is filled, then re-issue");
         const apmGuard = getApmGuard(seat.matchId);
         if (apmGuard && !apmGuard.tryConsume(seat.owner, Date.now())) {
-          return rejection("agent-apm-exceeded: action budget exhausted, try again shortly");
+          return rejection("agent-apm-exceeded: you are issuing commands faster than this match's actions-per-minute budget — pace your orders, or batch several into one command, and retry in a few seconds");
         }
         const result = await bridge.sendCommand(seat.owner, command);
         if (result.ok) {
           return { content: [{ type: "text", text: "Command applied." }], structuredContent: result.result ?? {} };
         }
         const detail = result.reason ? `${result.code} (${result.reason})` : result.code;
+        // The hint is the actionable half of the rejection: the code says WHICH rule said no, the
+        // hint says what to do about it ("requires a completed Foundry — build one first"). An
+        // agent that gets only a code guesses, and usually re-sends the identical command.
+        const hint = result.hint || hintForCode(result.code);
         return {
-          content: [{ type: "text", text: `Command rejected: ${detail}` }],
+          content: [{ type: "text", text: `Command rejected: ${detail} — ${hint}` }],
           isError: true,
-          structuredContent: { code: result.code, ...(result.reason ? { reason: result.reason } : {}) },
+          structuredContent: { code: result.code, ...(result.reason ? { reason: result.reason } : {}), hint },
         };
       }),
     },

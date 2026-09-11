@@ -126,7 +126,7 @@ export function createEventTools(lobby, getCache) {
       },
       handler: withSeat(lobby, async ({ seat, timeout_ms, types, groups }) => {
         const cache = getCache(seat.matchId);
-        if (!cache) return rejection("match-not-live: this match hasn't started yet");
+        if (!cache) return rejection("match-not-live: this match hasn't started yet — every seat must be filled before events flow; poll list_matches, or wait and retry");
         const wanted = new Set([
           ...(Array.isArray(types) ? types : []),
           ...(Array.isArray(groups) ? groups.flatMap(g => ALERT_GROUPS[g] ?? []) : []),

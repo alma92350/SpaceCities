@@ -86,9 +86,15 @@ export function toCommandResult(recResult) {
     // BEHIND a coarse reject code — "refused" alone can't distinguish a locked unit from an
     // unaffordable one. Only present when the codec supplied one, so every existing rejection's
     // wire shape is byte-identical to before.
-    return recResult.reason
-      ? { ok: false, code: recResult.rejected, reason: recResult.reason }
-      : { ok: false, code: recResult.rejected };
+    return {
+      ok: false,
+      code: recResult.rejected,
+      ...(recResult.reason ? { reason: recResult.reason } : {}),
+      // `hint` (net/refusalHints.js) is the same refusal said in one action-oriented English
+      // sentence — what blocked it and what to do instead. Same additive rule as `reason`:
+      // only present when the codec supplied one.
+      ...(recResult.hint ? { hint: recResult.hint } : {}),
+    };
   }
   return { ok: true, result: recResult ?? null };
 }
@@ -160,7 +166,7 @@ export function stepMatch(match, dt) {
       // know why nothing happened) — it carries no state mutation, so it can't affect replay,
       // but it must still be PRESENT in the log for the log to be auditable (dossier §5.3).
       const res = apply(state, rec.owner, rec.cmd);
-      rec.result = res.ok ? res.result : { rejected: res.code, ...(res.reason ? { reason: res.reason } : {}) };
+      rec.result = res.ok ? res.result : { rejected: res.code, ...(res.reason ? { reason: res.reason } : {}), ...(res.hint ? { hint: res.hint } : {}) };
       rec.appliedAtTick = state.tick;
       log.push(rec);
       match.emitAck(rec);

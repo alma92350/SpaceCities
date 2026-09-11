@@ -145,16 +145,20 @@ test("ownership: build's worker must be your own", () => {
   assert.equal(r.code, REJECT.NOT_OWNER);
 });
 
-test("ownership: lightFuse's unit must be your own; a dead/unknown id is NO_TARGET, not silently ignored", () => {
+test("ownership: lightFuse's unit must be your own AND actually a bomb; a dead/unknown id is NO_TARGET, not silently ignored", () => {
   const state = makeState();
   const [w] = playerUnits(state);
   const aiWorker = aiUnits(state)[0];
   assert.equal(apply(state, "player", { t: "lightFuse", unit: aiWorker.id }).code, REJECT.NOT_OWNER);
   assert.equal(apply(state, "player", { t: "lightFuse", unit: "no-such-unit" }).code, REJECT.NO_TARGET);
   assert.equal(apply(state, "player", { t: "lightFuse", unit: 5 }).code, REJECT.MALFORMED);
-  // A real, owned, non-bomb unit: the codec still routes it through (ok:true) — whether lightFuse
-  // itself does anything to a unit that isn't a Helium Bomb is engine/bomb.js's own concern.
-  assert.equal(apply(state, "player", { t: "lightFuse", unit: w.id }).ok, true);
+  // A real, owned, NON-bomb unit is refused with a reason rather than routed through: engine/
+  // bomb.js's lightFuse trusts its argument, so routing a Worker through it used to stamp a fuse
+  // onto it and answer ok — a silent, unreadable failure for a caller driving the match remotely.
+  const notBomb = apply(state, "player", { t: "lightFuse", unit: w.id });
+  assert.equal(notBomb.code, REJECT.REFUSED);
+  assert.equal(notBomb.reason, "not-a-bomb");
+  assert.equal(w.fuseUntil, undefined);
 });
 
 test("ownership: ferry's target must be YOUR OWN freighter, not merely visible — dossier 02's point that a foreign or nonexistent ferry target must never be silently accepted", () => {
@@ -434,11 +438,20 @@ test("production/research commands reach the engine for an owned building — th
   assert.equal(apply(state, "player", { t: "cancelProduction", building: pCC.id, i: "x" }).code, REJECT.MALFORMED);
   assert.equal(apply(state, "player", { t: "cancelProduction", building: pCC.id, i: 0 }).ok, true);
 
-  assert.equal(apply(state, "player", { t: "researchUpgrade", building: pCC.id, up: "overchargedWeapons" }).ok, true);
+  // Research at a Command Center is not research at all — the engine has always refused it; the
+  // codec now REPORTS that refusal instead of answering ok to a silent no-op.
+  const up = apply(state, "player", { t: "researchUpgrade", building: pCC.id, up: "overchargedWeapons" });
+  assert.equal(up.code, REJECT.REFUSED);
+  assert.equal(up.reason, "wrong-building-for-research");
+  assert.match(up.hint, /Refinery/);
   assert.equal(apply(state, "player", { t: "researchUpgrade", building: pCC.id, up: 1 }).code, REJECT.MALFORMED);
-  assert.equal(apply(state, "player", { t: "researchTech", building: pCC.id, tech: "metallurgy" }).ok, true);
+  const tech = apply(state, "player", { t: "researchTech", building: pCC.id, tech: "metallurgy" });
+  assert.equal(tech.code, REJECT.REFUSED);
+  assert.equal(tech.reason, "wrong-building-for-research");
+  assert.match(tech.hint, /Datacenter/);
   assert.equal(apply(state, "player", { t: "researchTech", building: pCC.id, tech: 1 }).code, REJECT.MALFORMED);
-  assert.equal(apply(state, "player", { t: "cancelResearch", building: pCC.id, i: 0 }).ok, true);
+  const cancel = apply(state, "player", { t: "cancelResearch", building: pCC.id, i: 0 });
+  assert.equal(cancel.reason, "no-such-job");   // a stale index is no longer reported as a cancel
   assert.equal(apply(state, "player", { t: "cancelResearch", building: pCC.id, i: "x" }).code, REJECT.MALFORMED);
 });
 

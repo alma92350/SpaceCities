@@ -34,7 +34,7 @@ import { UNITS, BUILDINGS, prereqsMet, canAfford } from "../engine/entities.js";
 function seatAndProj(getCache, handler) {
   return ({ seat, ...rest }) => {
     const cache = getCache(seat.matchId);
-    if (!cache) return rejection("match-not-live: this match hasn't started yet");
+    if (!cache) return rejection("match-not-live: this match hasn't started yet — every seat must be filled before there is a world to observe; poll list_matches, or wait and retry");
     // A watch handle's own `owner` IS the spectator pseudo-seat, so this same lookup reaches
     // engine/projection.js's deliberately unfiltered projectForSpectator stream with no special
     // case here — the fog difference lives entirely in which projection the worker built, never

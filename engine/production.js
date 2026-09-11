@@ -208,6 +208,33 @@ export function cancelProduction(state, buildingId, queueIndex) {
 // updateResearch, which resolves UPGRADES for a Refinery the same way it resolves
 // TECHS for a Datacenter) before it lands in player.upgrades and takes effect live,
 // army- (and base-) wide.
+/**
+ * Why researchUpgrade(state, buildingId, upgradeId) would refuse — the SAME checks in the same
+ * order, as a machine-readable reason instead of a bare `false`. Same rationale (and the same
+ * read-only, additive shape) as productionRefusalReason above: a human clicking a Refinery's
+ * research row already sees the price, the doctrine lock and the greyed-out tier, while a caller
+ * driving the match over the wire got a silent no-op and had to guess — net/commandCodec.js fills
+ * the reject's `reason` in from this.
+ * @param {State} state @param {string} buildingId @param {string} upgradeId
+ * @returns {string|null} null when the research would actually queue
+ */
+export function researchUpgradeRefusalReason(state, buildingId, upgradeId) {
+  const building = state.buildings.get(buildingId);
+  if (!building) return "no-such-building";
+  if (building.type !== "refinery") return "wrong-building-for-research";
+  if (building.constructing) return "building-under-construction";
+  const player = state.players[building.owner];
+  const def = UPGRADES[upgradeId];
+  if (!def) return "unknown-upgrade";
+  if (player.upgrades[upgradeId]) return "already-researched";
+  const chosen = committedDoctrine(state, building.owner);
+  if (chosen && def.doctrine && chosen !== def.doctrine) return "doctrine-locked";
+  if (!prereqsMet(state, building.owner, def)) return "prereq-not-met";
+  if ((building.researchQueue || []).some(j => j.techId === upgradeId)) return "already-queued";
+  if (!canAfford(player.resources, def.cost)) return "cannot-afford";
+  return null;
+}
+
 /** @param {State} state @param {string} buildingId @param {string} upgradeId @returns {boolean} */
 export function researchUpgrade(state, buildingId, upgradeId) {
   const building = state.buildings.get(buildingId);

@@ -114,6 +114,10 @@ test("REAL end to end: a command naming a unit the seat does NOT own is rejected
 
     assert.equal(body.result.isError, true);
     assert.equal(body.result.structuredContent.code, REJECT.NOT_OWNER);
+    // …and, all the way through the worker boundary, the action-oriented hint that says what to
+    // do instead (net/refusalHints.js). A bare code is what makes an agent re-send verbatim.
+    assert.match(body.result.structuredContent.hint, /get_situation/);
+    assert.match(body.result.content[0].text, /get_situation/);
   } finally {
     await worker.terminate();
   }

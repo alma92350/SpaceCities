@@ -190,6 +190,26 @@ All notable changes to this project are documented here. The format follows
   site now owns its buffer, for the same zero garbage, and a static guard fails the build if a
   new one forgets.
 
+- **Every rejected command now says what to DO about it, not just which rule said no.** A reject
+  code (`refused (prereq-not-met)`, `not-visible`, `empty-selection`) names the rule but not the
+  cause, so an agent's next move was a guess — usually a verbatim re-send of the same command.
+  Each rejection now also carries a `hint`: one sentence resolved against the live match, naming
+  the cause and the fix — *"it requires a completed Barracks — build or research that first"*,
+  *"you need 130 more Ore (have 20 of 150)"*, *"supply is capped (10/10, this unit needs 1) —
+  build a Habitat"*, *"that target is outside your vision — scout it first"*. It rides alongside
+  the existing `code`/`reason` (both unchanged, and still the fields to branch on), through the
+  match worker and into `issue_command`'s text and `structuredContent`. Seat- and lobby-level
+  rejections (`seat-taken`, `already-started`, `match-not-live`, `agent-apm-exceeded`, …) name
+  their recovery the same way — which tool to call next.
+
+- **Research and a few other commands stopped failing silently.** `researchUpgrade`,
+  `researchTech`, `cancelResearch` and `cancelProduction` reported success even when the engine
+  had declined them (wrong building for the research, doctrine-locked, unaffordable, already
+  queued, a stale queue index), so a caller could not tell a queued job from a dropped one. They
+  now reject with a reason and a hint, exactly like `build`/`queueProduction` already did. And
+  `lightFuse` aimed at a unit that isn't a bomb is refused (`not-a-bomb`) instead of quietly
+  stamping a fuse onto an ordinary unit and answering "ok".
+
 - **A production or build command now reports whether it actually landed, and why not.**
   `queueProduction` returned an empty success even when the engine had refused, and since ore is
   only debited once a job starts, nothing observable distinguished "queued" from "silently

@@ -115,7 +115,10 @@ test("stepMatch(): a rejected command is still appended to the log with its reje
   for (let i = 0; i <= INPUT_DELAY_TICKS; i++) stepMatch(match, 0.05);
 
   assert.equal(match.log.length, 1);
-  assert.deepEqual(match.log[0].result, { rejected: "not-owner" });
+  assert.equal(match.log[0].result.rejected, "not-owner");
+  // …and with the action-oriented hint the codec attached to it (net/refusalHints.js), so the
+  // record says what to do about the rejection, not just that it happened.
+  assert.match(match.log[0].result.hint, /own/);
   assert.equal(match.log[0].appliedAtTick, match.log[0].applyTick, "a same-tick reject still records when it was resolved");
 });
 

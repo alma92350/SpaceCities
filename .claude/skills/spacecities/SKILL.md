@@ -145,9 +145,13 @@ is the authority. Common shapes:
 ```
 
 **Reading the result.** Success is `content:"Command applied."` with an *empty*
-`structuredContent:{}`. Rejection is `isError:true` with the reason in
-`structuredContent.code` (e.g. `unknown-type`). So **do not test success by truthiness of
-`structuredContent`** — check `isError`.
+`structuredContent:{}` (a `queueProduction` success carries a receipt instead). Rejection is
+`isError:true` with `structuredContent.code` (e.g. `unknown-type`), an optional finer-grained
+`reason` (e.g. `prereq-not-met`), and a `hint` — one sentence naming the actual cause and the
+fix ("it requires a completed Barracks…", "you need 130 more Ore…", "supply is capped (10/10) —
+build a Habitat"). **Read the `hint` before retrying**: re-sending an identical command that was
+just refused burns your APM budget and changes nothing. So **do not test success by truthiness
+of `structuredContent`** — check `isError`.
 
 Rate limit: every `issue_command` is subject to a fixed server-wide APM ceiling
 (`net/agentApm.js`), published as `agent_apm_cap` by `list_matches`. Batch related orders

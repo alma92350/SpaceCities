@@ -187,6 +187,33 @@ export function updateResearch(state, building, dt) {
 // lock (entities.js committedDoctrine), and letting an unfinished Tier-1 unlock its
 // own Tier-2 would let a player queue an entire doctrine's cost before the first
 // upgrade even proves out.
+/**
+ * Why researchTech(state, buildingId, techId) would refuse — the SAME checks in the same order, as
+ * a machine-readable reason instead of a bare `false`. Mirrors engine/production.js's
+ * productionRefusalReason/researchUpgradeRefusalReason exactly, and for the same reason: a silent
+ * no-op is unreadable to a caller driving the match over the wire, which then just re-sends the
+ * order. net/commandCodec.js fills the reject's `reason` in from this. Read-only.
+ * @param {State} state @param {string} buildingId @param {string} techId
+ * @returns {string|null} null when the research would actually queue
+ */
+export function researchTechRefusalReason(state, buildingId, techId) {
+  const building = state.buildings.get(buildingId);
+  if (!building) return "no-such-building";
+  if (building.type !== "datacenter") return "wrong-building-for-research";
+  if (building.constructing) return "building-under-construction";
+  const player = state.players[building.owner];
+  const def = TECHS[techId];
+  if (!def) return "unknown-tech";
+  if (player.upgrades[techId]) return "already-researched";
+  const queue = building.researchQueue || [];
+  if (queue.some(j => j.techId === techId)) return "already-queued";
+  const queuedAhead = new Set(queue.map(j => j.techId));
+  const remaining = (def.requires || []).filter(r => !queuedAhead.has(r));
+  if (!prereqsMet(state, building.owner, { requires: remaining })) return "prereq-not-met";
+  if (!canAfford(player.resources, def.cost)) return "cannot-afford";
+  return null;
+}
+
 export function researchTech(state, buildingId, techId) {
   const building = state.buildings.get(buildingId);
   if (!building || building.type !== "datacenter" || building.constructing) return false;
