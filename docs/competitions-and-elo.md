@@ -378,7 +378,7 @@ an attempted `__proto__` roster entry was rejected with a visible on-screen erro
 
 **Files:** `pairing.js` (new, extracted), `tools/ailab.js` (now imports it), `competition.js`,
 `competitionWorker.js`.
-**Tests:** move/extend the existing Swiss pairing tests in `test/ailab.test.js` onto the shared
+**Tests:** move/extend the existing Swiss pairing tests in `test/slow/ailab.test.js` onto the shared
 module — including the brute-force fuzz check for avoidable repeats, which is the whole reason that
 code is trustworthy; knockout bracket shape (byes for non-power-of-two fields).
 
@@ -455,7 +455,7 @@ its competition-mode title said "🏆 Quick Duel", which stopped being true the 
 second run screen, so it now names the mode ("🏆 Competition") and the tab row says which screen
 you're on. `style.css` likewise (new `comp-` classes for the field checklist, the estimate line and
 the bracket) — the same "found while wiring" pattern Phases 1-2 record. The Swiss pairing tests did
-**not** move out of `test/ailab.test.js`: stage one deliberately left them there as the safety net
+**not** move out of `test/slow/ailab.test.js`: stage one deliberately left them there as the safety net
 proving the extraction changed nothing observable, and added direct `test/pairing.test.js` coverage
 instead. Live standings show a Swiss field's **byes** as 0 until the run finishes (the bye is the
 schedule's own bookkeeping and `buildSwissBracket` reports it with the final result, not through

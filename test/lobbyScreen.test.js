@@ -20,7 +20,69 @@ import { installFakeDom } from "./_dom.js";
 
 installFakeDom();
 
-const { applyLiveState } = await import("../lobbyScreen.js");
+const { applyLiveState, hostSeatConfig, hostNextAction } = await import("../lobbyScreen.js");
+
+/* ============================================================
+   hostNextAction — what the host button becomes once POST /api/matches has replied. Both branches
+   that existed assumed the creator holds seat 0: one connected with created.token, the other POSTed
+   /start with it. A hostJoins:false creator has no token at all, so "Start match" would 403
+   (not-the-host) and "Enter match" would connect with a null token — the creator's only honest
+   option is to WATCH, and to wait for the seats to fill rather than trying to start the match itself.
+   ============================================================ */
+
+test("a seated host whose match is already live enters it", () => {
+  assert.equal(hostNextAction({ started: true, token: "t" }), "enter");
+});
+
+test("a seated host whose match is still waiting can start it", () => {
+  assert.equal(hostNextAction({ started: false, token: "t" }), "start");
+});
+
+test("a watch-only host (hostJoins:false, so no token) watches an already-live match rather than 'entering' it with a null token", () => {
+  assert.equal(hostNextAction({ started: true, token: null }), "watch");
+});
+
+test("a watch-only host of a not-yet-full match still watches — it must WAIT for the seats to fill, never POST /start it has no token for", () => {
+  assert.equal(hostNextAction({ started: false, token: null }), "watch");
+});
+
+/* ============================================================
+   hostSeatConfig — the host form's two seat dropdowns, reduced to the two POST /api/matches fields
+   that actually decide who can play: seatKinds and hostJoins. Previously the form hardcoded neither,
+   so tools/serve.js's own default (hostJoins:true) always auto-claimed seat 0 for the creator and
+   the ONLY reachable match was "the host plus one other human" — an agent-vs-agent match, or a
+   watch-only host, could not be set up from the browser at all, only by hand-rolling the curl.
+   ============================================================ */
+
+test("Me + Open (agent): the ordinary human-hosted match — the host claims seat 0, both seats are joinable kinds", () => {
+  assert.deepEqual(hostSeatConfig("me", "agent"), { seatKinds: ["open", "open"], hostJoins: true });
+});
+
+test("Me + Built-in AI: seat 1 is an 'ai' kind, so tools/serve.js's seatsFilled sees a full match and auto-starts it", () => {
+  assert.deepEqual(hostSeatConfig("me", "ai"), { seatKinds: ["open", "ai"], hostJoins: true });
+});
+
+test("Open (agent) + Open (agent): hostJoins:false is the whole point — leaves BOTH seats genuinely open for two agents' own join_match", () => {
+  assert.deepEqual(hostSeatConfig("agent", "agent"), { seatKinds: ["open", "open"], hostJoins: false });
+});
+
+test("Open (agent) + Built-in AI: one agent against a named built-in AI, with the creator only ever spectating", () => {
+  assert.deepEqual(hostSeatConfig("agent", "ai"), { seatKinds: ["open", "ai"], hostJoins: false });
+});
+
+test("an agent seat is requested as kind 'open', never kind 'agent' — server/mcpLobbyTools.js's join_match only ever claims an 'open' seat", () => {
+  // The "agent" kind server/lobby.js's SEAT_KINDS also accepts would make the seat unjoinable
+  // (joinMatch rejects it with seat-not-open) AND make seatsFilled treat it as already filled,
+  // auto-starting the match before the agent ever arrived. Both dropdown values that mean "an
+  // agent plays here" must therefore map to "open".
+  for (const cfg of [hostSeatConfig("agent", "agent"), hostSeatConfig("me", "agent")]) {
+    assert.ok(!cfg.seatKinds.includes("agent"), `requested ${JSON.stringify(cfg.seatKinds)}`);
+  }
+});
+
+test("an unrecognised dropdown value falls back to the plain human-vs-human match rather than inventing a seating", () => {
+  assert.deepEqual(hostSeatConfig("", ""), { seatKinds: ["open", "open"], hostJoins: true });
+});
 
 function entity(id, extra = {}) {
   return { id, x: 0, y: 0, hp: 100, owner: "player", ...extra };

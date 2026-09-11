@@ -367,6 +367,52 @@ test("T-035 (FR-3, control): a SECOND HUMAN filling seat 1 gets aiEnabled:false 
   });
 });
 
+/* ============================================================
+   Choosing WHICH built-in AI an "ai"-kind seat runs. spawnWorkerFor computed a single boolean
+   (aiEnabled) and nothing else, so every AI seat played engine/aiStrategy.js's `default` at the
+   engine's default difficulty — the four strategies and three difficulty rows that already exist,
+   and that createGameState already accepts as aiStrategy/difficulty, were simply unreachable from
+   the lobby. Threaded through here so a host can pick an opponent, which is what makes an
+   "agent vs a NAMED AI" match possible at all rather than "agent vs whatever the default is".
+   ============================================================ */
+
+test("POST /api/matches threads aiStrategy and difficulty into the real spawned worker's createGameStateOpts", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", {
+      planetId: "ferros", seatKinds: ["open", "ai"], aiStrategy: "aggressive", difficulty: "hard",
+    });
+    const live = app.liveMatches.get(created.json.matchId);
+    assert.ok(live, "an ['open','ai'] match is filled on creation, so its worker must already be live");
+    assert.equal(live.wsMatch.createGameStateOpts.aiEnabled, true);
+    assert.equal(live.wsMatch.createGameStateOpts.aiStrategy, "aggressive",
+      "the host's chosen strategy must reach the worker, not be silently dropped on the way");
+    assert.equal(live.wsMatch.createGameStateOpts.difficulty, "hard");
+  });
+});
+
+test("omitting aiStrategy/difficulty leaves them undefined rather than inventing a value — the engine's own defaults must stay the defaults", async () => {
+  // The "omitted preserves prior behavior" contract spectatorsEnabled and hostJoins already hold
+  // themselves to: every caller predating this change must be byte-for-byte unaffected.
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", { planetId: "ferros", seatKinds: ["open", "ai"] });
+    const live = app.liveMatches.get(created.json.matchId);
+    assert.equal(live.wsMatch.createGameStateOpts.aiStrategy, undefined);
+    assert.equal(live.wsMatch.createGameStateOpts.difficulty, undefined);
+  });
+});
+
+test("a non-string aiStrategy/difficulty is ignored, not forwarded — a bad body must never reach createGameState", async () => {
+  await withApp(async (app, port) => {
+    const created = await postJson(port, "/api/matches", {
+      planetId: "ferros", seatKinds: ["open", "ai"], aiStrategy: { evil: true }, difficulty: 7,
+    });
+    assert.equal(created.status, 201, "a junk AI option is ignored, not a 400 — it is a preference, not a required field");
+    const live = app.liveMatches.get(created.json.matchId);
+    assert.equal(live.wsMatch.createGameStateOpts.aiStrategy, undefined);
+    assert.equal(live.wsMatch.createGameStateOpts.difficulty, undefined);
+  });
+});
+
 test("a created match (default seatKinds) shows up in GET /api/matches as open, with seat 0 already taken and no token ever leaked", async () => {
   await withApp(async (app, port) => {
     const created = await postJson(port, "/api/matches", { planetId: "ferros" });

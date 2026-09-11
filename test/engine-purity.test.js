@@ -81,7 +81,13 @@ function purityScanFiles() {
   return files;
 }
 
-const label = f => relative(root, f);
+// Every comparison in this file — the includes() checks, the deepEqual against the literal
+// ["tools/duelCore.js", ...] list — goes through here, so normalizing the separator once here fixes
+// all of them. node:path yields "tools\genome.js" on Windows, which matches no forward-slash
+// literal in this file and failed three of its guards for a reason that has nothing to do with
+// engine purity. Posix-style is the right canonical form: it is what the import specifiers in the
+// source actually use, and what index.html's src= attributes use.
+const label = f => relative(root, f).split(sep).join("/");
 
 test("the purity scan reaches every engine file at any depth, plus what the engine imports", () => {
   // A guard on the guards below. Both scans used a non-recursive readdirSync over engine/ only:
@@ -122,7 +128,7 @@ test("the scan also covers every tools/ file the shipped app loads, and knows wh
 test("engine/ contains no unsanctioned nondeterminism (Math.random / Date / performance.now)", () => {
   const offenders = [];
   for (const file of purityScanFiles()) {
-    readFileSync(file, "utf8").split("\n").forEach((line, i) => {
+    readFileSync(file, "utf8").split(/\r?\n/).forEach((line, i) => {
       if (FORBIDDEN.test(line) && !line.includes("deterministic-exempt")) {
         offenders.push(`${label(file)}:${i + 1}  ${line.trim()}`);
       }
@@ -146,16 +152,22 @@ const BROWSER_GLOBAL = /\b(document|window|localStorage|sessionStorage|navigator
 // Blank out comments while preserving line count and columns: block comments become spaces
 // (newlines kept), line comments are trimmed to end-of-line. Good enough for a source guard —
 // engine code never hides a DOM call inside a string literal.
+// Splits on /\r?\n/, not "\n". Under a CRLF checkout the trailing "\r" survives a "\n" split and
+// makes the `$` in /\/\/.*$/ miss, so NOTHING gets stripped and every prose comment is scanned as
+// live code — the word "window" in "the brief banking window" then fails the DOM guard below. That
+// is not hypothetical: it produced 7 spurious failures across this file on Windows. .gitattributes
+// now pins the checkout to LF, but this guard reads raw bytes off disk and must not silently invert
+// its own meaning based on how the tree happened to be cloned.
 function stripComments(src) {
   return src
     .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, " "))
-    .split("\n").map(l => l.replace(/\/\/.*$/, "")).join("\n");
+    .split(/\r?\n/).map(l => l.replace(/\/\/.*$/, "")).join("\n");
 }
 
 test("engine/ has no DOM or browser-global dependency (stays headless-pure)", () => {
   const offenders = [];
   for (const file of purityScanFiles()) {
-    const raw = readFileSync(file, "utf8").split("\n");
+    const raw = readFileSync(file, "utf8").split(/\r?\n/);
     stripComments(raw.join("\n")).split("\n").forEach((code, i) => {
       // Match on the comment-free code, but read the exempt marker off the original line
       // (the marker lives in a comment, which stripping removed).

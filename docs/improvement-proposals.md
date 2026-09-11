@@ -826,7 +826,7 @@ world as it was BEFORE that commit and is kept for the record.*
 
 **Change.** Two contained bench additions: (1) an OPPONENTS.tech bot — the turtle economy that also climbs Barracks→Foundry→Arsenal via botBuild and cycles a lancer/breacher/dreadnought guard, committing waves like the skirmisher — answering 'does the AI react to and survive a composition, not a blob'; (2) an --apm flag (default 'real') making labWorld use the difficulty row's own aiApm, with 'none' preserving today's unthrottled runs for baseline comparability. Both are tools/-only — engine/ stays untouched, exactly the boundary the bench was built on.
 
-**Where.** tools/ailab.js: add the tech bot beside skirmisher (reuse botBuild/botGather; queue from a fixed comp list, cheapest-affordable-first so it never stalls); thread args.apm through labWorld into createGameState's aiApm. Update the usage header and test/ailab.test.js (determinism of the new bot; the override seam still reaches the sim). Record the re-baselined sweep in the docs/odyssey-ai-review.md §4 ledger since scores are not comparable across bot sets — the doc's own methodology note.
+**Where.** tools/ailab.js: add the tech bot beside skirmisher (reuse botBuild/botGather; queue from a fixed comp list, cheapest-affordable-first so it never stalls); thread args.apm through labWorld into createGameState's aiApm. Update the usage header and test/slow/ailab.test.js (determinism of the new bot; the override seam still reaches the sim). Record the re-baselined sweep in the docs/odyssey-ai-review.md §4 ledger since scores are not comparable across bot sets — the doc's own methodology note.
 
 ### Worlds, Maps & Terrain
 

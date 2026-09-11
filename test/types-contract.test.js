@@ -34,7 +34,14 @@ const typesSrc = readFileSync(join(root, "engine", "types.js"), "utf8");
 // The @property names declared under one `@typedef {Object} <Name>` block. A block runs to the
 // end of its JSDoc comment, so a later typedef's properties can't leak in.
 function declaredProps(typedefName) {
-  const start = typesSrc.indexOf(`@typedef {Object} ${typedefName}\n`);
+  // Anchored with /\r?$/m rather than a literal "\n". The end-of-line anchor is load-bearing — it
+  // is what stops `@typedef {Object} State` from also matching a hypothetical `StateSnapshot` — so
+  // it cannot just be dropped. But hardcoding "\n" made all five cases below fail on a CRLF
+  // checkout, and a drift guard that fails OPEN is the worst kind: `npm run typecheck` was the only
+  // thing left watching these shapes, which is exactly the hole this file was written to close.
+  // .gitattributes now pins the checkout to LF; this stays line-ending-agnostic regardless, because
+  // a guard that reads its own source tree should not depend on how that tree was cloned.
+  const start = typesSrc.search(new RegExp(`@typedef \\{Object\\} ${typedefName}\\r?$`, "m"));
   assert.notEqual(start, -1, `engine/types.js declares no @typedef {Object} ${typedefName}`);
   const block = typesSrc.slice(start, typesSrc.indexOf("*/", start));
   return new Set([...block.matchAll(/@property\s+\{.*\}\s+\[?([A-Za-z_$][\w$]*)\]?/g)].map(m => m[1]));

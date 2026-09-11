@@ -295,6 +295,12 @@ export async function createAppServer() {
           planetId: match.config.planetId, sizeMult: match.config.sizeMult, resourceMult: match.config.resourceMult,
           matchTimeLimit: match.config.matchTimeLimit, seed,
           aiEnabled: match.seats[1].kind === "ai" || !match.seats[1].owner,
+          // WHICH AI that seat runs, not merely whether one exists. Spread rather than assigned so
+          // an omitted choice stays genuinely absent: createGameState reads both through `||`
+          // defaults, and passing an explicit undefined would be indistinguishable from a choice
+          // here but is NOT the same thing to a future reader of this object.
+          ...(match.config.aiStrategy ? { aiStrategy: match.config.aiStrategy } : {}),
+          ...(match.config.difficulty ? { difficulty: match.config.difficulty } : {}),
         },
         // KNOWN GAP (this file's own header): two+ concurrent matches with a real dataDir would
         // collide on server/matchSnapshot.js's still-single fixed filename. Threaded through
@@ -386,6 +392,13 @@ export async function createAppServer() {
         // config it's given into match.config, same as every other field here) — omitted stays
         // undefined, which spawnWorkerFor's own `!== false` check already reads as enabled.
         spectatorsEnabled: typeof body.spectatorsEnabled === "boolean" ? body.spectatorsEnabled : undefined,
+        // Which built-in AI an "ai"-kind seat plays: engine/aiStrategy.js's STRATEGIES key and
+        // engine/aiDifficulty.js's row. Validated only as "is a string" here, deliberately — both
+        // are resolved through `||`-style lookups downstream that already fall back to the default
+        // for an unknown name, so this layer would gain nothing by duplicating those key lists and
+        // would drift from them the moment either grows a row.
+        aiStrategy: typeof body.aiStrategy === "string" ? body.aiStrategy : undefined,
+        difficulty: typeof body.difficulty === "string" ? body.difficulty : undefined,
       });
     } catch (err) { respondJson(res, 400, { error: "bad-config", message: err.message }); return; }
     // The host auto-claims seat 0 in the SAME request that creates the match — a stranger opening

@@ -16,7 +16,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { join, dirname, relative } from "node:path";
+import { join, dirname, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { walkJs } from "./_helpers.js";
 import { createGameState, makeBuilding, makeUnit } from "../engine/state.js";
@@ -182,7 +182,12 @@ test("T-018: no skirmish-path engine CODE line reads state.fog or state.fogAI di
   const EXEMPT_LINES = new Set(["engine/aiWorkers.js:137"]);
   const offenders = [];
   for (const file of walkJs(engineDir)) {
-    const rel = relative(root, file);
+    // Posix-normalized: node:path yields "engine\galaxy.js" on Windows, which matches no
+    // forward-slash literal in either exempt set above, so all four file exemptions and the
+    // aiWorkers.js:137 line exemption silently stopped applying and this guard reported 8
+    // deliberately-sanctioned lines as violations. Forward slashes are the right canonical form —
+    // they are what the exemption sets, and the surrounding comment, are written in.
+    const rel = relative(root, file).split(sep).join("/");
     if (EXEMPT_FILES.has(rel)) continue;
     const { lines, isComment } = classifyLines(readFileSync(file, "utf8"));
     lines.forEach((line, i) => {

@@ -1,0 +1,30 @@
+# Normalize every text file to LF in the working tree, on every platform.
+#
+# THIS IS LOAD-BEARING, not a style preference. Several guards in test/ read their own
+# source tree as TEXT and match against literal "\n":
+#
+#   - test/engine-purity.test.js's stripComments() splits on "\n" and then strips
+#     /\/\/.*$/ per line. Under CRLF the trailing "\r" makes "$" miss, so NOTHING is
+#     stripped and the DOM/nondeterminism scan reads live code out of prose comments —
+#     the word "window" in "the brief banking window" fails the purity guard.
+#   - test/types-contract.test.js anchors on `@typedef {Object} <Name>\n`. Under CRLF that
+#     never matches, so five typedef-drift guards fail OPEN — the worst direction for a
+#     guard to fail, and exactly the "green build nobody reads" problem the CI workflow's
+#     own pinned-compiler comment warns about.
+#
+# Both were real: with git's core.autocrlf=true (the Windows default) and no file here,
+# `npm test` reported 13 spurious failures on a tree that is green on Linux CI. Fixing the
+# guards to tolerate CRLF is necessary but not sufficient — a repo whose tests read their
+# own source is far easier to reason about when the bytes on disk match the bytes in CI.
+* text=auto eol=lf
+
+# Binary files must never be touched by the normalization above.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.mp3 binary
+*.ogg binary
+*.wav binary
