@@ -36,14 +36,14 @@ test("mintSeatHandle + resolveSeatHandle round-trips to the real owner for a gen
   const handle = mintSeatHandle(match.id, 0, p0.token);
 
   const resolved = resolveSeatHandle(lobby, handle);
-  assert.deepEqual(resolved, { ok: true, matchId: match.id, seatIndex: 0, owner: "player", token: p0.token });
+  assert.deepEqual(resolved, { ok: true, matchId: match.id, seatIndex: 0, owner: "player", token: p0.token, watching: false });
 });
 
 test("a handle minted for seat 1 resolves to seat 1's own owner, not seat 0's", () => {
   const lobby = createLobby();
   const { match, p1 } = twoSeatMatch(lobby);
   const handle = mintSeatHandle(match.id, 1, p1.token);
-  assert.deepEqual(resolveSeatHandle(lobby, handle), { ok: true, matchId: match.id, seatIndex: 1, owner: "ai", token: p1.token });
+  assert.deepEqual(resolveSeatHandle(lobby, handle), { ok: true, matchId: match.id, seatIndex: 1, owner: "ai", token: p1.token, watching: false });
 });
 
 test("a handle with the right shape but a WRONG token is rejected, not silently trusted", () => {
@@ -128,7 +128,7 @@ test("withSeat calls the wrapped handler with the resolved seat when the handle 
   });
 
   const result = await handler({ seat_handle: handle, extra: "x" });
-  assert.deepEqual(receivedSeat, { ok: true, matchId: match.id, seatIndex: 0, owner: "player", token: p0.token });
+  assert.deepEqual(receivedSeat, { ok: true, matchId: match.id, seatIndex: 0, owner: "player", token: p0.token, watching: false });
   assert.deepEqual(result.content, [{ type: "text", text: "hi player, extra=x" }]);
 });
 

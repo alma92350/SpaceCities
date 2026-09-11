@@ -9,7 +9,7 @@ The server exposes a live RTS match to an agent as **11 MCP tools + 4 resources*
 sees a fog-respecting summary and acts through the same server-side validation a human's
 click goes through — there is no privileged access and no direct `engine/` import.
 
-Full protocol reference: `docs/agent-guide.md`. Worked client: `tools/referenceAgent.js` — run it
+Player handbook (read this first): `docs/mcp-player-handbook.md`. Full protocol reference: `docs/agent-guide.md`. Worked client: `tools/referenceAgent.js` — run it
 with no arguments for its usage banner.
 
 ## Start a server

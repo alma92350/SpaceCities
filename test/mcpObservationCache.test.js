@@ -45,11 +45,17 @@ test("a seat with no state pushed yet returns null, not undefined or a throw", (
   assert.equal(cache.latestProjFor("nobody-has-joined-this-seat-yet"), null);
 });
 
-test("the spectator's own projection is never cached under a real seat id — it is a different audience with unfiltered vision", () => {
+test("the spectator's own projection is cached under SPECTATOR_SEAT and NEVER under a real seat id — a different audience, with unfiltered vision", () => {
   const worker = new EventEmitter();
   const cache = attachProjectionCache(worker);
   worker.emit("message", { type: "state", seat: SPECTATOR_SEAT, proj: { tick: 1, unfiltered: true } });
-  assert.equal(cache.latestProjFor(SPECTATOR_SEAT), null);
+  // Readable by a watch handle (server/mcpSeatHandle.js's mintWatchHandle resolves to exactly this
+  // pseudo-seat) — which is what makes watching a match over MCP possible at all...
+  assert.deepEqual(cache.latestProjFor(SPECTATOR_SEAT), { tick: 1, unfiltered: true });
+  // ...and still invisible to every REAL seat, which is the property that actually matters: an
+  // unfogged projection must never be reachable by asking for a player's own view.
+  assert.equal(cache.latestProjFor("player"), null);
+  assert.equal(cache.latestProjFor("ai"), null);
 });
 
 test("non-state messages (commandResult, ready, etc.) are ignored, not mistaken for a projection", () => {

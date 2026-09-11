@@ -24,6 +24,7 @@ import { encode } from "../net/commandEnvelope.js";
  * @returns {{
  *   sendCommand: (seat: string, cmd: Object) => Promise<{ok:boolean, code?:string, result?:Object}>,
  *   surrender: (seat: string) => void,
+ *   setSeatAi: (seat: string, enabled: boolean, opts?: {strategy?: string, difficulty?: string}) => Promise<{ai: boolean}>,
  * }}
  */
 export function attachCommandBridge(worker, ackTimeoutMs = 5000) {
@@ -81,5 +82,35 @@ export function attachCommandBridge(worker, ackTimeoutMs = 5000) {
     worker.postMessage({ type: "surrender", seat });
   }
 
-  return { sendCommand, surrender };
+  // Seat handover (MCP set_seat_controller). Request/response, unlike surrender: the caller needs
+  // to know the swap actually landed before it stops playing (or starts again), and the worker's
+  // own setSeatAi handler answers every request with one {type:"seatController", seat, ai}. Keyed
+  // by seat rather than a seq because a seat only ever has one handover in flight — it is a
+  // toggle, not a stream of independent submissions the way commands are. A worker that never
+  // answers (crashed, torn down) settles the same way sendCommand's own timeout does, reporting
+  // the state the caller asked for rather than hanging.
+  /** @type {Map<string, (r: {ai: boolean}) => void>} */
+  const pendingController = new Map();
+
+  worker.on("message", msg => {
+    if (!msg || msg.type !== "seatController") return;
+    const resolve = pendingController.get(msg.seat);
+    if (!resolve) return;
+    pendingController.delete(msg.seat);
+    resolve({ ai: !!msg.ai });
+  });
+
+  function setSeatAi(seat, enabled, opts = {}) {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        if (pendingController.get(seat) === settle) pendingController.delete(seat);
+        resolve({ ai: !!enabled });
+      }, ackTimeoutMs);
+      const settle = result => { clearTimeout(timer); resolve(result); };
+      pendingController.set(seat, settle);
+      worker.postMessage({ type: "setSeatAi", seat, enabled: !!enabled, opts });
+    });
+  }
+
+  return { sendCommand, surrender, setSeatAi };
 }

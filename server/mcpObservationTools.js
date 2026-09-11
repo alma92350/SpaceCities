@@ -21,6 +21,7 @@
 "use strict";
 
 import { withSeat, rejection } from "./mcpSeatHandle.js";
+import { SPECTATOR_SEAT } from "../engine/projection.js";
 import { UNITS, BUILDINGS, prereqsMet, canAfford } from "../engine/entities.js";
 
 // Every observation tool needs the SAME two things before it can do anything: a resolved seat
@@ -34,6 +35,10 @@ function seatAndProj(getCache, handler) {
   return ({ seat, ...rest }) => {
     const cache = getCache(seat.matchId);
     if (!cache) return rejection("match-not-live: this match hasn't started yet");
+    // A watch handle's own `owner` IS the spectator pseudo-seat, so this same lookup reaches
+    // engine/projection.js's deliberately unfiltered projectForSpectator stream with no special
+    // case here — the fog difference lives entirely in which projection the worker built, never
+    // in this file.
     const proj = cache.latestProjFor(seat.owner);
     if (!proj) return rejection("no-state-yet: this match's worker hasn't reported in yet — try again shortly");
     return handler({ seat, proj, cache, ...rest });
@@ -145,6 +150,27 @@ export function createObservationTools(lobby, getCache) {
       description: "A compact status summary for the calling seat: match tick/time, whether it has ended, own resources and supply, own unit/building counts by type, which of your units are currently IDLE (idle_unit_ids — check this every turn, an idle worker is the commonest way a match quietly rots), who you are and who you're playing, and the map's bounds and tick rate. For individual entity detail (including visible enemies), use list_entities instead.",
       inputSchema: { type: "object", properties: { seat_handle: { type: "string" } }, required: ["seat_handle"] },
       handler: withSeat(lobby, seatAndProj(getCache, ({ seat, proj, cache }) => {
+        // A watcher holds no seat, so "your resources" has no referent — it gets the per-owner
+        // scoreboard for EVERY side instead, which is the whole reason to watch a match rather
+        // than play it. Everything below this branch is the unchanged per-seat answer.
+        if (seat.owner === SPECTATOR_SEAT) {
+          const meta = cache.mapMeta?.() ?? null;
+          const sides = proj.owners.map(o => ({
+            owner: o,
+            resources: proj.players[o]?.resources ?? null,
+            supply: proj.players[o]?.supply ?? null, supply_cap: proj.players[o]?.supplyCap ?? null,
+            units_by_type: countByType(proj.units.filter(u => u.owner === o)),
+            buildings_by_type: countByType(proj.buildings.filter(b => b.owner === o)),
+          }));
+          return {
+            content: [{ type: "text", text: `Watching: tick ${proj.tick} (t=${proj.time.toFixed(1)}s)${proj.over ? `, match over — winner: ${proj.winner ?? "none"}` : ""}. ${sides.map(s2 => `${s2.owner}: ${proj.units.filter(u => u.owner === s2.owner).length}u`).join(", ")}.` }],
+            structuredContent: {
+              tick: proj.tick, time: proj.time, over: proj.over, winner: proj.winner,
+              watching: true, owners: proj.owners, sides,
+              ...(meta ? { map: meta.map } : {}),
+            },
+          };
+        }
         const ownUnits = proj.units.filter(u => u.owner === seat.owner);
         const ownBuildings = proj.buildings.filter(b => b.owner === seat.owner);
         // Idle own units are called out as their own number and id list rather than left for the
@@ -188,7 +214,11 @@ export function createObservationTools(lobby, getCache) {
         let entities = [...proj.units, ...proj.buildings];
         if (owner) entities = entities.filter(e => e.owner === owner);
         if (type) entities = entities.filter(e => e.type === type);
-        let trimmed = entities.map(e => trimEntity(e, e.owner === seat.owner));
+        // A watcher's projection is unfiltered by construction, so every entity in it carries its
+        // real order — reporting activity/orderTarget for all of them reveals nothing the watcher
+        // was not already handed, and withholding it would just make the watch view strictly worse
+        // than the raw data behind it.
+        let trimmed = entities.map(e => trimEntity(e, seat.owner === SPECTATOR_SEAT || e.owner === seat.owner));
         // Filtering on activity happens AFTER the trim, since activity is only ever computed for
         // this seat's own entities (an enemy's order is stripped by the projection itself) — so
         // this filter deliberately narrows to own entities, which is the only case it can answer.
@@ -262,6 +292,9 @@ export function createObservationTools(lobby, getCache) {
         "the list stays a complete reference. Odyssey-only research is not included over this transport yet.",
       inputSchema: { type: "object", properties: { seat_handle: { type: "string" } }, required: ["seat_handle"] },
       handler: withSeat(lobby, seatAndProj(getCache, ({ seat, proj }) => {
+        // "What can I afford, and do I meet its prerequisites" is a question only a seat has —
+        // a watcher owns no buildings and no resources to answer it against.
+        if (seat.owner === SPECTATOR_SEAT) return rejection("watch-only-handle: build options are per-seat; join a match to ask this");
         const miniState = miniStateFor(proj, seat.owner);
         const resources = proj.players[seat.owner].resources;
         const supplyRoom = (proj.players[seat.owner].supplyCap ?? 0) - (proj.players[seat.owner].supply ?? 0);

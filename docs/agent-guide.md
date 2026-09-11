@@ -4,7 +4,10 @@ SpaceCities exposes a real-time-strategy match to an AI agent over **MCP** (Mode
 Protocol), targeting spec revision **`2026-07-28`**. This is the same match a human plays in a
 browser — an agent sees a fog-respecting summary of it and acts through the identical
 server-side validation a human's click goes through. This guide is everything a third party
-needs to connect an agent, with no other document required. A complete, runnable client
+needs to connect an agent, with no other document required. If you are an agent about to PLAY
+rather than a developer about to integrate, read the short
+[MCP player handbook](mcp-player-handbook.md) instead — same surface, one page, ordered by what you
+do first. A complete, runnable client
 implementing all of it lives at [`tools/referenceAgent.js`](../tools/referenceAgent.js), built
 using `tools/mcpClient.js`'s own minimal HTTP client — read this guide alongside that file.
 
@@ -69,9 +72,12 @@ it, just store and resend it.
 
 | Tool | Arguments | Notes |
 |---|---|---|
+| `create_match` | `seats`, `join_as?`, `client_id?`, `planet_id?`, `size_mult?`, `resource_mult?`, `match_time_limit?`, `spectators_enabled?` | Make your own match and say who plays each seat — see §2.1. `join_as` claims one of them in the same call, returning a `seat_handle`. |
 | `list_matches` | *(none)* | Every open (joinable) match, plus the server's published `agent_apm_cap` (§6). A match already running, or restricted to a benchmark harness, never appears here. |
-| `join_match` | `match_id`, `seat_index?` | Omit `seat_index` to auto-pick the first open seat. Returns `seat_handle`, `owner` (the seat's id, e.g. `"player"` or `"ai"`), `seat_index`, and `started` — `true` exactly when THIS join was the one that filled every remaining seat, which starts the match immediately, no separate step needed. Fails once the match has already started — join before then. |
+| `join_match` | `match_id`, `seat_index?`, `client_id?` | Omit `seat_index` to auto-pick the first open seat. Returns `seat_handle`, `owner` (the seat's id, e.g. `"player"` or `"ai"`), `seat_index`, `started` — `true` exactly when THIS join was the one that filled every remaining seat, which starts the match immediately — and `rejoined`. With a `client_id` you already used here, this is a REJOIN and works even on a started match (§2.2). |
 | `leave_match` | `seat_handle` | Give up a seat before the match starts. Fails once it has. |
+| `find_my_seats` | `client_id` | Every seat that client_id holds, with working handles — recovery when you have lost everything but your own id (§2.2). |
+| `watch_match` | `match_id` | A `watch_handle`: observe a match unfogged, from both sides, without taking a seat (§2.3). |
 
 **If your own `join_match` still reports `started: false`**, another seat is still open and
 waiting — a human host can fill it (via the browser) or start early anyway
@@ -80,6 +86,47 @@ Every tool below reports a `match-not-live` tool execution error until the match
 a real agent should tolerate this gap (poll `get_situation` every second or so, or watch for
 `started: true` on your own join) rather than assume a seat means a running match. See
 `runReferenceAgent`'s own startup loop in `tools/referenceAgent.js` for a working example.
+
+### 2.1 Seating a match: `create_match`
+
+`seats` is exactly two entries, seat 0 first, each `{controller, ai_strategy?, difficulty?}`:
+
+- `"ai"` — one of the game's own scripted opponents, filled at match start and not joinable.
+  `ai_strategy` is `default` / `aggressive` / `economic` / `matching`; `difficulty` is `easy` /
+  `medium` / `hard`. Unknown names fall back to the default rather than erroring.
+- `"human"` — a seat a person will join from the browser.
+- `"agent"` — a seat an MCP client will claim with `join_match`.
+
+Either seat can be any of the three, so agent-vs-AI, agent-vs-agent, agent-vs-human and AI-vs-AI are
+all just different arrays. The match starts automatically once every `human`/`agent` seat is
+claimed; an all-AI match starts on creation. Read `started` rather than assuming.
+
+```js
+const { seat_handle, match_id, started } = (await client.callTool("create_match", {
+  seats: [{ controller: "agent" }, { controller: "ai", ai_strategy: "aggressive", difficulty: "hard" }],
+  join_as: 0, client_id,
+})).structuredContent;
+```
+
+### 2.2 Rejoining: `client_id`
+
+There is no protocol session and no connection to drop, so nothing about your seat depends on you
+staying reachable — but everything depends on you keeping the `seat_handle`. Mint one random
+`client_id` per agent, pass it to `create_match`/`join_match`, and you have a second way in:
+
+- `join_match({match_id, client_id})` returns the SAME seat and a fresh working handle
+  (`rejoined: true`) — and unlike an ordinary join, it works on a match already in progress.
+- `find_my_seats({client_id})` lists every seat you hold, across matches, each with a handle.
+
+Treat the id as a secret: whoever knows it can reclaim your seat.
+
+### 2.3 Watching: `watch_match`
+
+A `watch_handle` is the same opaque string, naming a match but no seat. Pass it as `seat_handle` to
+`get_situation` (which reports a per-side scoreboard instead of "your" resources), `list_entities`,
+`get_map_overview` and `wait_for_event`. It sees the match unfogged and can never act: every acting
+tool refuses it with `watch-only-handle`, and so does `get_tech_options` (affordability is a
+per-seat question). Watching consumes no seat. Refused if the host disabled spectators.
 
 ## 3. Observing — fog-respecting, summarized, never a raw state dump
 
@@ -142,6 +189,32 @@ Wrap several into `{ t: "batch", c: [...] }` (max 16) to apply them together at 
 this, plus `ids` already holding up to 400 entries, is what "batched, group-oriented" means: you
 are never forced to spend your action budget one unit at a time.
 
+### Batching ROUND TRIPS: the `batch` tool
+
+The two batchings above are game-level: they put more work into one tick. `batch` is the transport
+level — up to 24 of this server's own tool calls in ONE request, observations and actions mixed, in
+order. A turn is rarely one command ("look at the situation, find my idle workers, send them
+mining, queue a unit, then wait"), and over a 20Hz real-time match paying network latency five
+times for that is the single largest gap between an MCP client and a browser client.
+
+```js
+const { results } = (await client.callTool("batch", {
+  seat_handle,
+  steps: [
+    { tool: "get_situation" },
+    { tool: "issue_command", arguments: { command: { t: "gather", ids: idleWorkers, node: "n7" } } },
+    { tool: "wait_for_event", arguments: { timeout_ms: 4000, groups: ["combat"] } },
+  ],
+})).structuredContent;
+```
+
+Each step omitting `seat_handle` inherits the batch's own. Every step runs through the identical
+handler, validation, rate limit and rejection codes a separate call would reach — batching is
+cheaper, never more permissive, and a batch of ten commands spends ten actions. Steps are not
+atomic and nothing rolls back; by default the batch stops at the first failing step (so a dependent
+chain cannot run on a broken premise), and `continue_on_error: true` runs them all. The result
+always lists every step that ran, each carrying exactly the result it would have returned alone.
+
 ```js
 const result = await client.callTool("issue_command", {
   seat_handle,
@@ -164,6 +237,25 @@ await client.callTool("surrender", { seat_handle });
 
 Before a match has started, use `leave_match` (§2) instead — `surrender` only works on a live match.
 
+### Stepping away: `set_seat_controller`
+
+A human's browser holds a live WebSocket, so the server can SEE them leave and hand their seat to
+the game's own AI after a grace period, handing it back when they reconnect. You have no such
+socket — going quiet for two minutes to compact your context is indistinguishable from thinking
+hard, and the match does not pause for either. So say it explicitly:
+
+```js
+await client.callTool("set_seat_controller", { seat_handle, controller: "ai", difficulty: "hard" });
+// ... compact, restart, deliberate ...
+await client.callTool("set_seat_controller", { seat_handle, controller: "self" });
+```
+
+`controller: "ai"` hands your seat to a built-in opponent (optionally naming `ai_strategy` /
+`difficulty`) so your base keeps building and defending itself; `controller: "self"` takes it back
+and your commands work immediately. Reversible as often as you like, and your `seat_handle` and
+`client_id` stay valid throughout — this is not leaving the match. Whatever the AI did while it held
+the seat stands, so call `get_situation` when you return rather than assuming the position you left.
+
 ## 5. Reacting instead of polling
 
 `wait_for_event` blocks (up to a bounded timeout, default 8s, capped at 20s server-side — always
@@ -177,6 +269,23 @@ economy rotting unnoticed: `nodeDepleted` (a node just ran dry) and `unitIdle` (
 because there was nothing left to retarget to). A
 timeout is a normal, successful result (`timed_out: true`, `events: []`), never an error: just
 call it again. Call this in your main loop instead of `get_situation`-polling in a tight loop.
+
+Every result also carries a **`summary`** — a digest of those same events, so you can branch
+without knowing how the engine spells things:
+
+```jsonc
+{ "by_type": { "attackHit": 3, "buildingComplete": 1 },
+  "groups": ["combat", "construction"],
+  "under_attack": true,
+  "attacked":  [{ "id": "u12", "x": 300, "y": 540, "attacker_id": "e4" }],
+  "completed": [{ "type": "buildingComplete", "id": "b3", "entity_type": "barracks" }] }
+```
+
+`under_attack` means YOUR entities are being hit or killed — your own attack landing on the enemy
+is `combat`, but not that. Narrow what wakes you with `types: ["entityKilled"]`, or the coarser
+`groups` (`combat` / `construction` / `economy` / `match`); a filtered wait keeps waiting through
+events you excluded rather than returning an empty list, so "wake me when a fight starts" stays one
+call rather than a busy loop.
 
 ```js
 const { structuredContent } = await client.callTool("wait_for_event", { seat_handle, timeout_ms: 5000 });

@@ -32,7 +32,7 @@
 
 "use strict";
 
-import { withSeat, rejection } from "./mcpSeatHandle.js";
+import { withSeat, rejection, requirePlayingSeat } from "./mcpSeatHandle.js";
 
 const COMMAND_SCHEMA = {
   type: "object",
@@ -81,6 +81,8 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
         required: ["seat_handle", "command"],
       },
       handler: withSeat(lobby, async ({ seat, command }) => {
+        const watching = requirePlayingSeat(seat);
+        if (watching) return watching;
         const bridge = getBridge(seat.matchId);
         if (!bridge) return rejection("match-not-live: this match hasn't started yet");
         const apmGuard = getApmGuard(seat.matchId);
@@ -119,11 +121,68 @@ export function createActionTools(lobby, getBridge, getApmGuard = () => null) {
         properties: { seat_handle: { type: "string" } },
         required: ["seat_handle"],
       },
-      handler: withSeat(lobby, ({ seat }) => {
+      handler: withSeat(lobby, async ({ seat }) => {
+        const watching = requirePlayingSeat(seat);
+        if (watching) return watching;
         const bridge = getBridge(seat.matchId);
         if (!bridge) return rejection("match-not-live: this match hasn't started yet — leave_match instead");
+        // Take the seat back from the scripted AI first, if a set_seat_controller handover left it
+        // there: server/matchWorker.js's own surrender handler deliberately ignores a request for a
+        // seat a controller is driving (a scripted AI has no MCP handle to send one from, so such a
+        // message could only be stray), which would otherwise make "hand my seat to the AI, then
+        // concede" silently do nothing. A no-op for a seat that was never handed over.
+        if (bridge.setSeatAi) await bridge.setSeatAi(seat.owner, false);
         bridge.surrender(seat.owner);
         return { content: [{ type: "text", text: "Surrendered. Your participation in this match has ended." }] };
+      }),
+    },
+    {
+      // The explicit handover an MCP client needs and a browser client does not. A human's browser
+      // holds a live WebSocket, so the server can SEE them step away (the socket closes) and hand
+      // their seat to the game's own AI after a grace period, handing it straight back when they
+      // reconnect (server/matchWorker.js's seatDisconnected/seatConnected). An MCP client has no
+      // such socket — it speaks in one-shot tool calls, and going quiet for two minutes to compact
+      // its context is indistinguishable from thinking hard. So it says so instead: this is the
+      // same one-line controller swap on the same slot, just requested rather than inferred.
+      name: "set_seat_controller",
+      title: "Hand your seat to the AI, or take it back",
+      description:
+        "Decides who drives YOUR seat right now. controller:'ai' hands it to one of the game's own " +
+        "built-in opponents (optionally naming ai_strategy/difficulty) — do this before any pause " +
+        "long enough to matter (compacting your context, a restart, a long think) so your base keeps " +
+        "building and defending itself instead of standing still while the match runs on. " +
+        "controller:'self' takes it back, and your commands work again immediately. Reversible as " +
+        "often as you like, and your seat_handle and client_id stay valid throughout — this is not " +
+        "leaving the match. Whatever the AI did while it held the seat stands; call get_situation " +
+        "when you return rather than assuming the position you left.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          seat_handle: { type: "string" },
+          controller: { type: "string", enum: ["ai", "self"], description: "'ai' = the game's own AI plays this seat until further notice; 'self' = you are playing it again." },
+          ai_strategy: { type: "string", description: "Only with controller:'ai' — which built-in strategy it should play (default, aggressive, economic, matching). Unknown names fall back to the default." },
+          difficulty: { type: "string", description: "Only with controller:'ai' — easy, medium or hard." },
+        },
+        required: ["seat_handle", "controller"],
+      },
+      handler: withSeat(lobby, async ({ seat, controller, ai_strategy, difficulty }) => {
+        const watching = requirePlayingSeat(seat);
+        if (watching) return watching;
+        if (controller !== "ai" && controller !== "self") return rejection("bad-controller: use 'ai' or 'self'");
+        const bridge = getBridge(seat.matchId);
+        if (!bridge) return rejection("match-not-live: this match hasn't started yet");
+        if (!bridge.setSeatAi) return rejection("handover-unsupported: this match's server cannot swap a seat's controller");
+        const wantAi = controller === "ai";
+        const { ai } = await bridge.setSeatAi(seat.owner, wantAi, {
+          ...(ai_strategy ? { strategy: ai_strategy } : {}),
+          ...(difficulty ? { difficulty } : {}),
+        });
+        return {
+          content: [{ type: "text", text: ai
+            ? "The game's AI is playing your seat now. Call set_seat_controller with controller:'self' when you are ready to play again."
+            : "You are driving your seat again. Call get_situation before acting — the position may have moved on." }],
+          structuredContent: { controller: ai ? "ai" : "self", owner: seat.owner, ai_controlled: ai },
+        };
       }),
     },
   ];

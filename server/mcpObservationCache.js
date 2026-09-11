@@ -28,8 +28,6 @@
 
 "use strict";
 
-import { SPECTATOR_SEAT } from "../engine/projection.js";
-
 // Agent-observability (post-T-054 gap, observed in real agent play): the worker drains
 // state.events after EVERY tick, and checkWaiters only delivers to a waiter registered at the
 // moment a push lands — so an event firing while NO wait_for_event call is in flight used to be
@@ -100,10 +98,14 @@ export function attachProjectionCache(worker) {
       mapMeta = { map: msg.map, nodesById: new Map(msg.nodes.map(n => [n.id, n])) };
       return;
     }
+    if (!msg || msg.type !== "state") return;
     // The spectator's own projection is a different, deliberately UNFILTERED audience
-    // (engine/projection.js's projectForSpectator) — never cached under a real seat id, so it can
-    // never be looked up as if it were some seat's own fog-safe view.
-    if (!msg || msg.type !== "state" || msg.seat === SPECTATOR_SEAT) return;
+    // (engine/projection.js's projectForSpectator). It is cached under the SPECTATOR_SEAT key and
+    // NOWHERE else — so it can still never be looked up as if it were some real seat's own
+    // fog-safe view, while a watch handle (server/mcpSeatHandle.js's mintWatchHandle, whose own
+    // `owner` IS that pseudo-seat) can read and wait on it exactly like a player reads its own.
+    // Before this it was dropped entirely, which is why watching a match over MCP was impossible
+    // even though the worker had been publishing the stream for it all along.
     bySeat.set(msg.seat, msg.proj);
     recordUndelivered(msg.seat, msg.proj.tick, msg.proj.events || []);
     checkWaiters(msg.seat, msg.proj);

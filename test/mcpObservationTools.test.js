@@ -2,9 +2,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createLobby } from "../server/lobby.js";
 import { createGameState, makeUnit, makeBuilding } from "../engine/state.js";
-import { projectFor } from "../engine/projection.js";
+import { projectFor, projectForSpectator, SPECTATOR_SEAT } from "../engine/projection.js";
 import { createMcpServer, PROTOCOL_VERSION } from "../net/mcp.js";
-import { mintSeatHandle } from "../server/mcpSeatHandle.js";
+import { mintSeatHandle, mintWatchHandle } from "../server/mcpSeatHandle.js";
 import { createObservationTools } from "../server/mcpObservationTools.js";
 import { UNITS } from "../engine/entities.js";
 
@@ -422,4 +422,59 @@ test("get_counters exposes the same real bonusVs table the engine's combat math 
   assert.ok(counters.length > 0);
   assert.ok(counters.every(c => UNITS[c.attacker] && c.bonus > 0));
   for (const c of counters) assert.equal(UNITS[c.attacker].bonusVs[c.target], c.bonus);
+});
+
+/* ============================================================
+   WATCHING a match (server/mcpSeatHandle.js's mintWatchHandle): the same observation tools, reading
+   the spectator's own deliberately unfiltered projection (engine/projection.js's
+   projectForSpectator) instead of a seat's fog-filtered one. The fog difference lives entirely in
+   WHICH projection the worker built — these tests pin the two places the tools themselves must
+   differ: a scoreboard with no "me" in it, and refusing the one question only a seat can answer.
+   ============================================================ */
+
+test("get_situation on a watch handle reports every side, not one seat's own resources", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const { state } = fixture();
+  const mcp = mcpFor(lobby, match.id, { [SPECTATOR_SEAT]: projectForSpectator(state) });
+
+  const { body } = await callTool(mcp, "get_situation", { seat_handle: mintWatchHandle(match.id) });
+  assert.equal(body.result.isError, undefined, JSON.stringify(body.result));
+  const sc = body.result.structuredContent;
+  assert.equal(sc.watching, true);
+  assert.deepEqual(sc.sides.map(s => s.owner), ["player", "ai"]);
+  for (const side of sc.sides) {
+    assert.ok(side.resources, `${side.owner} has its own resources in the watch view`);
+    assert.ok(Object.keys(side.units_by_type).length > 0, `${side.owner} has its own units counted`);
+  }
+  assert.equal(sc.resources, undefined, "a watcher holds no seat, so there is no 'my resources' to report");
+});
+
+test("a watcher sees BOTH sides' entities — including the one a seat's own fog hides", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const { state, hiddenEnemyId } = fixture();
+  const mcp = mcpFor(lobby, match.id, {
+    player: projectFor(state, "player"),
+    [SPECTATOR_SEAT]: projectForSpectator(state),
+  });
+
+  const seen = (await callTool(mcp, "list_entities", { seat_handle: mintWatchHandle(match.id) })).body.result.structuredContent.entities;
+  assert.ok(seen.some(e => e.id === hiddenEnemyId), "the unit sitting outside player's fog is visible to a watcher");
+
+  // ...and is still invisible to the seat itself — the watch path must not have widened anyone's fog.
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const asPlayer = (await callTool(mcp, "list_entities", { seat_handle })).body.result.structuredContent.entities;
+  assert.equal(asPlayer.some(e => e.id === hiddenEnemyId), false);
+});
+
+test("get_tech_options refuses a watch handle — affordability and prerequisites are per-seat questions", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const { state } = fixture();
+  const mcp = mcpFor(lobby, match.id, { [SPECTATOR_SEAT]: projectForSpectator(state) });
+
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle: mintWatchHandle(match.id) });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /watch-only-handle/);
 });

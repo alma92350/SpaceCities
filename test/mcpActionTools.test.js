@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { join, dirname } from "node:path";
 import { createLobby } from "../server/lobby.js";
 import { createMcpServer, PROTOCOL_VERSION } from "../net/mcp.js";
-import { mintSeatHandle } from "../server/mcpSeatHandle.js";
+import { mintSeatHandle, mintWatchHandle } from "../server/mcpSeatHandle.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 import { createActionTools } from "../server/mcpActionTools.js";
 import { REJECT } from "../net/commandCodec.js";
@@ -60,9 +60,9 @@ async function callTool(mcp, name, args) {
   });
 }
 
-test("createActionTools registers issue_command and surrender", () => {
+test("createActionTools registers issue_command, surrender and set_seat_controller", () => {
   const tools = createActionTools(createLobby(), () => null);
-  assert.deepEqual(tools.map(t => t.name), ["issue_command", "surrender"]);
+  assert.deepEqual(tools.map(t => t.name), ["issue_command", "surrender", "set_seat_controller"]);
 });
 
 test("REAL end to end: issue_command moves the seat's own units, applied by the real codec inside a real worker", async () => {
@@ -321,4 +321,84 @@ test("multi-match routing: a seat in match A never drains match B's own APM budg
   assert.equal(body.result.isError, true, "match A's own seat is correctly out of budget");
   assert.equal(guardB.tryConsume("player", Date.now()), true, "match B's own guard is untouched, still has its full budget");
   void matchB;
+});
+
+/* ============================================================
+   set_seat_controller — the explicit handover an MCP client needs and a browser client does not.
+   A human's browser holds a socket whose close the server can SEE; an MCP client going quiet to
+   compact its context is indistinguishable from one thinking hard, so it says so instead. Proven
+   against a REAL worker, because the property being claimed is about the live engine State's own
+   controller registry, which only exists inside that worker.
+   ============================================================ */
+
+test("set_seat_controller hands a live seat to the game's own AI, and takes it back — against a real worker", async () => {
+  const { lobby, worker, match, seatHandle0 } = await spawnLiveMatch();
+  const bridge = attachCommandBridge(worker);
+  const mcp = createMcpServer({ tools: createActionTools(lobby, id => (id === match.id ? bridge : null)) });
+
+  const away = await callTool(mcp, "set_seat_controller", { seat_handle: seatHandle0, controller: "ai", ai_strategy: "aggressive", difficulty: "hard" });
+  assert.equal(away.body.result.isError, undefined, JSON.stringify(away.body.result));
+  assert.deepEqual(away.body.result.structuredContent, { controller: "ai", owner: "player", ai_controlled: true });
+
+  const back = await callTool(mcp, "set_seat_controller", { seat_handle: seatHandle0, controller: "self" });
+  assert.deepEqual(back.body.result.structuredContent, { controller: "self", owner: "player", ai_controlled: false });
+
+  // Reversible as often as the caller likes — the point of the mechanism is that stepping away is
+  // never a one-way door.
+  const againAway = await callTool(mcp, "set_seat_controller", { seat_handle: seatHandle0, controller: "ai" });
+  assert.equal(againAway.body.result.structuredContent.ai_controlled, true);
+
+  await worker.terminate();
+});
+
+test("a seat handed to the AI still accepts its owner's own commands the moment it is taken back", async () => {
+  const { lobby, worker, match, seatHandle0 } = await spawnLiveMatch();
+  const bridge = attachCommandBridge(worker);
+  const mcp = createMcpServer({ tools: createActionTools(lobby, id => (id === match.id ? bridge : null)) });
+
+  await callTool(mcp, "set_seat_controller", { seat_handle: seatHandle0, controller: "ai" });
+  await callTool(mcp, "set_seat_controller", { seat_handle: seatHandle0, controller: "self" });
+
+  // An ordinary, well-formed command — the assertion is that the seat is COMMANDABLE again (it
+  // reaches the codec and gets a real verdict), not that this particular order is legal.
+  const { body } = await callTool(mcp, "issue_command", { seat_handle: seatHandle0, command: { t: "stop", ids: ["u1"] } });
+  assert.notEqual(body.result.structuredContent?.code, "command-timeout");
+
+  await worker.terminate();
+});
+
+test("set_seat_controller rejects an unknown controller and a match that hasn't started", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat = lobby.joinMatch(match.id, 0);
+  const handle = mintSeatHandle(match.id, 0, seat.token);
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => null) });
+
+  const bad = await callTool(mcp, "set_seat_controller", { seat_handle: handle, controller: "nobody" });
+  assert.equal(bad.body.result.isError, true);
+  assert.match(bad.body.result.content[0].text, /bad-controller/);
+
+  const notLive = await callTool(mcp, "set_seat_controller", { seat_handle: handle, controller: "ai" });
+  assert.equal(notLive.body.result.isError, true);
+  assert.match(notLive.body.result.content[0].text, /match-not-live/);
+});
+
+test("a WATCH handle can never act — not a command, not a surrender, not a handover", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const watch = mintWatchHandle(match.id);
+  let bridgeUsed = false;
+  const bridge = { sendCommand: () => { bridgeUsed = true; return { ok: true }; }, surrender: () => { bridgeUsed = true; }, setSeatAi: async () => { bridgeUsed = true; return { ai: true }; } };
+  const mcp = createMcpServer({ tools: createActionTools(lobby, () => bridge) });
+
+  for (const [name, args] of [
+    ["issue_command", { seat_handle: watch, command: { t: "stop", ids: ["u1"] } }],
+    ["surrender", { seat_handle: watch }],
+    ["set_seat_controller", { seat_handle: watch, controller: "ai" }],
+  ]) {
+    const { body } = await callTool(mcp, name, args);
+    assert.equal(body.result.isError, true, `${name} must refuse a watch handle`);
+    assert.match(body.result.content[0].text, /watch-only-handle/);
+  }
+  assert.equal(bridgeUsed, false, "a watcher's call must never reach the match's own bridge at all");
 });

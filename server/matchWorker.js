@@ -57,6 +57,14 @@
        {type:"seatDisconnected", seat}   (T-036)   that seat's live connection just closed — starts
                                                     a grace-period timer, unless one is already
                                                     running for it
+       {type:"setSeatAi", seat, enabled, opts}    (MCP) hand this seat to the game's own scripted
+                                                    AI (enabled:true, with an optional
+                                                    {strategy, difficulty} pick) or take it back
+                                                    (enabled:false) — the EXPLICIT twin of the
+                                                    seatDisconnected takeover below, for a client
+                                                    that has no socket whose close could stand in
+                                                    for "I have stepped away"; answered with one
+                                                    {type:"seatController", seat, ai} message
        {type:"seatConnected", seat}      (T-036)   a real, authorized connection for that seat just
                                                     opened (first join OR a reconnect) — cancels any
                                                     pending grace timer and hands control back if the
@@ -80,6 +88,9 @@
                                                     "current", not a historical checkpoint at msg.tick,
                                                     is a deliberate v1 simplification
      worker -> parent (continued)
+       {type:"seatController", seat, ai}          the answer to a setSeatAi request — whether that
+                                                    seat is scripted-AI-driven now that it has
+                                                    been applied
        {type:"desyncDetected", seat, tick}  (T-040)  this seat's own fingerprint report didn't match
                                                     — net/wsWorkerTransport.js relays it back to that
                                                     SAME seat's own connection only, never broadcast
@@ -263,6 +274,32 @@ parentPort.on("message", msg => {
     readySeats.add(msg.seat);
     const required = match.state.owners.filter(o => !controllerFor(match.state, o));
     if (required.every(o => readySeats.has(o))) advanceDeliberationRound();
+    return;
+  }
+  if (msg.type === "setSeatAi") {
+    // Agent seat handover (MCP set_seat_controller): the EXPLICIT, caller-driven twin of the
+    // seatDisconnected grace-period takeover just below — same one-line swap on the same slot,
+    // the only difference being who decided it. An MCP client has no socket whose close this
+    // worker could notice (it speaks in one-shot HTTP tool calls), so "I am stepping away, let
+    // the game's own AI play my seat" and "I am back" have to be things it can SAY. Honors the
+    // caller's own strategy/difficulty pick, unlike the disconnect path's deliberate plain
+    // default — here a preference was actually expressed, so there is one to honor.
+    const slot = aiSlotFor(msg.seat);
+    if (!match.state.owners.includes(msg.seat)) return;
+    // A handover also cancels any grace countdown: whichever answer the caller just gave is the
+    // current one, and a timer firing afterwards would silently overwrite a "no, I am playing".
+    const timer = graceTimers.get(msg.seat);
+    if (timer) { clearTimeout(timer); graceTimers.delete(msg.seat); }
+    if (msg.enabled) {
+      match.state[slot] = createAiController(match.state.planetId, {
+        strategy: msg.opts?.strategy, difficulty: msg.opts?.difficulty,
+      });
+      logEvent("aiHandover", { matchId, seat: msg.seat, strategy: msg.opts?.strategy ?? null, difficulty: msg.opts?.difficulty ?? null });
+    } else if (match.state[slot]) {
+      match.state[slot] = null;
+      logEvent("aiHandback", { matchId, seat: msg.seat });
+    }
+    parentPort.postMessage({ type: "seatController", seat: msg.seat, ai: !!match.state[slot] });
     return;
   }
   if (msg.type === "seatDisconnected") {

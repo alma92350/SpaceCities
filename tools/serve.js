@@ -74,7 +74,7 @@ import { Worker } from "node:worker_threads";
 import { runProbe } from "./dataProbe.js";
 import { runBenchSuite } from "./bench.js";
 import { attachWsMatchWorker } from "../net/wsWorkerTransport.js";
-import { createLobby, OWNER_IDS, publicMatch } from "../server/lobby.js";
+import { createLobby, OWNER_IDS, publicMatch, isJoinableKind } from "../server/lobby.js";
 import { restoreLobby, writeLobbySnapshot } from "../server/lobbySnapshot.js";
 import { createMatchResultsStore } from "../server/matchResults.js";
 import { createMcpServer } from "../net/mcp.js";
@@ -83,6 +83,7 @@ import { createObservationTools } from "../server/mcpObservationTools.js";
 import { attachProjectionCache } from "../server/mcpObservationCache.js";
 import { createActionTools } from "../server/mcpActionTools.js";
 import { createEventTools } from "../server/mcpEventTools.js";
+import { createBatchTools } from "../server/mcpBatchTools.js";
 import { attachCommandBridge } from "../server/mcpCommandBridge.js";
 import { createGameResources } from "../server/mcpResources.js";
 import { AGENT_APM, createAgentApmGuard } from "../net/agentApm.js";
@@ -247,31 +248,41 @@ export async function createAppServer() {
   // wait_for_event reuses the SAME projCache as the observation tools (T-054 added a second
   // capability, waitForEvent, onto server/mcpObservationCache.js's own cache object) rather than
   // a parallel one, so both read the identical live per-seat projection stream.
+  // Declared before createMcpServer so the `batch` tool below can close over this SAME array by
+  // reference and see every tool in it — including the ones pushed after batch itself (see
+  // server/mcpBatchTools.js's own getTools doc for why that has to be lazy).
+  /** @type {Array<Object>} */
+  const mcpTools = [];
+  mcpTools.push(
+    // Bugfix: join_match used to never start a match on its own (docs/agent-guide.md's own §2
+    // told an agent to expect this gap: "the host still has to start the match separately"),
+    // unlike the HTTP join endpoint below, which always has via FR-4's own "automatically when
+    // all seats are filled" clause — an asymmetry that was a tolerable inconvenience when a
+    // human host always held seat 0 and could just click Start, but became a genuine dead end
+    // once hostJoins:false (above) lets a match exist with NO seat holder able to start it at
+    // all: two agents' own join_match calls were the only way anything would ever fill those
+    // seats, so THEY have to be what starts it too. Passed by reference (hoisted function
+    // declarations, defined further down this same closure) — mirrors handleCreateMatch's and
+    // handleJoinMatch's own `seatsFilled(match) ? await startAndSpawnIfReady(match) : false`
+    // exactly, so join_match and the HTTP endpoints can never disagree about when a match is
+    // ready to start.
+    ...createLobbyTools(lobby, async match => {
+      if (!seatsFilled(match)) return false;
+      const startedNow = await startAndSpawnIfReady(match);
+      if (dataDir) writeLobbySnapshot(dataDir, lobby);
+      return startedNow;
+    }),
+    ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null, matchId => liveMatches.get(matchId)?.apmGuard ?? null),
+    ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
+    // `batch` is registered LAST and reads the registry lazily, so a batch step can name any tool
+    // above it — including one registered after this line, should any ever be.
+    ...createBatchTools(() => mcpTools),
+  );
+
   const mcpServer = createMcpServer({
     serverInfo: { name: "SpaceCities", version: "1.1.0" },
-    tools: [
-      // Bugfix: join_match used to never start a match on its own (docs/agent-guide.md's own §2
-      // told an agent to expect this gap: "the host still has to start the match separately"),
-      // unlike the HTTP join endpoint below, which always has via FR-4's own "automatically when
-      // all seats are filled" clause — an asymmetry that was a tolerable inconvenience when a
-      // human host always held seat 0 and could just click Start, but became a genuine dead end
-      // once hostJoins:false (above) lets a match exist with NO seat holder able to start it at
-      // all: two agents' own join_match calls were the only way anything would ever fill those
-      // seats, so THEY have to be what starts it too. Passed by reference (hoisted function
-      // declarations, defined further down this same closure) — mirrors handleCreateMatch's and
-      // handleJoinMatch's own `seatsFilled(match) ? await startAndSpawnIfReady(match) : false`
-      // exactly, so join_match and the HTTP endpoints can never disagree about when a match is
-      // ready to start.
-      ...createLobbyTools(lobby, async match => {
-        if (!seatsFilled(match)) return false;
-        const startedNow = await startAndSpawnIfReady(match);
-        if (dataDir) writeLobbySnapshot(dataDir, lobby);
-        return startedNow;
-      }),
-      ...createObservationTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
-      ...createActionTools(lobby, matchId => liveMatches.get(matchId)?.cmdBridge ?? null, matchId => liveMatches.get(matchId)?.apmGuard ?? null),
-      ...createEventTools(lobby, matchId => liveMatches.get(matchId)?.projCache ?? null),
-    ],
+    tools: mcpTools,
     // T-055: unit stats/build costs/counter triangle/tech tree — fully static, computed once at
     // boot (createGameResources takes no lobby/match dependency at all, unlike every tool above).
     resources: createGameResources(),
@@ -286,6 +297,34 @@ export async function createAppServer() {
   // joined is FR-3's own "unfilled open seats become AI seats at match start" — AI-filled the
   // instant the match starts, never before (a still-open, still-waiting seat must stay genuinely
   // undriven, not secretly AI-controlled while a real join is still possible).
+  // Whether this seat is driven by the game's own scripted AI at match start: either it was
+  // created as an "ai" seat, or it is a joinable seat nobody ever claimed (FR-3's "unfilled open
+  // seats become AI seats at match start").
+  function seatIsAi(match, seatIndex) {
+    const seat = match.seats[seatIndex];
+    return seat.kind === "ai" || (isJoinableKind(seat.kind) && !seat.owner);
+  }
+
+  // engine/state.js's own ownerDefs shape, built from this match's REAL seats — the same two owner
+  // ids, factions and colors createGameState's own default pair uses, with isAI and each AI seat's
+  // own strategy/difficulty pick read per seat instead of assumed. Only ever called for a match
+  // that genuinely needs it (see spawnWorkerFor's own comment).
+  function ownerDefsFor(match) {
+    const COLORS = ["#4fd1ff", "#f87171"];
+    return OWNER_IDS.map((id, i) => {
+      const isAI = seatIsAi(match, i);
+      const pick = match.seats[i].ai || {};
+      return {
+        id, color: COLORS[i], isAI,
+        faction: (i === 0 ? match.config.playerFaction : match.config.aiFaction) || "neutral",
+        ...(isAI ? { aiOpts: {
+          strategy: pick.strategy || match.config.aiStrategy,
+          difficulty: pick.difficulty || match.config.difficulty,
+        } } : {}),
+      };
+    });
+  }
+
   async function spawnWorkerFor(match) {
     const seed = (Math.floor(Math.random() * 0x100000000)) >>> 0;
     const worker = new Worker(MATCH_WORKER_FILE, {
@@ -295,12 +334,25 @@ export async function createAppServer() {
           planetId: match.config.planetId, sizeMult: match.config.sizeMult, resourceMult: match.config.resourceMult,
           matchTimeLimit: match.config.matchTimeLimit, seed,
           aiEnabled: match.seats[1].kind === "ai" || !match.seats[1].owner,
+          // SEAT 0 AS AN AI. The two shortcut opts just above (aiEnabled/aiStrategy/difficulty) can
+          // only ever describe seat 1 — "ai" is the second owner id, and createGameState's own
+          // default owner pair hardcodes isAI:false for "player". So the moment a caller can ask
+          // for an AI on EITHER seat (MCP create_match's own per-seat `controller`), the default
+          // pair stops being expressive enough and engine/state.js's own ownerDefs (T-041) — the
+          // N-entry side list that was built for exactly this — takes over. Passed ONLY when seat 0
+          // actually needs it: every other match keeps going down the identical default path it
+          // always has, byte for byte, rather than being quietly rerouted through a second code
+          // path for a capability it never uses.
+          ...(seatIsAi(match, 0) ? { ownerDefs: ownerDefsFor(match) } : {}),
           // WHICH AI that seat runs, not merely whether one exists. Spread rather than assigned so
           // an omitted choice stays genuinely absent: createGameState reads both through `||`
           // defaults, and passing an explicit undefined would be indistinguishable from a choice
           // here but is NOT the same thing to a future reader of this object.
-          ...(match.config.aiStrategy ? { aiStrategy: match.config.aiStrategy } : {}),
-          ...(match.config.difficulty ? { difficulty: match.config.difficulty } : {}),
+          // A per-seat pick (MCP create_match's own seats[].ai_strategy/difficulty) is more
+          // specific than the match-wide one and wins where both exist; with neither, both stay
+          // genuinely absent so createGameState's own `||` defaults apply, exactly as before.
+          ...((match.seats[1].ai?.strategy || match.config.aiStrategy) ? { aiStrategy: match.seats[1].ai?.strategy || match.config.aiStrategy } : {}),
+          ...((match.seats[1].ai?.difficulty || match.config.difficulty) ? { difficulty: match.seats[1].ai?.difficulty || match.config.difficulty } : {}),
         },
         // KNOWN GAP (this file's own header): two+ concurrent matches with a real dataDir would
         // collide on server/matchSnapshot.js's still-single fixed filename. Threaded through
@@ -361,7 +413,11 @@ export async function createAppServer() {
   // shapes this means: ["open","ai"] is filled the instant the host's own auto-join lands (seat 1
   // needs no human at all); ["open","open"] is filled only once a second human actually joins.
   function seatsFilled(match) {
-    return match.seats.every(s => s.kind !== "open" || s.owner);
+    // Every JOINABLE kind ("open" and, since MCP clients can claim one, "agent") needs a real
+    // owner; only an "ai" seat is pre-filled. Written against server/lobby.js's own
+    // isJoinableKind rather than a second hardcoded kind list here, so "which kinds wait for
+    // someone" can never mean two different things in two files.
+    return match.seats.every(s => !isJoinableKind(s.kind) || s.owner);
   }
 
   // The ONE place anything actually starts a match: called after the host's own creating join,

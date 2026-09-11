@@ -22,6 +22,57 @@
 
 import { withSeat, rejection } from "./mcpSeatHandle.js";
 
+/* The alert vocabulary: which raw engine events matter enough to be worth interrupting a plan for,
+   grouped into the handful of things an agent actually reacts to differently. This is a DIGEST of
+   `events`, never a replacement — every raw event is still returned in full alongside it; the
+   groups exist so a caller can branch on "am I under attack" without knowing that the engine spells
+   that `attackHit` with the defender's id in `targetId`.
+
+   under_attack is deliberately the only one that needs the caller's own identity to classify (a
+   hit on MY entity is an emergency; a hit on the enemy's is my own attack landing), so it is
+   resolved against the seat's owner at call time rather than baked into this table. */
+const ALERT_GROUPS = {
+  combat: ["attackHit", "entityKilled"],
+  construction: ["buildingComplete", "unitSpawned", "researchComplete"],
+  economy: ["nodeDepleted", "unitIdle", "productionBlocked", "rigDig", "recycled"],
+  match: ["eliminated", "wonderCharging", "rivalGateComplete", "deployBlocked", "neighbourHostile", "bombFused", "wreckMatured", "craterMatured"],
+};
+
+const GROUP_OF = Object.fromEntries(
+  Object.entries(ALERT_GROUPS).flatMap(([group, types]) => types.map(t => [t, group])),
+);
+
+/**
+ * The one-line "what just happened, and does it need me" summary over a batch of raw events —
+ * counts per event type, which alert groups fired, and the two things that genuinely change what an
+ * agent should do next: something of MINE is being shot at (with where), and something of mine just
+ * finished. A watcher (no owner of its own) gets the counts and groups, with no "mine" to resolve.
+ */
+function digest(events, owner) {
+  const by_type = {};
+  const groups = new Set();
+  const attacked = [];
+  const completed = [];
+  for (const ev of events) {
+    by_type[ev.type] = (by_type[ev.type] || 0) + 1;
+    const group = GROUP_OF[ev.type];
+    if (group) groups.add(group);
+    if (!owner) continue;
+    if (ev.type === "attackHit" && ev.targetOwner === owner) attacked.push({ id: ev.targetId, x: ev.x, y: ev.y, attacker_id: ev.sourceId });
+    if (ev.type === "entityKilled" && ev.owner === owner) attacked.push({ id: ev.id, x: ev.x, y: ev.y, killed: true, attacker_id: ev.killerId ?? null });
+    if ((ev.type === "buildingComplete" || ev.type === "unitSpawned" || ev.type === "researchComplete") && (ev.owner === undefined || ev.owner === owner)) {
+      completed.push({ type: ev.type, id: ev.id ?? null, entity_type: ev.entityType ?? ev.unitType ?? ev.buildingType ?? ev.tech ?? null });
+    }
+  }
+  return {
+    by_type,
+    groups: [...groups].sort(),
+    under_attack: attacked.length > 0,
+    ...(attacked.length ? { attacked } : {}),
+    ...(completed.length ? { completed } : {}),
+  };
+}
+
 const DEFAULT_TIMEOUT_MS = 8000;
 const MAX_TIMEOUT_MS = 20000;
 
@@ -47,24 +98,58 @@ export function createEventTools(lobby, getCache) {
         `research finishing, and the like) or ${DEFAULT_TIMEOUT_MS}ms passes, whichever comes first — call this ` +
         `in a loop instead of polling get_situation/list_entities. Events that fired while NO call was in ` +
         `flight are buffered and delivered by the NEXT call immediately, so nothing is lost between polls. ` +
+        `Every result also carries a \`summary\`: counts per event type, which alert groups fired ` +
+        `(combat/construction/economy/match), \`under_attack\` with WHICH of your entities are being ` +
+        `hit and where, and what of yours just finished — so you can branch on "am I being attacked" ` +
+        `without parsing raw events. Narrow what wakes you with \`types\` or \`groups\`. ` +
         `A timeout is reported as a normal result ` +
         `(timed_out:true, no events), never an error; just call it again. Optionally request a shorter ` +
         `timeout_ms for tighter polling — requests above ${MAX_TIMEOUT_MS}ms are capped.`,
       inputSchema: {
         type: "object",
         properties: {
-          seat_handle: { type: "string" },
+          seat_handle: { type: "string", description: "A playing seat_handle, or a watch_handle to follow someone else's match." },
           timeout_ms: { type: "number", description: `Optional. Defaults to ${DEFAULT_TIMEOUT_MS}; capped at ${MAX_TIMEOUT_MS}.` },
+          types: {
+            type: "array", items: { type: "string" },
+            description: "Optional. Only return (and only wake for) these event types — e.g. [\"attackHit\",\"entityKilled\"] to sleep through everything but a fight, or [\"buildingComplete\"] to wake exactly when construction finishes. Omit to receive everything.",
+          },
+          groups: {
+            type: "array", items: { type: "string", enum: Object.keys(ALERT_GROUPS) },
+            description: `Optional, coarser than 'types': ${Object.keys(ALERT_GROUPS).join(", ")}. Combined with 'types' as a union.`,
+          },
         },
         required: ["seat_handle"],
       },
-      handler: withSeat(lobby, async ({ seat, timeout_ms }) => {
+      handler: withSeat(lobby, async ({ seat, timeout_ms, types, groups }) => {
         const cache = getCache(seat.matchId);
         if (!cache) return rejection("match-not-live: this match hasn't started yet");
-        const { tick, events, timedOut } = await cache.waitForEvent(seat.owner, clampTimeout(timeout_ms));
+        const wanted = new Set([
+          ...(Array.isArray(types) ? types : []),
+          ...(Array.isArray(groups) ? groups.flatMap(g => ALERT_GROUPS[g] ?? []) : []),
+        ]);
+        const deadline = Date.now() + clampTimeout(timeout_ms);
+        // Filtering has to happen around the WAIT, not merely on its result: a wait that resolves
+        // carrying only events the caller asked to ignore must keep waiting out the rest of its
+        // own budget, or `types` would turn a deliberate "wake me for a fight" into a busy loop
+        // that returns an empty list every time anything else ticks.
+        let tick = null, collected = [], timedOut = true;
+        for (;;) {
+          const remaining = deadline - Date.now();
+          if (remaining <= 0) break;
+          const round = await cache.waitForEvent(seat.owner, remaining);
+          tick = round.tick ?? tick;
+          if (round.timedOut) break;
+          const keep = wanted.size ? round.events.filter(ev => wanted.has(ev.type)) : round.events;
+          if (keep.length) { collected = keep; timedOut = false; break; }
+        }
+        const summary = digest(collected, seat.watching ? null : seat.owner);
+        const headline = timedOut
+          ? "Nothing new yet."
+          : `${collected.length} new event(s) at tick ${tick}${summary.under_attack ? " — YOU ARE UNDER ATTACK" : ""}${summary.completed ? `, ${summary.completed.length} thing(s) finished` : ""}.`;
         return {
-          content: [{ type: "text", text: timedOut ? "Nothing new yet." : `${events.length} new event(s) at tick ${tick}.` }],
-          structuredContent: { tick, events, timed_out: timedOut },
+          content: [{ type: "text", text: headline }],
+          structuredContent: { tick, events: collected, timed_out: timedOut, summary },
         };
       }),
     },

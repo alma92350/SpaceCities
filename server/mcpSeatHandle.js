@@ -20,6 +20,8 @@
 
 "use strict";
 
+import { SPECTATOR_SEAT } from "../engine/projection.js";
+
 /**
  * @param {string} matchId @param {number} seatIndex @param {string} token
  * @returns {string} an opaque handle string — see this file's own header for why base64/JSON
@@ -27,6 +29,20 @@
  */
 export function mintSeatHandle(matchId, seatIndex, token) {
   return Buffer.from(JSON.stringify({ matchId, seatIndex, token }), "utf8").toString("base64url");
+}
+
+/**
+ * The WATCH-ONLY twin of mintSeatHandle: a handle naming a match but no seat in it, for a caller
+ * that wants to observe rather than play (server/mcpLobbyTools.js's watch_match). Carries no token
+ * because there is no seat and therefore no credential — watching is exactly as authorized as the
+ * match's own `spectatorsEnabled` flag says it is, checked when the handle is MINTED, and the
+ * handle is otherwise indistinguishable to a caller from a playing one: the same opaque string
+ * passed as `seat_handle` to every observation tool. Every ACTING tool rejects it (see
+ * requirePlayingSeat below) — a watcher can never issue a command by holding one.
+ * @param {string} matchId @returns {string}
+ */
+export function mintWatchHandle(matchId) {
+  return Buffer.from(JSON.stringify({ matchId, watch: true }), "utf8").toString("base64url");
 }
 
 /**
@@ -53,13 +69,24 @@ export function resolveSeatHandle(lobby, handle) {
   } catch {
     return { ok: false, code: "bad-handle" };
   }
-  const { matchId, seatIndex, token } = parsed || {};
-  if (typeof matchId !== "string" || !Number.isInteger(seatIndex) || typeof token !== "string") {
+  const { matchId, seatIndex, token, watch } = parsed || {};
+  if (typeof matchId !== "string") return { ok: false, code: "bad-handle" };
+  // A watch handle resolves against the MATCH only — there is no seat to reclaim and no token to
+  // check. `owner` is the spectator pseudo-seat engine/projection.js already publishes a full,
+  // deliberately unfiltered projection for (projectForSpectator), so every observation tool's own
+  // `cache.latestProjFor(seat.owner)` lookup works unchanged for a watcher.
+  if (watch === true) {
+    const match = lobby.getMatch(matchId);
+    if (!match) return { ok: false, code: "no-such-match" };
+    if (match.config.spectatorsEnabled === false) return { ok: false, code: "spectators-disabled" };
+    return { ok: true, matchId, seatIndex: null, owner: SPECTATOR_SEAT, token: null, watching: true };
+  }
+  if (!Number.isInteger(seatIndex) || typeof token !== "string") {
     return { ok: false, code: "bad-handle" };
   }
   const claim = lobby.reclaimSeat(matchId, seatIndex, token);
   if (!claim.ok) return { ok: false, code: claim.code };
-  return { ok: true, matchId, seatIndex, owner: claim.owner, token };
+  return { ok: true, matchId, seatIndex, owner: claim.owner, token, watching: false };
 }
 
 /**
@@ -93,4 +120,21 @@ export function withSeat(lobby, handler) {
 // (not duplicated per tool file) the moment a SECOND file needed the identical shape.
 export function rejection(code) {
   return { content: [{ type: "text", text: `Could not complete: ${code}` }], isError: true };
+}
+
+/**
+ * The guard every ACTING tool (issue_command, surrender, set_seat_controller, leave_match) puts
+ * between withSeat and its own body: a watch handle resolves perfectly well — it just has no seat
+ * to act with. Returns a rejection to hand straight back, or null when the seat really is a
+ * playing one. Separate from withSeat rather than a second wrapper flavour, so the OBSERVATION
+ * tools — which are exactly the ones a watcher is entitled to — need no change at all to keep
+ * accepting both.
+ * @param {{watching?: boolean}} seat @returns {Object|null}
+ */
+export function requirePlayingSeat(seat) {
+  if (!seat.watching) return null;
+  return {
+    content: [{ type: "text", text: "Could not complete: watch-only-handle — this handle watches the match, it does not hold a seat. Use join_match to play." }],
+    isError: true,
+  };
 }

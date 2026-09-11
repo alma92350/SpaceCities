@@ -41,6 +41,14 @@ import { randomUUID } from "node:crypto";
 export const OWNER_IDS = Object.freeze(["player", "ai"]);
 const SEAT_KINDS = Object.freeze(["open", "ai", "agent"]);
 
+// Which seat kinds a fresh joinMatch may claim. "agent" is joinable for exactly the same reason
+// "open" is — it is a seat WAITING for someone to arrive, the label only says who is expected
+// (lobbyScreen.js has always mapped its own "an agent plays here" choice onto "open" precisely
+// because "agent" used to be unjoinable, which made the kind decorative). "ai" is not: a scripted
+// controller already holds it.
+const JOINABLE_KINDS = Object.freeze(["open", "agent"]);
+export const isJoinableKind = kind => JOINABLE_KINDS.includes(kind);
+
 /**
  * @param {{seatKinds?: string[]}} config - seatKinds defaults to two open seats (an ordinary
  *   human-vs-human skirmish), or must be an array of exactly 2 known kinds otherwise.
@@ -53,7 +61,18 @@ function buildSeats(config) {
   for (const kind of seatKinds) {
     if (!SEAT_KINDS.includes(kind)) throw new Error(`unknown seat kind: ${kind}`);
   }
-  return seatKinds.map(kind => ({ kind, owner: null, token: null }));
+  // seatAi[i] is that seat's own scripted-AI config ({strategy, difficulty}) — consulted only for
+  // an "ai"-kind seat, and only by whoever actually spawns the match's worker (tools/serve.js).
+  // Opaque here, exactly like every other config field this file never interprets.
+  const seatAi = Array.isArray(config.seatAi) ? config.seatAi : [];
+  return seatKinds.map((kind, i) => ({
+    kind, owner: null, token: null,
+    // Who is HOLDING this seat, as an opaque caller-chosen string (an MCP client's own stable id)
+    // — the one field that survives a client losing its seat_handle, so it can ask for the same
+    // seat back rather than being locked out of a match it is already playing.
+    clientId: null,
+    ai: kind === "ai" ? (seatAi[i] ?? null) : null,
+  }));
 }
 
 /** @returns {{matches: Map<string, Object>, createMatch: Function, listOpenMatches: Function, getMatch: Function, joinMatch: Function, reclaimSeat: Function, leaveSeat: Function, startMatch: Function}} */
@@ -90,8 +109,14 @@ export function createLobby() {
     return matches.get(matchId) || null;
   }
 
-  /** @returns {{ok:true, token:string, owner:string}|{ok:false, code:string}} */
-  function joinMatch(matchId, seatIndex) {
+  /**
+   * @param {string} matchId @param {number} seatIndex
+   * @param {string|null} [clientId] an opaque, caller-chosen stable identity for whoever is taking
+   *   this seat — see buildSeats' own `clientId` comment. Omitted (every caller before this) is
+   *   stored as null and changes nothing.
+   * @returns {{ok:true, token:string, owner:string}|{ok:false, code:string}}
+   */
+  function joinMatch(matchId, seatIndex, clientId = null) {
     const match = matches.get(matchId);
     if (!match) return { ok: false, code: "no-such-match" };
     // T-035: once started, the window for a casual join has closed — an AI-filled seat is only
@@ -99,10 +124,11 @@ export function createLobby() {
     if (match.status !== "open") return { ok: false, code: "already-started" };
     const seat = match.seats[seatIndex];
     if (!seat) return { ok: false, code: "no-such-seat" };
-    if (seat.kind !== "open") return { ok: false, code: "seat-not-open" };
+    if (!isJoinableKind(seat.kind)) return { ok: false, code: "seat-not-open" };
     if (seat.owner) return { ok: false, code: "seat-taken" };
     seat.owner = OWNER_IDS[seatIndex];
     seat.token = randomUUID();
+    seat.clientId = clientId ?? null;
     return { ok: true, token: seat.token, owner: seat.owner };
   }
 
@@ -140,6 +166,7 @@ export function createLobby() {
     if (match.status !== "open") return { ok: false, code: "already-started" };
     seat.owner = null;
     seat.token = null;
+    seat.clientId = null;
     return { ok: true };
   }
 
@@ -158,7 +185,45 @@ export function createLobby() {
     return { ok: true, match };
   }
 
-  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, leaveSeat, startMatch };
+  /**
+   * The seat `clientId` already holds in this match, if any — the recovery path for an MCP client
+   * that lost its seat_handle (a context compaction, a process restart) but still knows its own
+   * id. Deliberately NOT authenticated by anything but the client id itself: it hands back the
+   * same token that client was already given, so it is exactly as strong as whoever can guess that
+   * id, which is why the id is expected to be a random one the client mints for itself (see
+   * server/mcpLobbyTools.js's own join_match doc). Works whether or not the match has started —
+   * rejoining a LIVE match is the whole point.
+   * @returns {{ok:true, seatIndex:number, owner:string, token:string}|{ok:false, code:string}}
+   */
+  function findSeatForClient(matchId, clientId) {
+    const match = matches.get(matchId);
+    if (!match) return { ok: false, code: "no-such-match" };
+    if (!clientId) return { ok: false, code: "no-client-id" };
+    const seatIndex = match.seats.findIndex(s => s.clientId === clientId && s.token);
+    if (seatIndex === -1) return { ok: false, code: "no-seat-for-client" };
+    const seat = match.seats[seatIndex];
+    return { ok: true, seatIndex, owner: seat.owner, token: seat.token };
+  }
+
+  /**
+   * Every match this client currently holds a seat in, started or not — what an MCP client with
+   * nothing but its own id left calls to find its way back into whatever it was playing.
+   * @returns {{matchId:string, status:string, seatIndex:number, owner:string, token:string}[]}
+   */
+  function listSeatsForClient(clientId) {
+    if (!clientId) return [];
+    const out = [];
+    for (const match of matches.values()) {
+      match.seats.forEach((seat, seatIndex) => {
+        if (seat.clientId === clientId && seat.token) {
+          out.push({ matchId: match.id, status: match.status, seatIndex, owner: seat.owner, token: seat.token });
+        }
+      });
+    }
+    return out;
+  }
+
+  return { matches, createMatch, listOpenMatches, getMatch, joinMatch, reclaimSeat, leaveSeat, startMatch, findSeatForClient, listSeatsForClient };
 }
 
 // The safe subset of a match record a stranger (browsing the open-match list, or an MCP agent's
@@ -175,7 +240,16 @@ export function publicMatch(match) {
     id: match.id, status: match.status, createdAt: match.createdAt,
     planetId: match.config.planetId, sizeMult: match.config.sizeMult ?? 1, resourceMult: match.config.resourceMult ?? 1,
     matchTimeLimit: match.config.matchTimeLimit ?? null,
-    seats: match.seats.map(s => ({ kind: s.kind, taken: !!s.owner })),
+    // `controller` is the same three-value vocabulary server/mcpLobbyTools.js's own create_match
+    // accepts back ("ai" | "human" | "agent"), so what a caller asked for and what it later reads
+    // back are spelled the same way. `ai` is that seat's scripted-AI pick, present only when there
+    // actually is one — never a token, never a client id (both are credentials, see this
+    // function's own header).
+    seats: match.seats.map(s => ({
+      kind: s.kind, taken: !!s.owner,
+      controller: s.kind === "ai" ? "ai" : (s.kind === "agent" ? "agent" : "human"),
+      ...(s.ai ? { ai: s.ai } : {}),
+    })),
     spectatorsEnabled: match.config.spectatorsEnabled !== false,
   };
 }

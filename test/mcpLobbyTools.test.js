@@ -15,8 +15,8 @@ import { AGENT_APM } from "../net/agentApm.js";
    directly.
    ============================================================ */
 
-function mcpFor(lobby) {
-  return createMcpServer({ tools: createLobbyTools(lobby) });
+function mcpFor(lobby, onSeatsFilled) {
+  return createMcpServer({ tools: createLobbyTools(lobby, onSeatsFilled) });
 }
 
 async function callTool(mcp, name, args) {
@@ -31,9 +31,10 @@ async function callTool(mcp, name, args) {
   });
 }
 
-test("createLobbyTools registers exactly list_matches, join_match, and leave_match", () => {
+test("createLobbyTools registers the full lobby surface: create/list/join/leave/watch, plus seat recovery", () => {
   const tools = createLobbyTools(createLobby());
-  assert.deepEqual(tools.map(t => t.name).sort(), ["join_match", "leave_match", "list_matches"]);
+  assert.deepEqual(tools.map(t => t.name).sort(),
+    ["create_match", "find_my_seats", "join_match", "leave_match", "list_matches", "watch_match"]);
 });
 
 test("list_matches reports every open match's PUBLIC shape — never a seat's real token, never the raw seed", async () => {
@@ -47,7 +48,10 @@ test("list_matches reports every open match's PUBLIC shape — never a seat's re
   assert.equal(body.result.structuredContent.matches.length, 1);
   const listed = body.result.structuredContent.matches[0];
   assert.equal(listed.id, match.id);
-  assert.deepEqual(listed.seats, [{ kind: "open", taken: true }, { kind: "open", taken: false }]);
+  assert.deepEqual(listed.seats, [
+    { kind: "open", taken: true, controller: "human" },
+    { kind: "open", taken: false, controller: "human" },
+  ]);
   assert.equal(JSON.stringify(listed).includes(match.seats[0].token), false, "a seat's real token must never appear in the public listing");
 });
 
@@ -210,4 +214,148 @@ test("leave_match with an invalid or already-used handle is a tool execution err
   const mcp = mcpFor(lobby);
   const { body } = await callTool(mcp, "leave_match", { seat_handle: "garbage" });
   assert.equal(body.result.isError, true);
+});
+
+/* ============================================================
+   Seating a match over MCP: who plays each seat (create_match), getting BACK IN after losing a
+   handle (join_match's client_id, find_my_seats), and watching without playing (watch_match).
+   ============================================================ */
+
+test("create_match seats each side independently — an AI on seat 0, an agent on seat 1, each with its own AI pick", async () => {
+  const lobby = createLobby();
+  const mcp = mcpFor(lobby);
+
+  const { body } = await callTool(mcp, "create_match", {
+    seats: [{ controller: "ai", ai_strategy: "economic", difficulty: "hard" }, { controller: "agent" }],
+  });
+  assert.equal(body.result.isError, undefined, JSON.stringify(body.result));
+  const match = lobby.getMatch(body.result.structuredContent.match_id);
+  assert.deepEqual(match.seats.map(s => s.kind), ["ai", "agent"]);
+  // The AI pick is stored per SEAT, not match-wide — which is what lets the two seats run
+  // different opponents in the same match.
+  assert.deepEqual(match.seats[0].ai, { strategy: "economic", difficulty: "hard" });
+  assert.equal(match.seats[1].ai, null);
+});
+
+test("create_match with join_as hands back a working seat_handle for the seat it just claimed", async () => {
+  const lobby = createLobby();
+  const mcp = mcpFor(lobby);
+  const { body } = await callTool(mcp, "create_match", { seats: [{ controller: "agent" }, { controller: "human" }], join_as: 0 });
+  const { seat_handle, match_id, seat_index, owner } = body.result.structuredContent;
+  assert.deepEqual({ seat_index, owner }, { seat_index: 0, owner: "player" });
+  assert.deepEqual(resolveSeatHandle(lobby, seat_handle),
+    { ok: true, matchId: match_id, seatIndex: 0, owner: "player", token: lobby.getMatch(match_id).seats[0].token, watching: false });
+});
+
+test("create_match reports `started` from the SAME rule every join goes through — an all-AI match needs no joiner", async () => {
+  const lobby = createLobby();
+  const seen = [];
+  // The caller's own "is this ready, and did it start" hook (tools/serve.js's startAndSpawnIfReady).
+  const mcp = mcpFor(lobby, async match => { seen.push(match.id); return match.seats.every(s => s.kind === "ai" || s.owner); });
+
+  const allAi = await callTool(mcp, "create_match", { seats: [{ controller: "ai" }, { controller: "ai" }] });
+  assert.equal(allAi.body.result.structuredContent.started, true);
+
+  const waiting = await callTool(mcp, "create_match", { seats: [{ controller: "agent" }, { controller: "agent" }] });
+  assert.equal(waiting.body.result.structuredContent.started, false, "two unclaimed agent seats are not a startable match");
+  assert.equal(seen.length, 2, "the hook is consulted for every created match, not only the ones that start");
+});
+
+test("create_match rejects an unknown controller and a wrong seat count as tool errors, never a crash", async () => {
+  const mcp = mcpFor(createLobby());
+  const bad = await callTool(mcp, "create_match", { seats: [{ controller: "robot" }, { controller: "ai" }] });
+  assert.equal(bad.body.result.isError, true);
+  assert.match(bad.body.result.content[0].text, /bad-controller/);
+
+  const wrongCount = await callTool(mcp, "create_match", { seats: [{ controller: "ai" }] });
+  assert.equal(wrongCount.body.result.isError, true);
+  assert.match(wrongCount.body.result.content[0].text, /bad-seats/);
+});
+
+test("an 'agent' seat is genuinely joinable — the kind says who is expected, it does not lock the seat", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["agent", "ai"] });
+  const mcp = mcpFor(lobby);
+  const { body } = await callTool(mcp, "join_match", { match_id: match.id, seat_index: 0 });
+  assert.equal(body.result.isError, undefined, JSON.stringify(body.result));
+  assert.equal(body.result.structuredContent.owner, "player");
+});
+
+test("join_match with the same client_id REJOINS the same seat — the recovery path after losing a handle", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const mcp = mcpFor(lobby);
+
+  const first = await callTool(mcp, "join_match", { match_id: match.id, seat_index: 0, client_id: "agent-alpha" });
+  const again = await callTool(mcp, "join_match", { match_id: match.id, client_id: "agent-alpha" });
+
+  assert.equal(again.body.result.isError, undefined, JSON.stringify(again.body.result));
+  assert.equal(again.body.result.structuredContent.rejoined, true);
+  assert.equal(again.body.result.structuredContent.seat_handle, first.body.result.structuredContent.seat_handle,
+    "the same seat, the same token — a rejoin re-mints the handle it already had, it does not take a second seat");
+  assert.equal(lobby.getMatch(match.id).seats[1].owner, null, "rejoining must never consume the OTHER seat");
+});
+
+test("a rejoin works on a STARTED match — which is exactly when it matters, and when a fresh join is refused", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const mcp = mcpFor(lobby);
+  await callTool(mcp, "join_match", { match_id: match.id, seat_index: 0, client_id: "agent-alpha" });
+  lobby.startMatch(match.id);
+
+  const back = await callTool(mcp, "join_match", { match_id: match.id, client_id: "agent-alpha" });
+  assert.equal(back.body.result.isError, undefined, JSON.stringify(back.body.result));
+  assert.equal(back.body.result.structuredContent.started, true);
+  assert.equal(resolveSeatHandle(lobby, back.body.result.structuredContent.seat_handle).ok, true);
+
+  // A DIFFERENT client is still refused — rejoining is not a back door into a running match.
+  const stranger = await callTool(mcp, "join_match", { match_id: match.id, client_id: "someone-else" });
+  assert.equal(stranger.body.result.isError, true);
+  assert.match(stranger.body.result.content[0].text, /already-started/);
+});
+
+test("find_my_seats returns every seat a client holds, with usable handles, and nothing for an unknown client", async () => {
+  const lobby = createLobby();
+  const a = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const b = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const mcp = mcpFor(lobby);
+  await callTool(mcp, "join_match", { match_id: a.id, seat_index: 0, client_id: "agent-alpha" });
+  await callTool(mcp, "join_match", { match_id: b.id, seat_index: 0, client_id: "agent-alpha" });
+
+  const { body } = await callTool(mcp, "find_my_seats", { client_id: "agent-alpha" });
+  const seats = body.result.structuredContent.seats;
+  assert.deepEqual(seats.map(s => s.match_id).sort(), [a.id, b.id].sort());
+  for (const s of seats) assert.equal(resolveSeatHandle(lobby, s.seat_handle).ok, true);
+
+  const none = await callTool(mcp, "find_my_seats", { client_id: "nobody" });
+  assert.deepEqual(none.body.result.structuredContent.seats, []);
+});
+
+test("watch_match mints a handle that holds no seat, and is refused when the host disabled spectators", async () => {
+  const lobby = createLobby();
+  const open = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const closed = lobby.createMatch({ seatKinds: ["open", "ai"], spectatorsEnabled: false });
+  const mcp = mcpFor(lobby);
+
+  const { body } = await callTool(mcp, "watch_match", { match_id: open.id });
+  const resolved = resolveSeatHandle(lobby, body.result.structuredContent.watch_handle);
+  assert.equal(resolved.ok, true);
+  assert.equal(resolved.watching, true);
+  assert.equal(resolved.token, null, "a watcher holds no credential, because it holds no seat");
+  assert.deepEqual(open.seats.map(s => s.owner), [null, null], "watching costs no seat — a real player can still join");
+
+  const denied = await callTool(mcp, "watch_match", { match_id: closed.id });
+  assert.equal(denied.body.result.isError, true);
+  assert.match(denied.body.result.content[0].text, /spectators-disabled/);
+});
+
+test("leave_match refuses a watch handle — there is no seat behind it to give up", async () => {
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "ai"] });
+  const mcp = mcpFor(lobby);
+  const watch = (await callTool(mcp, "watch_match", { match_id: match.id })).body.result.structuredContent.watch_handle;
+
+  const { body } = await callTool(mcp, "leave_match", { seat_handle: watch });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /watch-only-handle/);
 });

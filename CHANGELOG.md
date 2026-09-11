@@ -8,6 +8,44 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
+- **An MCP client can now set up, leave, resume and watch a match — not just play one that already
+  exists.** Six new tools and one new argument, all on the same `/mcp` endpoint:
+  - `create_match` seats each side independently as `ai` (a built-in opponent, with its own
+    `ai_strategy`/`difficulty`), `human` or `agent`, so agent-vs-AI, agent-vs-agent, agent-vs-human
+    and AI-vs-AI are all just different `seats` arrays. Seat 0 can now be a scripted AI too, which
+    the old seat-1-only `aiEnabled` shortcut could not express — such a match is built through
+    `engine/state.js`'s own `ownerDefs`, and every other match keeps its existing code path
+    unchanged. `join_as` claims a seat in the same call.
+  - `watch_match` returns a watch handle: the same opaque string every observation tool takes, but
+    naming no seat. It reads the match unfogged from both sides (`get_situation` reports a per-side
+    scoreboard), consumes no seat, and can never act — `issue_command`, `surrender`,
+    `set_seat_controller`, `leave_match` and `get_tech_options` all refuse it. The match worker had
+    been publishing the spectator projection all along; the MCP cache was dropping it.
+  - `set_seat_controller` hands a live seat to the game's own AI (`controller:"ai"`) and takes it
+    back (`controller:"self"`). A human's browser holds a socket whose close the server can see, so
+    their seat already falls to AI cover and returns on reconnect; an MCP client has no socket, and
+    going quiet to compact its context was indistinguishable from thinking — so it can now say so.
+    Reversible, and the seat handle stays valid throughout.
+  - `join_match` and `create_match` accept a caller-minted `client_id`. Joining again with the same
+    one **rejoins the same seat**, including on a match already in progress where an ordinary join
+    is refused — the supported recovery path after a compaction or restart. `find_my_seats` lists
+    every seat a `client_id` holds when even the match id is gone.
+  - `batch` runs up to 24 tool calls in ONE request, observations and actions mixed, each step
+    inheriting the batch's `seat_handle`. This batches ROUND TRIPS, which `{t:"batch"}` (same tick)
+    and `ids` (up to 400 entities) cannot: a turn is "look, decide, act, wait", and paying network
+    latency four times for it over a 20Hz match is the largest remaining gap between an MCP client
+    and a browser client. Every step runs through the identical handler, validation, rate limit and
+    rejection codes a separate call would reach — cheaper, never more permissive.
+  - `wait_for_event` now returns a `summary` alongside the raw events: counts per type, which alert
+    groups fired, `under_attack` naming **which** of your entities are being hit and where, and what
+    of yours just finished — so an agent can branch on "am I being attacked" without parsing engine
+    event shapes. New `types`/`groups` filters narrow what wakes you, and a filtered wait keeps
+    waiting through excluded events instead of returning empty.
+  - A seat of kind `agent` is genuinely joinable now (the kind says who is expected; it no longer
+    locks the seat).
+- **`docs/mcp-player-handbook.md`** — the one-page handbook for an agent about to play, ordered by
+  what you do first, alongside the existing developer-facing `docs/agent-guide.md`.
+
 - **The MCP observation surface now says what things ARE, what they're DOING, and what just
   happened.** Every item below is a gap a real agent player hit in a played match.
   - `get_map_overview` reports each discovered node's **commodity, position, max and distance from

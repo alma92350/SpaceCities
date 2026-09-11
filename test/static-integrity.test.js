@@ -273,6 +273,10 @@ test("every shipped browser module is reachable from index.html's entry point", 
     // T-054: server/mcpEventTools.js — same class again, only ever reached from tools/serve.js's
     // own mcpServer wiring.
     "server/mcpEventTools.js",
+    // server/mcpBatchTools.js — same class again, only ever reached from tools/serve.js's own
+    // mcpServer wiring (it is a tool over the OTHER tools, so it is if anything further from the
+    // browser than the rest of this list).
+    "server/mcpBatchTools.js",
     // T-055: server/mcpResources.js — same class again.
     "server/mcpResources.js",
     // T-056: net/agentApm.js — same class again (a net/ file, like net/mcp.js above, but only

@@ -617,3 +617,126 @@ test("createAppServer().close() stops every live match's worker and ws attachmen
     await new Promise(resolve => app.server.close(resolve));
   }
 });
+
+// callMcpTool returns the raw JSON-RPC envelope; every test below wants the `result` object a
+// real agent's own client (tools/mcpClient.js) hands back, so unwrap it once here.
+// A match's worker reports its first projection a tick or two after the match starts, so every
+// observation tool answers "no-state-yet" for a brief window right after create_match — exactly
+// the gap docs/mcp-player-handbook.md tells a real agent to tolerate. Poll through it rather than
+// racing it.
+async function untilLive(port, seat_handle) {
+  for (let i = 0; i < 100; i++) {
+    const result = await mcpResult(port, "get_situation", { seat_handle });
+    if (!result.isError) return result;
+    await new Promise(r => setTimeout(r, 25));
+  }
+  throw new Error("the match never reported a projection");
+}
+
+async function mcpResult(port, name, args) {
+  const { json } = await callMcpTool(port, name, args);
+  assert.equal(json.error, undefined, `MCP ${name} protocol error: ${JSON.stringify(json.error)}`);
+  return json.result;
+}
+
+/* ============================================================
+   The MCP seating surface, proven through the REAL tools/serve.js wiring rather than a
+   hand-constructed tool registry: who plays each seat (create_match), a seat 0 driven by the game's
+   own AI (which needs engine/state.js's ownerDefs, not the seat-1-only aiEnabled shortcut), and
+   watching a match nobody at this client is playing.
+   ============================================================ */
+
+test("create_match over MCP can put the game's own AI on SEAT 0 — and that seat really plays", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "ai", ai_strategy: "aggressive" }, { controller: "ai" }],
+    });
+    assert.equal(created.isError, undefined, JSON.stringify(created));
+    assert.equal(created.structuredContent.started, true, "an all-AI match needs no joiner, so it starts on creation");
+
+    // Watch it, and let it run far enough that a seat nobody is driving must have DONE something —
+    // seat 0 ("player") is the one the old seat-1-only aiEnabled path could never have driven.
+    const watch = await mcpResult(port, "watch_match", { match_id: created.structuredContent.match_id });
+    const watch_handle = watch.structuredContent.watch_handle;
+
+    let seat0 = null;
+    for (let i = 0; i < 60 && !seat0?.units_by_type?.worker; i++) {
+      await mcpResult(port, "wait_for_event", { seat_handle: watch_handle, timeout_ms: 200 });
+      const situation = await mcpResult(port, "get_situation", { seat_handle: watch_handle });
+      seat0 = situation.structuredContent.sides?.find(s => s.owner === "player") ?? null;
+    }
+    assert.ok(seat0, "a watcher sees a per-side scoreboard for every owner");
+    assert.ok(seat0.units_by_type.worker > 0, "seat 0 has its own units");
+    // The real claim: seat 0 is being PLAYED, not just seeded. Its starting workers idle forever
+    // unless a controller sends them somewhere.
+    const entities = (await mcpResult(port, "list_entities", { seat_handle: watch_handle, owner: "player" })).structuredContent.entities;
+    assert.ok(entities.some(e => e.activity && e.activity !== "idle"),
+      `seat 0's own units should be doing something under AI control, got ${JSON.stringify(entities.map(e => e.activity))}`);
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("an MCP client creates a match, plays a turn in ONE batched call, and can rejoin it by client_id alone", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }],
+      join_as: 0, client_id: "agent-alpha",
+    });
+    assert.equal(created.structuredContent.started, true, "the only seat needing a joiner was claimed in this same call");
+    const { seat_handle, match_id } = created.structuredContent;
+
+    await untilLive(port, seat_handle);
+    const batched = await mcpResult(port, "batch", {
+      seat_handle,
+      steps: [
+        { tool: "get_situation" },
+        { tool: "get_map_overview" },
+        { tool: "wait_for_event", arguments: { timeout_ms: 300 } },
+      ],
+    });
+    assert.equal(batched.isError, undefined, JSON.stringify(batched));
+    assert.deepEqual(batched.structuredContent.results.map(r => r.tool), ["get_situation", "get_map_overview", "wait_for_event"]);
+    assert.equal(batched.structuredContent.failed, 0, JSON.stringify(batched.structuredContent.results));
+    assert.equal(batched.structuredContent.results[0].structuredContent.you, "player");
+
+    // Everything the client is assumed to have lost except its own id — the compaction/restart case.
+    const found = await mcpResult(port, "find_my_seats", { client_id: "agent-alpha" });
+    assert.deepEqual(found.structuredContent.seats.map(s => s.match_id), [match_id]);
+    const rejoined = await mcpResult(port, "join_match", { match_id, client_id: "agent-alpha" });
+    assert.equal(rejoined.structuredContent.rejoined, true);
+    // The recovered handle is not merely well-formed — it still commands the same live seat.
+    const situation = await mcpResult(port, "get_situation", { seat_handle: rejoined.structuredContent.seat_handle });
+    assert.equal(situation.structuredContent.you, "player");
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
+
+test("an MCP client hands its live seat to the AI and takes it back, through the real server", async () => {
+  const app = await createAppServer();
+  const port = await listen(app.server);
+  try {
+    const created = await mcpResult(port, "create_match", {
+      seats: [{ controller: "agent" }, { controller: "ai" }], join_as: 0, client_id: "agent-alpha",
+    });
+    const { seat_handle } = created.structuredContent;
+
+    await untilLive(port, seat_handle);
+    const away = await mcpResult(port, "set_seat_controller", { seat_handle, controller: "ai", difficulty: "hard" });
+    assert.equal(away.structuredContent.ai_controlled, true);
+    const back = await mcpResult(port, "set_seat_controller", { seat_handle, controller: "self" });
+    assert.equal(back.structuredContent.ai_controlled, false);
+    // The seat is still ours throughout — a handover is not leaving the match.
+    assert.equal((await mcpResult(port, "get_situation", { seat_handle })).structuredContent.you, "player");
+  } finally {
+    app.close();
+    await new Promise(resolve => app.server.close(resolve));
+  }
+});
