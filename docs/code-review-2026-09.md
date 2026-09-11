@@ -71,6 +71,70 @@ tick budget with no GC headroom, and `MAX_SUBSTEPS` degradation in
    usual tuning is cell ≈ query radius. Worth a sweep once (1) and (2) land,
    since they change the shape of the cost.
 
+### Resolution, 2026-09-11 — (2) shipped as proposed, (1) did not, because its premise is wrong
+
+**Proposal (1) would have broken the broad phase, and the green suite was not
+evidence that it hadn't.** The claim above is that the ring is redundant because
+"the caller already added `MAX_UNIT_RADIUS` to the radius, which is exactly what
+the ring exists to cover." That is not what the ring covers. `engine/grid.js`'s
+own header says so: the grid is built from **pre-movement** positions at the top
+of `tick()` and reused all tick, while every caller filters against **live**
+positions — so the ring is there to cover how far a unit can MOVE between the
+build and the query. `MAX_UNIT_RADIUS` covers the other unit's hull, which is a
+different quantity; removing the ring removes the displacement slack entirely.
+
+Measured (`test/grid-superset.test.js`, adversarial fixtures on a Gigantic map):
+
+| Fixture | Worst per-tick displacement |
+|---|---|
+| Two armies attack-moving, no pile | 7.30 px |
+| + 60 units piled on one point | 29.97 px |
+| + 400 units piled on one point | 38.68 px |
+
+Both units in a pair can move, so the pad has to cover ~77 px in the worst case.
+Dropping it to zero would have made the broad phase miss real neighbours — and
+the review's own findings #2 and #5 explain exactly why the suite stayed green
+anyway: no guard measures this, and determinism compares a seed against itself,
+so both runs would have missed the same unit identically.
+
+Worth noting what the measurement also shows: displacement is **density-
+dependent and has no analytic bound**, because separation pushes stack. The old
+96 px ring was sufficient by margin, not by construction. See the known-issue
+note in `TASKS.md`.
+
+**What shipped instead.** The pad is now two named constants sized to what each
+phase can actually see, and the exact-distance work is (2) as proposed but with
+a slack factor that makes "bit-identical" provable rather than observed:
+
+- `PAD_MOVE_PHASE` (32 px) for queries inside the `updateUnit` loop, where the
+  only writes so far are movement steps — analytically capped at 7.0 px by
+  `stepToward`, so 14.0 px for a pair. Only movement avoidance qualifies:
+  combat acquisition and splash look like they should, but they are also reached
+  from `updateBuildingCombat` after the separation pass.
+- `PAD_FULL_TICK` (96 px), the old ring's value, for everything after that.
+- `REJECT_SLACK` (1.0001) widens every squared-distance pre-reject, so it
+  provably cannot discard a pair the exact `Math.hypot` test would have kept.
+
+**Result — measured the same way, plus a fingerprint oracle the original
+prototype did not have:**
+
+| Units | Before | After | 50 ms budget @ 20 Hz |
+|---|---|---|---|
+| 500 | 11.66 ms/tick | **9.48 ms/tick** | |
+| 1000 | 37.04 ms/tick | **30.92 ms/tick** | 74% → 62% consumed |
+
+That is ~20%, not the 2.8x above — the difference is the pad that turned out to
+be load-bearing. `entitySnapshot` fingerprints over four workloads are identical
+to pristine `main`, so no replay or balance outcome moves. Full suite 3315 pass,
+slow tier 72 pass, typecheck clean.
+
+**Still open:** proposal (3), the `CELL = 96` sweep. And the real remaining
+headroom is no longer the pad — it is the unbounded separation churn that forces
+`PAD_FULL_TICK` to stay wide. Bounding a unit's total per-tick separation
+displacement would make the pad structural and let it shrink everywhere, but
+that changes behaviour in dense piles, so it wants the golden canary from
+finding #5 landed first.
+
 ---
 
 ## 2. The performance guards cannot fail
@@ -100,6 +164,20 @@ codebase this carefully guarded everywhere else.
   #1 the day it was introduced. Timing is the weakest available proxy for the
   thing you actually care about, and this codebase has already shown (fog counts,
   logistics counts) that it prefers exact counters to proxies.
+
+### Resolution, 2026-09-11 — shipped, as the work counter
+
+`test/perf-guard.test.js` keeps both wall-clock alarms unchanged (they are
+deliberately slack, and that was never the bug) and adds a third instrument:
+`engine/grid.js` now counts queries and candidate visits, and the guard asserts
+a ratio against a committed baseline of 40,644,620 visits over the 500-unit
+Gigantic fixture. Deterministic, machine-independent, cannot flake.
+
+It asserts in **both** directions. A big drop fails too, because a baseline
+nobody re-commits is how a guard goes slack a second time — and the failure
+message says to re-commit it rather than leaving the reader to guess. The
+tolerance is 1.10, tight enough that it would have caught the 13% the padding
+fix moved, had it gone the other way.
 
 ---
 
@@ -139,6 +217,22 @@ with callers bracketing their iteration, or — simpler and my preference — ha
 `queryNeighbors` take a **caller-supplied buffer**. Three or four long-lived
 per-call-site arrays cost the same zero garbage and make the invariant
 structural instead of conventional.
+
+### Resolution, 2026-09-11 — shipped, the caller-supplied-buffer variant
+
+`queryNeighbors(grid, x, y, radius, pad, out)`. Six call sites across four
+modules each own a module-level array — `_avoidBuf`, `_sepBuf`, `_menderBuf`,
+`_threatBuf`, `_splashBuf`, `_acquireBuf` — so two sites can no longer alias,
+whatever the call order. `acquireTarget`, the one that already bent the rule by
+handing its list to `spreadEnemy`, says so at the call site.
+
+The shared `_scratch` survives only as the default for ad-hoc and test callers,
+which leaves the "a new call site forgets to pass one" hole that the depth-guard
+alternative would have closed. So that hole gets a guard of its own — static,
+in the same idiom as `engine-purity.test.js`: `test/grid-superset.test.js` reads
+every `engine/` source and fails on any `queryNeighbors` call that doesn't pass
+its own buffer. Verified to go red against a deliberately reverted call site,
+then green again.
 
 ---
 
@@ -238,17 +332,26 @@ rather than a periodic cleanup.
 
 ## Suggested order
 
-| # | Finding | Effort | Why now |
-|---|---|---|---|
-| 1 | Broad-phase over-scan | **S** | 2.8x sim headroom, verified, suite green |
-| 2 | Perf guards that can fail | **S** | Without it, #1 recurs |
-| 3 | `_scratch` reentrancy | **S** | Silent, undetectable-by-design failure mode |
-| 5 | Golden match canary | **M** | The missing regression net |
-| 4 | Tick phase ordering | **M** | Same class as #3, larger surface |
-| 6 | UI file sizes | **L** | Ongoing, not urgent |
+| # | Finding | Effort | Why now | Status |
+|---|---|---|---|---|
+| 1 | Broad-phase over-scan | **S** | 2.8x sim headroom, verified, suite green | ✅ **partly** — ~20%, not 2.8x; the rest was unsafe, see above |
+| 2 | Perf guards that can fail | **S** | Without it, #1 recurs | ✅ done |
+| 3 | `_scratch` reentrancy | **S** | Silent, undetectable-by-design failure mode | ✅ done |
+| 5 | Golden match canary | **M** | The missing regression net | ⚪ open — now also gates the rest of #1 |
+| 4 | Tick phase ordering | **M** | Same class as #3, larger surface | ⚪ open |
+| 6 | UI file sizes | **L** | Ongoing, not urgent | ⚪ open |
 
 1–3 are each an afternoon and together are the highest return. I'd take them as
 one branch, in that order, since #2 is what proves #1 and guards #3.
+
+**Postscript, 2026-09-11.** That ordering was right, and taking them as one
+branch is what caught the error in #1: writing #2's and #3's guards first meant
+there was finally an instrument pointed at the invariant #1 proposed to remove.
+The lesson generalises past this branch — #1 shipped a measured 2.8x prototype
+with a green 3310-test suite behind it, and it was still wrong, because the
+suite had no way to be anything else. Finding #5 is the same gap one level up,
+and it is now the thing standing between this codebase and the remaining
+headroom in #1.
 
 ---
 

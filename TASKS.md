@@ -272,6 +272,14 @@ that would actually hurt, each owned by a task:
 
 ---
 
+## Known issues
+
+| # | Issue | Found by | Status |
+|---|---|---|---|
+| **K1** | **The broad phase's superset guarantee is density-dependent and has no analytic bound.** `engine/grid.js` pads every query box so the candidate set stays a superset despite the grid holding pre-movement positions. Movement is analytically bounded (`stepToward` caps a step at 7.0 px for the fastest hull with the largest multipliers in the game), but **separation pushes are not**: each is capped at 1.5 px, and a unit in a dense pile takes many in one pass. Measured worst case on adversarial fixtures is 38.7 px of single-unit displacement — ~77 px for a pair — against `PAD_FULL_TICK`'s 96 px. So the late-tick pad holds by a **1.25x margin, not by construction**, and a dense enough pile could in principle push past it, at which point separation and Mender repair would silently start missing neighbours. Note this is not a regression: the old `-1`/`+1` ring of cells was the same 96 px and had the same exposure, with nothing measuring it. `test/grid-superset.test.js` now fails if the measured displacement reaches the pad on its fixtures, which converts a silent failure into a red build for any code change that worsens it — it cannot speak for a pile denser than the fixture. **The fix is to bound a unit's total per-tick separation displacement**, which would make the pad structural and let it shrink everywhere (the remaining headroom in the 2026-09 review's finding #1). That changes behaviour in dense piles, so it wants the golden-match canary (finding #5) landed first. | 2026-09 code review follow-through | ⚪ open, non-blocking |
+
+---
+
 ## Blocked / needs a decision
 
 | # | Question | Blocks | Owner |

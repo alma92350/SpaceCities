@@ -1,5 +1,7 @@
 /* ============================================================
-   Wall-clock catastrophe alarms. NOT benchmarks — they exist to catch an accidental
+   Two different instruments, because they catch different things.
+
+   1. WALL-CLOCK CATASTROPHE ALARMS. NOT benchmarks — they exist to catch an accidental
    O(n^2)->O(n^3) regression or a per-tick allocation blow-up, with budgets generous
    enough not to flake on a loaded CI runner.
 
@@ -8,12 +10,26 @@
    alarm made the DETERMINISM guard go red, which teaches contributors to rerun a red
    determinism file rather than read it. Timing noise and replay correctness are
    different failure modes and deserve different files.
+
+   2. A WORK COUNTER. The alarms above are ~12x looser than the work they measure
+   (200 units x 120 ticks runs in ~680ms against an 8000ms budget), so a 10x
+   regression ships green — which is how a broad phase that scanned 13x more area
+   than it needed sat at 50% of sim CPU in a codebase this carefully guarded.
+   Loosening the budgets isn't the fix: they are that loose ON PURPOSE, because wall
+   clock on a shared runner is noisy.
+
+   So the second instrument doesn't measure time at all. It counts the candidates
+   engine/grid.js's broad phase visits, which is deterministic, identical on every
+   machine, cannot flake, and moves the instant a query box grows. That is the same
+   preference for exact counters over proxies the engine already shows with its fog
+   and logistics counts.
    ============================================================ */
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { createGameState, makeUnit } from "../engine/state.js";
+import { neighborQueryStats, resetNeighborQueryStats } from "../engine/grid.js";
 import { tick } from "../engine/sim.js";
 import { mulberry32 } from "./_helpers.js";
 
@@ -52,4 +68,46 @@ test("perf guard at scale: ~500 units on a Gigantic map stays under a catastroph
   for (let i = 0; i < 300; i++) tick(state, 0.05);
   const elapsed = performance.now() - t0;
   assert.ok(elapsed < 20000, `500-unit Gigantic sim took ${elapsed.toFixed(0)}ms for 300 ticks (budget 20000ms)`);
+});
+
+// Committed baseline for the work counter below, measured on the fixture in that
+// test. Unlike a wall-clock number this is a property of the CODE, not of the
+// machine: the same fixture visits the same candidates everywhere.
+//
+// UPDATING IT IS THE POINT. A diff that moves this number is a diff that changed
+// how much the broad phase looks at, and that should be a visible line in review
+// with a sentence saying why — a wider query box, a new call site, a bigger cell.
+// Moving it to make a red test green, with no such sentence, is the review smell.
+// For scale: this fixture made 405,982 queries either way, and the same run
+// visited 46,909,263 candidates (115.5 per query) before movement avoidance
+// stopped paying the worst-case pad — so the tolerance below is tight enough
+// to have caught that 13% as a regression had it gone the other way.
+const BROAD_PHASE_BASELINE = 40_644_620;   // candidate visits over the 300-tick run
+const BROAD_PHASE_TOLERANCE = 1.10;
+
+test("perf guard: the broad phase visits no more candidates than it used to", () => {
+  const state = createGameState({ planetId: "ferros", rng: mulberry32(11), sizeMult: 4 });
+  const base = state.map.bases;
+  const types = ["skiff", "bastion", "lancer", "breacher", "worker"];
+  for (let i = 0; i < 250; i++) {
+    for (const [owner, b] of [["player", base.player], ["ai", base.ai]]) {
+      const u = makeUnit(types[i % types.length], owner, b.x + (i % 20) * 14, b.y + Math.floor(i / 20) * 14);
+      if (u.type !== "worker") u.order = { type: "attack-move", x: state.map.width / 2, y: state.map.height / 2 };
+      state.units.set(u.id, u);
+    }
+  }
+  resetNeighborQueryStats();
+  for (let i = 0; i < 300; i++) tick(state, 0.05);
+  const { queries, candidates } = neighborQueryStats();
+
+  const ratio = candidates / BROAD_PHASE_BASELINE;
+  assert.ok(ratio <= BROAD_PHASE_TOLERANCE,
+    `the broad phase visited ${candidates.toLocaleString()} candidates over ${queries.toLocaleString()} queries ` +
+    `(${(candidates / queries).toFixed(1)} per query) — ${ratio.toFixed(2)}x the committed baseline of ` +
+    `${BROAD_PHASE_BASELINE.toLocaleString()}. Something widened a query box or added a call site on the hot path.`);
+  // The floor matters too: a big drop means the baseline is stale and the guard
+  // has quietly gone slack, which is exactly the failure this test exists to end.
+  assert.ok(ratio >= 1 / BROAD_PHASE_TOLERANCE,
+    `the broad phase visited ${candidates.toLocaleString()} candidates, only ${ratio.toFixed(2)}x the committed ` +
+    `baseline of ${BROAD_PHASE_BASELINE.toLocaleString()} — a real improvement, so re-commit the baseline to lock it in.`);
 });

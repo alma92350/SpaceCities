@@ -26,6 +26,10 @@ import { getEntity } from "./state.js";
 
 const OFFGRID_HEAL = 0.3;   // an Odyssey Mender off the powered grid limps on reserves at this fraction
 
+// This module's own broad-phase result buffer (see engine/grid.js) — one per
+// call site so no two can alias each other's candidates.
+const _menderBuf = [];
+
 // Shared "does this need repair" thresholds — hysteresis for whoever's roaming to fix things
 // (the auto-repair Mender, engine/sim.js; the worker repair job below): only get ATTRACTED to a
 // friendly once it's worn past NEEDS_REPAIR, and once committed, keep servicing it until it's back
@@ -154,7 +158,7 @@ export function updateRepair(state, dt) {
     // (there can be hundreds); a straight scan is the fallback for the many
     // tests that drive repair without building a per-tick grid.
     const cands = state.unitGrid
-      ? queryNeighbors(state.unitGrid, mender.x, mender.y, range)
+      ? queryNeighbors(state.unitGrid, mender.x, mender.y, range, undefined, _menderBuf)
       : state.units.values();
     for (const u of cands) {
       if (u === mender) continue;               // a Mender never heals itself — it's meant to be a fragile, escorted asset

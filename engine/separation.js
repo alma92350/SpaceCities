@@ -15,7 +15,7 @@
 "use strict";
 
 import { UNITS } from "./entities.js";
-import { queryNeighbors } from "./grid.js";
+import { queryNeighbors, REJECT_SLACK } from "./grid.js";
 import { hashStr } from "./rng.js";
 import { MAX_UNIT_RADIUS } from "./movement.js";
 
@@ -39,6 +39,10 @@ const SEP_RADIUS = 2 * MAX_UNIT_RADIUS * SEPARATION_PAD_MULT;   // two largest h
 // a near-O(pile^2) pass. MAX_SEPARATION_NEIGHBORS is well above any realistic legitimate
 // local cluster (verified by the full test/balance/determinism suites staying green).
 export const MAX_SEPARATION_NEIGHBORS = 40;
+
+// This module's own broad-phase result buffer (see engine/grid.js) — one per
+// call site so no two can alias each other's candidates.
+const _sepBuf = [];
 
 // The [start, take) window into a length-`n` candidate list that unit `gi` scans this
 // call. Identity ([0, n)) under the cap — byte-identical to the old plain for-of. Past
@@ -73,7 +77,7 @@ export function applySeparation(state, dt) {
   // exactly once (matching the i<j semantics above) — bounded by separationWindow
   // so a pathologically dense cell can't blow up a single tick's cost.
   for (const a of state.units.values()) {
-    const near = queryNeighbors(grid, a.x, a.y, SEP_RADIUS);
+    const near = queryNeighbors(grid, a.x, a.y, SEP_RADIUS, undefined, _sepBuf);
     const n = near.length;
     const [start, take] = separationWindow(n, a._gi, state.tick);
     for (let k = 0; k < take; k++) {
@@ -111,6 +115,10 @@ function separatePair(a, b, dt) {
   const minDist = (UNITS[a.type].radius + UNITS[b.type].radius) * pad;
 
   let dx = b.x - a.x, dy = b.y - a.y;
+  // Squared-distance pre-reject before paying for a Math.hypot — see
+  // REJECT_SLACK in engine/grid.js. Most candidate pairs in a broad-phase cell
+  // are not actually overlapping, so most return here without a square root.
+  if (dx * dx + dy * dy >= minDist * minDist * REJECT_SLACK) return;
   let dist = Math.hypot(dx, dy);
   if (dist >= minDist) return;
 

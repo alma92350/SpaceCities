@@ -19,7 +19,7 @@
 
 import { radiusOf } from "./colliders.js";
 import { UNITS } from "./entities.js";
-import { queryNeighbors } from "./grid.js";
+import { queryNeighbors, PAD_MOVE_PHASE, REJECT_SLACK } from "./grid.js";
 import { sampleTerrain, sideMod } from "./map.js";
 import { hashStr } from "./rng.js";
 
@@ -27,11 +27,16 @@ const AVOID_RANGE = 30;     // how far out a unit senses neighbors to steer arou
 const AVOID_WEIGHT = 1.6;   // how strongly a sensed neighbor bends the seek direction
 // Derived from the roster, not hardcoded: the old literal (10, "Breacher") went stale the moment
 // a wider hull was added (the Bulk Freighter is 15), which silently under-sized the avoidance
-// query — it only kept working because the grid pads each query by a full cell. Computing it
-// once at module load from static UNITS data keeps it correct as the roster grows, with no
+// query — it only kept working because the grid pads each query, and back then that pad was a
+// full cell. It is PAD_MOVE_PHASE now, so there is less to absorb a mistake here than there was.
+// Computing it once at module load from static UNITS data keeps it correct as the roster grows, with no
 // purity issue (no randomness/clock). A larger query returns a superset of candidates that the
 // exact-distance check still filters identically, so replays stay byte-identical.
 export const MAX_UNIT_RADIUS = Math.max(...Object.values(UNITS).map(u => u.radius || 0));
+
+// This module's own broad-phase result buffer (see engine/grid.js) — one per
+// call site so no two can alias each other's candidates.
+const _avoidBuf = [];
 
 
 // The formation slot for an escorting unit — a point on a protective ring around the friendly
@@ -173,15 +178,23 @@ function senseLateralAvoidance(state, unit, seekX, seekY) {
   const selfR = radiusOf(unit);
   // Broad phase: only same-owner neighbours in nearby cells can be within sense
   // range. Falls back to the full unit list when there's no grid (direct tests).
+  // PAD_MOVE_PHASE, not the default: this runs inside sim.js's updateUnit loop,
+  // so the only staleness in the grid is one movement step per unit — not the
+  // separation churn the default pad has to cover. This is the hottest query in
+  // the sim and the pad dominates the box area, so the narrower pad is most of
+  // the difference between a 4x4-cell scan and a 2x2 one (see engine/grid.js).
   const others = state.unitGrid
-    ? queryNeighbors(state.unitGrid, unit.x, unit.y, selfR + MAX_UNIT_RADIUS + AVOID_RANGE)
+    ? queryNeighbors(state.unitGrid, unit.x, unit.y, selfR + MAX_UNIT_RADIUS + AVOID_RANGE, PAD_MOVE_PHASE, _avoidBuf)
     : state.units.values();
   let lateral = 0;
   for (const other of others) {
     if (other === unit || other.owner !== unit.owner || other.hp <= 0) continue;
     const dx = other.x - unit.x, dy = other.y - unit.y;
-    const dist = Math.hypot(dx, dy);
     const detectRange = selfR + radiusOf(other) + AVOID_RANGE;
+    // Squared-distance pre-reject before paying for a Math.hypot — see
+    // REJECT_SLACK in engine/grid.js. Survivors still take the exact test below.
+    if (dx * dx + dy * dy >= detectRange * detectRange * REJECT_SLACK) continue;
+    const dist = Math.hypot(dx, dy);
     if (dist <= 0 || dist >= detectRange) continue;
 
     const ahead = dx * seekX + dy * seekY;
