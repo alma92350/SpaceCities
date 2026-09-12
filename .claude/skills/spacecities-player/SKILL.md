@@ -89,6 +89,10 @@ a feeling that it's time:
 | On `workerRetargeted` | Check where that worker just sent itself; pull it back if it left home | A depleted seam re-tasks workers across the map, one at a time, until a single raider eats your economy |
 | On `unitStalled` | Re-issue that worker's `gather` order | A stalled hauler never shows as idle and never banks; its cargo and its seam are both simply out of the economy |
 | The moment you pick a unit to mass | `set_production_plan` for it | Production that only continues while you are awake is production that stops |
+| Every `take_turn` | `supply_used >= cap - 6`? Queue the **next habitat now** | Reactive habitats cost minutes: one match banked 720-845 idle ore at cap while the barracks sat empty |
+| Every `take_turn` | Barracks queue empty **and** ore > one unit? Requeue by hand | A `set_production_plan` **exhausts its `repeat` count silently**. "The plan is set" is not "the queue is full" |
+| Within **30s** of any launch | Re-scout the target. Vision older than that is a guess | Four strike forces died walking into defenses — including a turret — that were not there when the attack was decided |
+| After **any** lost strike | Rebuild the **garrison first**, army second | The recorded kill shot: a spent strike force, zero defenders at home, whole worker line and command centre gone in one pass |
 | Before **any** commit | `estimate_engagement` | "Losing count" is a number, not a feeling |
 | After **any** lost engagement | `get_counters` before requeuing the same unit | Numbers never fix a counter deficit |
 
@@ -289,6 +293,14 @@ Four separate matches were lost to variations of one mistake. The rule:
   against a known enemy. Unscouted, or against a force that can arrive in full, the earlier
   guidance stands: nearer 50% than 35%, and never zero.
 
+- **The garrison floor is never the source of reinforcements for an attack.** Topping an attack
+  up from home is how a base ends up empty: the 997s loss below sent "most of the army, keeping a
+  modest home guard" four times, and each rebuild came out of the guard. The floor grows with the
+  clock; it is never spent.
+- **A spent strike force is an emergency at home, not a prompt to rebuild the army.** The moment a
+  commit dies, the enemy knows your base is empty and is already moving. Queue defenders and put
+  them on the command centre coordinates before you queue anything else.
+
 The flip side is that **the garrison is where the ore advantage comes from**, not insurance you hope
 not to need: the defender pays no travel time and the attacker arrives piecemeal. Three bastions
 parked on the command center killed an incoming skiff + 2 rangers for zero losses and decided a match
@@ -447,6 +459,50 @@ Surrendered ~277s, korrath 0.6x, vs `hard` AI. Decided by **150s**; every mistak
 session. The failure was never knowledge — it was never converting an observation into a different
 build order. Use the checklist at the top, on its clock triggers. Do not trust yourself to notice the
 right moment.
+
+## The OTHER losing pattern: the long game you were winning
+
+Recorded in full from **both seats** — a 997s match where the loser had the better economy the whole
+way and still lost by elimination. This is the failure mode the rest of this file does not catch,
+because every individual decision looked defensible.
+
+**The loser (seat `ai`)** peaked at **800-1000+ ore/min, 5 habitats, 50 supply** — a bigger economy
+than the winner ever had. It launched **four separate strike forces** at the enemy base. All four
+were wiped. After the fourth, the opponent walked into a base with **zero defenders**, killed the
+entire worker line, and took the command centre.
+
+**The winner (seat `player`)** had its *own* first push wiped by hidden bastions. It then attacked
+**twice** in the whole match. In between it destroyed **three full enemy armies at home**, on its own
+command centre, behind a turret.
+
+Neither side out-mechaniced the other. Four things separated them:
+
+1. **Incremental commitment is the trap.** "Attack with most of the army, keep a modest home guard,
+   rebuild, attack again" is four forces that each lose, when one force built from all four would
+   have won. If you cannot commit at **≥1.5x the defender's scouted supply** (check
+   `estimate_engagement`), you are not ready to attack — you are ready to keep massing. **A second
+   attempt at the same base with a similar-sized force is the same decision, and it has already
+   failed once.**
+2. **Defence is a resource multiplier, not a delay.** The defender pays no travel time, fights under
+   its turret, and reinforces from the barracks mid-fight. The winner's three defensive wins cost it
+   almost nothing and cost the attacker everything. **Against an opponent that keeps attacking you,
+   the correct play can be to keep not attacking.**
+3. **Harvest the wrecks.** Every one of those battles left wrecks *on the winner's doorstep* — 1232
+   ore at distance 114, then 1852 ore at distance 78. It redirected workers onto them immediately and
+   rebuilt its economy twice off its own defensive kills. Losing a battle at your base and winning one
+   at theirs both produce wrecks; only one of them produces wrecks you can actually mine. **After any
+   fight near home, `get_map_overview` for new nodes and send idle workers.**
+4. **Rebuilding the army is not rebuilding the defence.** Both are "queue units", and only one of them
+   keeps you alive. See the garrison floor rule above.
+
+**The tell, and it is loud:** if you have attacked the same base twice and been wiped twice, the
+plan is wrong, not the execution. Stop. Turtle, take the wrecks, mass to a force that
+`estimate_engagement` calls a rout, and go once.
+
+**One caveat, so this is not read as "never attack":** the winner did have to attack eventually, and
+it won by doing so — *after* the opponent's army was spent against its garrison. Turtling is how you
+buy the favourable attack, not a substitute for one. A pure turtle with no finishing push is the same
+loss on a longer clock.
 
 ## Match record — the same 234s match from BOTH sides
 
