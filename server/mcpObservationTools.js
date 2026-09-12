@@ -225,6 +225,43 @@ function sideDps(attackers, defenders) {
   return dps;
 }
 
+// Lanchester-LINEAR (the aggregate hp/dps model below) assumes every unit on a side keeps firing
+// until that whole side is dead. Real fights are the other way round: both sides concentrate on one
+// target at a time, so the LOSING side's damage output decays as it dies while the winner's does
+// not. That gap is not academic — a recorded match fed 5 lancers into 8 bastions and lost all five
+// for one damaged bastion, a rout the aggregate margin (0.53x) understates: it reads as "you lose"
+// but not as "you lose everything and they keep six". This runs the concentrated version so the
+// answer can say how many of each side are expected to be left standing.
+//
+// Still an approximation, and deliberately the same one estimateFight documents: no range, no
+// pathing, no arrival order, no terrain. Its ONLY job is to turn a ratio into a survivor count.
+const SIM_DT = 0.1;
+const SIM_MAX_STEPS = 3000;
+
+function focusFireOutcome(mine, theirs) {
+  let myHp = mine.map(e => e.hp ?? 0), theirHp = theirs.map(e => e.hp ?? 0);
+  const aliveOf = (hps, list) => list.filter((_, i) => hps[i] > 0);
+  // Damage is re-derived from the units still alive on each step, so a side that has lost half its
+  // force is genuinely doing half its damage — the whole point of running this at all.
+  const bite = (hps, dmg) => { for (let i = 0; i < hps.length; i++) if (hps[i] > 0) { hps[i] -= dmg; return; } };
+  let steps = 0;
+  while (steps++ < SIM_MAX_STEPS) {
+    const myAlive = aliveOf(myHp, mine), theirAlive = aliveOf(theirHp, theirs);
+    if (!myAlive.length || !theirAlive.length) break;
+    // Both sides' damage for this step is computed from the SAME pre-step survivors, so neither
+    // side gets a free half-tick of advantage from being evaluated first.
+    const myDmg = sideDps(myAlive, theirAlive) * SIM_DT;
+    const theirDmg = sideDps(theirAlive, myAlive) * SIM_DT;
+    bite(theirHp, myDmg);
+    bite(myHp, theirDmg);
+  }
+  return {
+    your_survivors: myHp.filter(h => h > 0).length,
+    enemy_survivors: theirHp.filter(h => h > 0).length,
+    seconds: Math.round(steps * SIM_DT),
+  };
+}
+
 function estimateFight(mine, theirs) {
   const myHp = mine.reduce((sum, e) => sum + (e.hp ?? 0), 0);
   const theirHp = theirs.reduce((sum, e) => sum + (e.hp ?? 0), 0);
@@ -246,6 +283,9 @@ function estimateFight(mine, theirs) {
     your_hp: Math.round(myHp), enemy_hp: Math.round(theirHp),
     seconds_to_kill_enemy: myTimeToKill === Infinity ? null : Math.round(myTimeToKill),
     seconds_to_lose_your_force: theirTimeToKill === Infinity ? null : Math.round(theirTimeToKill),
+    // How many are expected to be LEFT — the number that makes a bad trade obvious. "margin 0.53x"
+    // and "you lose all 5, they keep 6" are the same fact, but only one of them reads as a rout.
+    ...focusFireOutcome(mine, theirs),
   };
 }
 
@@ -435,9 +475,25 @@ export function createObservationTools(lobby, getCache) {
         "cannot yet, how many seconds this seat's MEASURED income needs to get there (seconds_until_affordable — " +
         "absent when the current economy would never get there at all). A type " +
         "needing a building or upgrade this match doesn't have reads prereqs_met:false rather than being omitted, so " +
-        "the list stays a complete reference. Odyssey-only research is not included over this transport yet.",
-      inputSchema: { type: "object", properties: { seat_handle: { type: "string" } }, required: ["seat_handle"] },
-      handler: withSeat(lobby, seatAndProj(getCache, ({ seat, proj, cache }) => {
+        "the list stays a complete reference. Odyssey-only research is not included over this transport yet. " +
+        "The full list is LONG: narrow it with `only` (just the types you are weighing) or `ready_only` " +
+        "(just what you could start right now) rather than re-reading every type each time you check one.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          seat_handle: { type: "string" },
+          only: {
+            type: "array", items: { type: "string" },
+            description: "Optional. Only report these unit/building types, e.g. [\"lancer\",\"breacher\"]. A type that does not exist is reported in unknown_types rather than silently dropped.",
+          },
+          ready_only: {
+            type: "boolean",
+            description: "Optional. Only report types you could start RIGHT NOW — prereqs met, affordable, produced by something, not supply-blocked. Answers \"what can I do with what I have\" without the unbuildable majority of the table.",
+          },
+        },
+        required: ["seat_handle"],
+      },
+      handler: withSeat(lobby, seatAndProj(getCache, ({ seat, proj, cache, only, ready_only }) => {
         // "What can I afford, and do I meet its prerequisites" is a question only a seat has —
         // a watcher owns no buildings and no resources to answer it against.
         if (seat.owner === SPECTATOR_SEAT) return rejection("watch-only-handle: build options are per-seat; join a match to ask this");
@@ -471,13 +527,22 @@ export function createObservationTools(lobby, getCache) {
             ...(UNITS[def.id] && (def.supplyCost || 0) > supplyRoom ? { supply_blocked: true } : {}),
           };
         };
-        const units = Object.values(UNITS).map(optionFor);
-        const buildings = Object.values(BUILDINGS).map(optionFor);
         const ready = o => o.prereqs_met && o.affordable && o.buildable !== false && !o.supply_blocked;
-        const readyCount = list => list.filter(ready).length;
+        // `only` is applied to the DEFINITIONS, before any option is built, so narrowing the list
+        // is genuinely cheaper rather than just a smaller slice of the same full computation. An
+        // unrecognised name is surfaced (unknown_types) instead of silently yielding a short list
+        // that looks like a real answer — a typo'd type would otherwise read as "not available".
+        const wanted = Array.isArray(only) && only.length ? new Set(only) : null;
+        const keep = defs => (wanted ? defs.filter(d => wanted.has(d.id)) : defs);
+        let units = keep(Object.values(UNITS)).map(optionFor);
+        let buildings = keep(Object.values(BUILDINGS)).map(optionFor);
+        const unknown = wanted ? [...wanted].filter(t => !UNITS[t] && !BUILDINGS[t]) : [];
+        const readyCount = units.filter(ready).length + buildings.filter(ready).length;
+        if (ready_only) { units = units.filter(ready); buildings = buildings.filter(ready); }
+        const scope = wanted ? " (filtered)" : "";
         return {
-          content: [{ type: "text", text: `${readyCount(units)} unit type(s) and ${readyCount(buildings)} building type(s) currently ready to build.` }],
-          structuredContent: { units, buildings, techs: [] },
+          content: [{ type: "text", text: `${units.length} unit type(s) and ${buildings.length} building type(s) reported${scope}; ${readyCount} ready to build now.` }],
+          structuredContent: { units, buildings, techs: [], ...(unknown.length ? { unknown_types: unknown } : {}) },
         };
       })),
     },
@@ -491,19 +556,33 @@ export function createObservationTools(lobby, getCache) {
         "enemy entity in fog right now. Returns predicted_winner, a margin (how many times faster you kill them than " +
         "they kill you — under ~1.5 treat it as a coin flip), each side's dps and hp, and how long each side lasts. " +
         "A sustained-damage model over the engine's own unit table: it accounts for hp, attack, cooldown and the " +
-        "counter bonus against the composition actually facing each side, and deliberately ignores range, pathing, " +
-        "terrain, upgrades, veterancy, focus fire, turrets you have not seen and reinforcements. Use it as a go/no-go " +
-        "before committing, not as a simulation.",
+        "counter bonus against the composition actually facing each side, plus how many of each side are expected to " +
+        "be LEFT STANDING (your_survivors/enemy_survivors, from a concentrated-fire pass — the number that tells a " +
+        "close fight apart from a rout). It deliberately ignores range, pathing, " +
+        "terrain, upgrades, veterancy, turrets you have not seen and reinforcements. Use it as a go/no-go " +
+        "before committing, not as a simulation. " +
+        "FOG: the moment you most need this — deciding whether to march on a base you scouted a minute ago — is " +
+        "exactly when those enemy ids are no longer visible. Pass `enemy_composition` instead, e.g. {bastion:8}, to " +
+        "weigh against what you SAW rather than what you can see; combine it with enemy_ids and the two are added. " +
+        "Answering from a stale scout beats committing blind.",
       inputSchema: {
         type: "object",
         properties: {
           seat_handle: { type: "string" },
           your_ids: { type: "array", items: { type: "string" }, description: "Your unit ids. Omit to use every combat unit you own." },
           enemy_ids: { type: "array", items: { type: "string" }, description: "Enemy ids. Omit to use every enemy entity currently visible." },
+          enemy_composition: {
+            type: "object", additionalProperties: { type: "number" },
+            description: "A REMEMBERED or feared enemy force by type and count, e.g. {bastion:8,lancer:2} — weighed at each type's full starting hp, needing no vision at all. Use this when fog has taken the ids you scouted.",
+          },
+          your_composition: {
+            type: "object", additionalProperties: { type: "number" },
+            description: "Optional hypothetical force of your own, e.g. {lancer:10} — \"would ten lancers be enough?\" before you have built them.",
+          },
         },
         required: ["seat_handle"],
       },
-      handler: withSeat(lobby, seatAndProj(getCache, ({ seat, proj, your_ids, enemy_ids }) => {
+      handler: withSeat(lobby, seatAndProj(getCache, ({ seat, proj, your_ids, enemy_ids, enemy_composition, your_composition }) => {
         if (seat.owner === SPECTATOR_SEAT) return rejection("watch-only-handle: this weighs YOUR force against an enemy's; join a match to ask this");
         const all = [...proj.units, ...proj.buildings];
         const byId = new Map(all.map(e => [e.id, e]));
@@ -520,9 +599,31 @@ export function createObservationTools(lobby, getCache) {
         if (!mine.ok || !theirs.ok) return rejection(`not-visible: ${[...(mine.missing ?? []), ...(theirs.missing ?? [])].join(", ")}`);
         const wrongOwner = mine.list.filter(e => e.owner !== seat.owner).map(e => e.id);
         if (wrongOwner.length) return rejection(`not-owner: ${wrongOwner.join(", ")} — your_ids must be your own entities`);
+        // A remembered force is expanded into stand-in entities at each type's FULL starting hp —
+        // the honest reading of "there were 8 bastions there", since nothing tells us how damaged
+        // they are now. Unknown type names are refused rather than silently contributing nothing,
+        // which would quietly answer a smaller fight than the one asked about.
+        const synth = spec => {
+          const out = [], bad = [];
+          for (const [type, count] of Object.entries(spec || {})) {
+            const def = UNITS[type] ?? BUILDINGS[type];
+            if (!def) { bad.push(type); continue; }
+            for (let i = 0; i < Math.max(0, Math.floor(count)); i++) out.push({ id: `${type}#${i}`, type, hp: def.hp });
+          }
+          return { out, bad };
+        };
+        const theirSynth = synth(enemy_composition), mySynth = synth(your_composition);
+        if (theirSynth.bad.length || mySynth.bad.length) {
+          return rejection(`unknown-type: ${[...theirSynth.bad, ...mySynth.bad].join(", ")} — not a unit or building type in this game`);
+        }
+        // Named ids and a remembered composition ADD rather than replace: "the 3 lancers I can see,
+        // plus the 8 bastions I scouted" is one force, and asking it as two calls answers neither.
+        mine.list = [...mine.list, ...mySynth.out];
+        theirs.list = [...theirs.list, ...theirSynth.out];
+        const assumed = theirSynth.out.length > 0 || mySynth.out.length > 0;
         if (!mine.list.length || !theirs.list.length) {
           return {
-            content: [{ type: "text", text: theirs.list.length ? "You have no combat units to weigh." : "No enemy entities visible to weigh against — remember that fog hides them, it does not remove them." }],
+            content: [{ type: "text", text: theirs.list.length ? "You have no combat units to weigh." : "No enemy entities visible to weigh against — fog hides them, it does not remove them. Pass enemy_composition (e.g. {bastion:8}) to weigh against what you scouted earlier." }],
             structuredContent: { predicted_winner: null, your_force: mine.list.length, enemy_force: theirs.list.length },
           };
         }
@@ -530,7 +631,10 @@ export function createObservationTools(lobby, getCache) {
         return {
           content: [{ type: "text", text: `${mine.list.length} of yours vs ${theirs.list.length} of theirs: ${estimate.predicted_winner === "you" ? "you win" : estimate.predicted_winner === "enemy" ? "YOU LOSE THIS FIGHT" : estimate.predicted_winner}${estimate.margin ? ` (margin ${estimate.margin}x, ${estimate.confidence} confidence)` : ""}.` }],
           structuredContent: { ...estimate, your_force: mine.list.length, enemy_force: theirs.list.length,
-            note: "approximate: ignores range, terrain, upgrades, veterancy, focus fire and anything outside your fog" },
+            ...(assumed ? { assumed_composition: true } : {}),
+            note: assumed
+              ? "approximate, and partly ASSUMED: remembered units are counted at full hp, and anything that has changed since you scouted is not reflected. Ignores range, terrain, upgrades and veterancy."
+              : "approximate: ignores range, terrain, upgrades, veterancy and anything outside your fog" },
         };
       })),
     },
