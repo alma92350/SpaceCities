@@ -55,9 +55,15 @@ tens of seconds while the sim runs at 20 ticks a second.
 
 Two more that answer questions you used to have to guess at:
 
-- **`estimate_engagement({your_ids, enemy_ids})`** — who wins, with a margin. Under ~1.5x it is a
-  coin flip. **Call it before every commit.** The counter table tells you lancer beats bastion; it
-  does not tell you that your one lancer loses to their three.
+- **`estimate_engagement({your_ids, enemy_ids})`** — who wins, with a margin, and how many of each
+  side are left standing (`your_survivors`/`enemy_survivors` — read these, not just the margin: a
+  0.76x margin and "you lose all five, they keep three" are the same fact, and only one of them
+  reads as a rout). Under ~1.5x it is a coin flip. **Call it before every commit.** The counter
+  table tells you lancer beats bastion; it does not tell you that your one lancer loses to their
+  three. **If fog has taken the ids, do not skip the call** — pass `enemy_composition:{bastion:8}`
+  and weigh what you scouted. Asking with a stale number beats committing blind; a recorded match
+  hit exactly this, wrote "fog blocks the estimate — committing", and fed five lancers into eight
+  bastions. To size a force before building it, ask `your_composition:{lancer:20}` instead.
 - **`list_entities`'s `enemy_last_seen`** — every enemy you have ever had in fog, with
   `age_seconds`. Use it instead of concluding anything from an empty list.
 
@@ -332,7 +338,9 @@ took the map. Note the turret needs **crystals** — hence the 60s checklist ite
   defenders died for zero further losses, and the undefended buildings fell anyway. If `attackHit`
   events show your units hitting a building `targetType` while enemy units hit yours, retarget now.
 - **Don't attack into an even or losing count — and check that with `estimate_engagement`, not by
-  eye.** Pass your ids and the defenders' ids and read `predicted_winner` and `margin`: under ~1.5x
+  eye.** Fog is not an excuse to skip it: `enemy_composition` answers from your last scout, and
+  `assumed_composition:true` in the reply tells you the answer rests on it. Pass your ids and the
+  defenders' ids and read `predicted_winner`, `margin` and the survivor counts: under ~1.5x
   it is a coin flip, and terrain, turrets you have not seen and arrival order all cut against the
   attacker. One attack went in 3 rangers vs 5 bastions and achieved nothing; another match fed
   single lancers into a 4-unit ball three times running. Both would have been answered in one call.

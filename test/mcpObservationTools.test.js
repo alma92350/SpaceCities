@@ -691,3 +691,135 @@ test("an enemy gatherer's cargo and haul leg stay hidden — fog does not reveal
   assert.equal(theirs.cargo, undefined);
   assert.equal(theirs.gather_phase, undefined);
 });
+
+/* ============================================================
+   get_tech_options narrowing, and estimate_engagement answering under fog. Both come straight out
+   of recorded agent matches: the full tech table was being re-read in full to check one unit, and
+   the engagement estimate — the one call that would have prevented the decisive loss in three
+   recorded matches — was unanswerable at the exact moment it was needed, because the enemy force
+   the agent had scouted a minute earlier was no longer visible ("Fog blocks the estimate —
+   committing", followed by feeding five Lancers into eight Bastions).
+   ============================================================ */
+
+function techFixture() {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  return { seat_handle, mcp: mcpWith(lobby, match.id, { player: projectFor(state, "player") }) };
+}
+
+test("get_tech_options: `only` narrows the table to the types actually being weighed", async () => {
+  const { seat_handle, mcp } = techFixture();
+  const full = (await callTool(mcp, "get_tech_options", { seat_handle })).body.result.structuredContent;
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle, only: ["lancer", "foundry"] });
+  const sc = body.result.structuredContent;
+  assert.deepEqual(sc.units.map(u => u.type), ["lancer"]);
+  assert.deepEqual(sc.buildings.map(b => b.type), ["foundry"]);
+  assert.ok(full.units.length > 1 && full.buildings.length > 1, "the unfiltered table is genuinely the long one");
+  // Narrowing must not change what it SAYS about a type, only how many it reports.
+  assert.deepEqual(sc.units[0], full.units.find(u => u.type === "lancer"));
+});
+
+test("get_tech_options: an unrecognised name in `only` is reported, never silently dropped", async () => {
+  const { seat_handle, mcp } = techFixture();
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle, only: ["lancer", "spinnaker"] });
+  const sc = body.result.structuredContent;
+  assert.deepEqual(sc.unknown_types, ["spinnaker"]);
+  // A typo must not read as "that type exists but is unavailable to you".
+  assert.deepEqual(sc.units.map(u => u.type), ["lancer"]);
+});
+
+test("get_tech_options: `ready_only` reports just what could be started right now", async () => {
+  const { seat_handle, mcp } = techFixture();
+  const { body } = await callTool(mcp, "get_tech_options", { seat_handle, ready_only: true });
+  const sc = body.result.structuredContent;
+  const all = [...sc.units, ...sc.buildings];
+  assert.ok(all.length > 0, "a fresh base can start something");
+  for (const o of all) {
+    assert.equal(o.prereqs_met, true, `${o.type} reported ready without its prereqs`);
+    assert.equal(o.affordable, true, `${o.type} reported ready but unaffordable`);
+    assert.notEqual(o.buildable, false);
+    assert.notEqual(o.supply_blocked, true);
+  }
+  const full = (await callTool(mcp, "get_tech_options", { seat_handle })).body.result.structuredContent;
+  assert.ok(all.length < full.units.length + full.buildings.length, "ready_only actually narrows the table");
+});
+
+test("estimate_engagement: enemy_composition answers from a stale scout, with no vision at all", async () => {
+  const { state } = fixture();
+  const base = state.map.bases.player;
+  const mine = [];
+  for (let i = 0; i < 5; i++) {
+    const u = makeUnit("lancer", "player", base.x + i * 5, base.y);
+    state.units.set(u.id, u);
+    mine.push(u.id);
+  }
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+
+  // Nothing of the enemy's is visible — exactly the state the losing agent was in.
+  const blind = await callTool(mcp, "estimate_engagement", { seat_handle, your_ids: mine });
+  assert.equal(blind.body.result.structuredContent.predicted_winner, null);
+  assert.match(blind.body.result.content[0].text, /enemy_composition/, "the dead end must name the way out of it");
+
+  // The real fight from the transcript: 5 Lancers into 8 Bastions.
+  const { body } = await callTool(mcp, "estimate_engagement", { seat_handle, your_ids: mine, enemy_composition: { bastion: 8 } });
+  const sc = body.result.structuredContent;
+  assert.equal(sc.predicted_winner, "enemy");
+  assert.equal(sc.enemy_force, 8);
+  assert.equal(sc.assumed_composition, true);
+  assert.match(sc.note, /ASSUMED/);
+  // The survivor count is the point: "margin 0.76x" reads as close, "you lose all five" does not.
+  assert.equal(sc.your_survivors, 0);
+  assert.ok(sc.enemy_survivors > 0, "the side that wins this keeps units");
+});
+
+test("estimate_engagement: a remembered composition ADDS to the ids you can still see", async () => {
+  const { state } = fixture();
+  const base = state.map.bases.player;
+  const mine = makeUnit("lancer", "player", base.x, base.y);
+  state.units.set(mine.id, mine);
+  const seen = makeUnit("bastion", "ai", base.x + 30, base.y + 10);
+  state.units.set(seen.id, seen);
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+
+  const { body } = await callTool(mcp, "estimate_engagement", {
+    seat_handle, your_ids: [mine.id], enemy_ids: [seen.id], enemy_composition: { bastion: 2 },
+  });
+  assert.equal(body.result.structuredContent.enemy_force, 3, "one seen plus two remembered is one force of three");
+});
+
+test("estimate_engagement: your_composition weighs an army you have not built yet", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+
+  const five = await callTool(mcp, "estimate_engagement", {
+    seat_handle, your_ids: [], your_composition: { lancer: 5 }, enemy_composition: { bastion: 8 },
+  });
+  const twenty = await callTool(mcp, "estimate_engagement", {
+    seat_handle, your_ids: [], your_composition: { lancer: 20 }, enemy_composition: { bastion: 8 },
+  });
+  assert.equal(five.body.result.structuredContent.predicted_winner, "enemy");
+  assert.equal(twenty.body.result.structuredContent.predicted_winner, "you", "enough Lancers do beat the wall — the question was always how many");
+  assert.ok(twenty.body.result.structuredContent.your_survivors > 0);
+});
+
+test("estimate_engagement: an unknown type in a composition is refused, not counted as nothing", async () => {
+  const { state } = fixture();
+  const lobby = createLobby();
+  const match = lobby.createMatch({ seatKinds: ["open", "open"] });
+  const seat_handle = joinedSeat(lobby, match.id, 0);
+  const mcp = mcpWith(lobby, match.id, { player: projectFor(state, "player") });
+  const { body } = await callTool(mcp, "estimate_engagement", { seat_handle, enemy_composition: { bastion: 4, spinnaker: 2 } });
+  assert.equal(body.result.isError, true);
+  assert.match(body.result.content[0].text, /unknown-type: spinnaker/);
+});
