@@ -265,7 +265,10 @@ build toward the consumer or move that worker back to ore.
 - A `build` refused with affordability and prereqs both fine is usually **placement**: retry 40+
   units away from other buildings.
 - **`setRally` on the barracks is worth one call:** `{t:"setRally", building:"<barracksId>", x, y}`
-  pointed at the command center means every new unit walks home to the defensive position instead of
+  — and note that, like every `{t:...}` form in this section, it is a **command passed to
+  `issue_command`, not a tool of its own**. Calling `mcp__spacecities__setRally` errors with *"No
+  such tool available"*; a recorded match lost its rally point mid-rebuild to exactly that. Pointed
+  at the command center means every new unit walks home to the defensive position instead of
   piling up at the barracks. Forgetting it lost a match outright.
 
 ## Home defense — the most expensive lesson in this file
@@ -352,9 +355,17 @@ took the map. Note the turret needs **crystals** — hence the 60s checklist ite
 - **Don't attack into an even or losing count — and check that with `estimate_engagement`, not by
   eye.** Fog is not an excuse to skip it: `enemy_composition` answers from your last scout, and
   `assumed_composition:true` in the reply tells you the answer rests on it. Pass your ids and the
-  defenders' ids and read `predicted_winner`, `margin` and the survivor counts: under ~1.5x
-  it is a coin flip, and terrain, turrets you have not seen and arrival order all cut against the
-  attacker. One attack went in 3 rangers vs 5 bastions and achieved nothing; another match fed
+  defenders' ids and read `predicted_winner`, `margin` and the survivor counts. **The bar is not
+  one number — it depends on where the fight happens:**
+    - **A fight in the field** (their raid at your base, an army you catch in the open): under
+      ~1.5x is a coin flip. Above it, commit.
+    - **An assault on their base needs far more, and 1.5x is nowhere near enough.** The call prices
+      ONE engagement against the units you name it. A base is a running fight: the defender
+      reinforces from its barracks mid-fight, fights under a turret you may not have seen, and pays
+      no travel time, while you arrive tired and piecemeal. **A 3.32x estimate lost an entire strike
+      force; the winning assault in that same match went in at 11.79x.** Treat anything under ~3x as
+      a field-fight number misapplied, and wait for the estimate to read as a rout.
+  One attack went in 3 rangers vs 5 bastions and achieved nothing; another match fed
   single lancers into a 4-unit ball three times running. Both would have been answered in one call.
 - **Arrive together or not at all.** A unit that walks out as it spawns fights alone and dies alone.
   `setRally` to the garrison point, gather the ball at home, then commit it with ONE command
@@ -479,10 +490,17 @@ Neither side out-mechaniced the other. Four things separated them:
 
 1. **Incremental commitment is the trap.** "Attack with most of the army, keep a modest home guard,
    rebuild, attack again" is four forces that each lose, when one force built from all four would
-   have won. If you cannot commit at **≥1.5x the defender's scouted supply** (check
-   `estimate_engagement`), you are not ready to attack — you are ready to keep massing. **A second
-   attempt at the same base with a similar-sized force is the same decision, and it has already
-   failed once.**
+   have won. If you cannot commit at a margin that reads as a **rout** (see the margin bar below),
+   you are not ready to attack — you are ready to keep massing. **A second attempt at the same base
+   with a similar-sized force is the same decision, and it has already failed once.**
+
+   **The garrison floor comes off the top, not out of the strike force.** Count the home guard
+   first, then ask whether what is LEFT clears the bar. If it doesn't, you are not ready — the
+   answer is never to borrow from home. A 708s loss did exactly that: it committed 5 bastions + 1
+   lancer at a reported **3.32x**, killed their scout and their entire worker line on the way in,
+   and then had nothing at home when the counter-raid arrived. Its own post-mortem names it:
+   *"committing the entire army in one strike rather than keeping a home garrison."* "One decisive
+   force" and "an empty base" are not the same sentence.
 2. **Defence is a resource multiplier, not a delay.** The defender pays no travel time, fights under
    its turret, and reinforces from the barracks mid-fight. The winner's three defensive wins cost it
    almost nothing and cost the attacker everything. **Against an opponent that keeps attacking you,
@@ -498,6 +516,14 @@ Neither side out-mechaniced the other. Four things separated them:
 **The tell, and it is loud:** if you have attacked the same base twice and been wiped twice, the
 plan is wrong, not the execution. Stop. Turtle, take the wrecks, mass to a force that
 `estimate_engagement` calls a rout, and go once.
+
+**Confirmed in a second two-sided match (708s, korrath 0.6x)**, where the two seats split on
+exactly this and the winner's log reads like this section: it let the enemy strike force come to its
+defended base and killed it there, rebuilt an economy that had lost its ENTIRE worker line and its
+foundry off a 1180-ore wreck at distance 107, re-scouted, and then attacked once at 11.79x and ended
+the match. The loser attacked first, at 3.32x, and never got a second economy. Losing your worker
+line is survivable; losing your worker line at *their* base is not, because the wrecks that would
+have paid for the rebuild are sitting under their army.
 
 **One caveat, so this is not read as "never attack":** the winner did have to attack eventually, and
 it won by doing so — *after* the opponent's army was spent against its garrison. Turtling is how you
